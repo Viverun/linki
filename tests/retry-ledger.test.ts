@@ -332,3 +332,56 @@ test("1b mark_delivered is rejected for a CONNECT step (pinning the implicit cas
     (db.prepare("SELECT message_sent_at FROM targets WHERE id = ?").get(ids.target) as { message_sent_at: string | null }).message_sent_at,
     null, "and no message timestamp is invented for a connect step");
 });
+
+// ─── R2: cross-run scoping and input validation ──────────────────────────────
+// Not F4 tenancy — intra-user correctness in a rewritten route. The same target
+// is routinely enrolled in several campaigns.
+
+test("R2 retrying run A does not touch run B's track for the same target", () => {
+  const db = getDb();
+  const a = scenario();                                   // run A, failed track
+  // Run B enrols the SAME target, also with a failed track.
+  const n = "b-cross";
+  db.prepare("INSERT INTO workflows (id, name) VALUES (?, ?)").run(`w-${n}`, "WF B");
+  db.prepare(
+    `INSERT INTO workflow_steps (id, workflow_id, step_order, track, step_type, delay_seconds, message_body, message_position, ai_enabled)
+     VALUES (?, ?, 1, 'linkedin', 'message', 0, 'body', 1, 0)`
+  ).run(`s-${n}`, `w-${n}`);
+  db.prepare("INSERT INTO runs (id, workflow_id, status) VALUES (?, ?, 'running')").run(`r-${n}`, `w-${n}`);
+  db.prepare("INSERT INTO run_profiles (id, run_id, target_id) VALUES (?, ?, ?)").run(`p-${n}`, `r-${n}`, a.target);
+  db.prepare(
+    `INSERT INTO run_profile_tracks (id, run_profile_id, track, state, current_step, error_message)
+     VALUES (?, ?, 'linkedin', 'failed', 0, 'boom')`
+  ).run(`t-${n}`, `p-${n}`);
+
+  const r = callRetry(a.run, { target_ids: [a.target] });
+
+  const body = r.body as { outcomes: Array<{ track_id: string }> };
+  assert.equal(body.outcomes.length, 1, "only one track — run B's must not be selected");
+  assert.equal(body.outcomes[0].track_id, a.track);
+  assert.equal(trackOf(a.track).state, "in_progress", "run A re-armed");
+  assert.equal(trackOf(`t-${n}`).state, "failed", "run B's track for the same person is untouched");
+});
+
+test("R2 a target_id that belongs to another run is silently a no-op, not a cross-run write", () => {
+  const db = getDb();
+  const a = scenario();
+  const other = scenario();   // a different run entirely
+
+  const r = callRetry(a.run, { target_ids: [other.target] });
+
+  const body = r.body as { retried: number; outcomes: unknown[] };
+  assert.equal(body.retried, 0);
+  assert.equal(body.outcomes.length, 0, "no candidate matched");
+  assert.equal(trackOf(other.track).state, "failed", "the other run's track is untouched");
+  assert.ok(db.prepare("PRAGMA foreign_key_check").all().length === 0);
+});
+
+test("R2 empty / missing / non-array target_ids are rejected with 400 and zero mutations", () => {
+  const a = scenario();
+  for (const bad of [[], undefined, null, "not-an-array", 42, {}]) {
+    const r = callRetry(a.run, { target_ids: bad });
+    assert.equal(r.status, 400, `target_ids=${JSON.stringify(bad)} must be rejected`);
+    assert.equal(trackOf(a.track).state, "failed", "no mutation");
+  }
+});

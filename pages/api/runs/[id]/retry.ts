@@ -34,6 +34,18 @@ interface TrackOutcome {
 const OPERATOR_ASSERTION = "operator-asserted delivery (not system-confirmed)";
 
 /**
+ * Records who overrode the fail-closed default, so a duplicate delivered by
+ * explicit operator choice is never mistaken for a system decision.
+ *
+ * The row is moved to 'abandoned' because that is the one state
+ * sideEffectBegin's upsert will re-arm, and it increments attempt_count so the
+ * override is counted rather than erased. 'abandoned' here is a statement about
+ * what the SYSTEM may now do — not a claim that nothing was delivered — which is
+ * exactly why the operator's override is written into error_message beside it.
+ */
+const OPERATOR_FORCED_RESEND = "operator forced a resend of a possibly-delivered message";
+
+/**
  * - "skip"           default. A possibly-delivered message is left alone and the
  *                    track stays failed.
  * - "resend"         operator accepts the duplicate risk and re-arms.
@@ -55,7 +67,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const runId = req.query.id as string;
   const { target_ids, resolve } = req.body as { target_ids: string[]; resolve?: Resolution };
 
-  if (!target_ids?.length) return res.status(400).json({ error: "target_ids required" });
+  // Array.isArray, not a truthy .length check: a string has a length, so
+  // `target_ids: "abc"` passed the old guard and then reached .map().
+  if (!Array.isArray(target_ids) || target_ids.length === 0 || !target_ids.every(t => typeof t === "string")) {
+    return res.status(400).json({ error: "target_ids must be a non-empty array of strings" });
+  }
   if (resolve !== undefined && !RESOLUTIONS.includes(resolve)) {
     return res.status(400).json({ error: `resolve must be one of ${RESOLUTIONS.map(r => `'${r}'`).join(", ")}` });
   }
@@ -124,6 +140,25 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
          WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
       ).get(c.run_profile_id, c.track, stepRefOf(step), action) as { status: string; step_ref: string } | undefined;
 
+      // The operator override comes FIRST, because it means "send again
+      // regardless of what the ledger says". Handled below the confirmed/
+      // in_flight branches it would be swallowed by them: a confirmed row would
+      // advance past the step instead of resending, so a second forced resend
+      // silently did nothing.
+      if (ledger && resolution === "resend") {
+        db.prepare(
+          `UPDATE step_side_effects SET status = 'abandoned', error_message = ?
+           WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
+        ).run(OPERATOR_FORCED_RESEND, c.run_profile_id, c.track, ledger.step_ref, action);
+        rearm.run(c.id);
+        console.warn(`[retry] run=${runId} track=${c.id} operator FORCED resend of a ${ledger.status} ${action}`);
+        outcomes.push({
+          track_id: c.id, target_id: c.target_id, outcome: "rearmed",
+          reason: `operator forced resend of a possibly-delivered ${action}`,
+        });
+        continue;
+      }
+
       if (ledger?.status === "confirmed") {
         // Already delivered. Re-arming in place would re-send, so move past it.
         advance.run(c.current_step + 1, c.id);
@@ -156,11 +191,6 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
           });
           continue;
         }
-        if (resolution === "resend") {
-          rearm.run(c.id);
-          outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "rearmed", reason: `operator forced resend of a possibly-delivered ${action}` });
-          continue;
-        }
         outcomes.push({
           track_id: c.id,
           target_id: c.target_id,
@@ -181,11 +211,6 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "rearmed" });
     }
   })();
-
-  if (resolution === "resend") {
-    const forced = outcomes.filter(o => o.reason?.includes("forced resend")).length;
-    if (forced > 0) console.warn(`[retry] run=${runId} operator FORCED resend of ${forced} possibly-delivered action(s)`);
-  }
 
   const retried = outcomes.filter(o => o.outcome === "rearmed" || o.outcome === "advanced" || o.outcome === "marked_delivered").length;
   // `ok` and `retried` keep their original names and meaning; `outcomes` is additive.

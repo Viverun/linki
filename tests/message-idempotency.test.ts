@@ -406,3 +406,87 @@ test("19b MessagingUrnUnresolvedError is provably pre-click and DOES abandon", a
   assert.equal(sends.length, 0);
   assert.equal(ledgerRows(s.ids.profile)[0].status, "abandoned");
 });
+
+// ─── R1: resolve:"resend" must actually resend ───────────────────────────────
+// This is the one path deliberately allowed to deliver a duplicate. An option
+// that claims to do something dangerous and instead does nothing is worse than
+// either behaviour, because the operator reaches for it exactly when they need
+// to know what happened.
+
+const { default: retryHandler } = await import("@/pages/api/runs/[id]/retry");
+
+function callRetry(runId: string, body: unknown) {
+  const cap: { status: number; body: unknown } = { status: 200, body: undefined };
+  const res = {
+    status(c: number) { cap.status = c; return this; },
+    json(b: unknown) { cap.body = b; return this; },
+    end() { return this; },
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  retryHandler({ method: "POST", query: { id: runId }, body } as any, res as any);
+  return cap;
+}
+
+const ledgerRow = (profileId: string) =>
+  getDb().prepare("SELECT status, attempt_count, error_message FROM step_side_effects WHERE run_profile_id = ?").get(profileId) as
+    { status: string; attempt_count: number; error_message: string | null };
+
+test("R1 resend on a blocked in-flight message performs EXACTLY ONE send", async () => {
+  reset();
+  const s = scenario();
+  // The state an operator actually faces: a possibly-delivered message, blocked.
+  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", bodyFingerprint(RENDERED));
+  getDb().prepare("UPDATE run_profile_tracks SET state = 'failed' WHERE id = ?").run(s.ids.track);
+
+  const r = callRetry(s.ids.run, { target_ids: [s.ids.target], resolve: "resend" });
+  assert.equal((r.body as { outcomes: Array<{ outcome: string }> }).outcomes[0].outcome, "rearmed");
+
+  // Re-entry must now genuinely send — not refuse, not wedge.
+  const tr = { ...(getDb().prepare("SELECT * FROM run_profile_tracks WHERE id = ?").get(s.ids.track) as object),
+    run_id: s.ids.run, target_id: s.ids.target, email_account_id: null, account_id: "acct-x", workflow_id: s.ids.wf };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await executeStep(getDb(), s.ids.run, tr as any, s.target as any, s.stepRows as any, "acct-x", LIMITS);
+
+  assert.equal(sends.length, 1, "exactly one send — not zero (wedged) and not two");
+  const led = ledgerRow(s.ids.profile);
+  assert.equal(led.status, "confirmed");
+  assert.ok(led.attempt_count >= 2, `attempt_count must increment, got ${led.attempt_count}`);
+  assert.ok(targetOf(s.ids.target).message_sent_at, "message_sent_at stamped");
+  assert.equal(trackOf(s.ids.track).current_step, 1, "track advanced");
+});
+
+test("R1 resend twice in a row yields two sends, not a wedge", async () => {
+  reset();
+  const s = scenario();
+  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", bodyFingerprint(RENDERED));
+  getDb().prepare("UPDATE run_profile_tracks SET state = 'failed', current_step = 0 WHERE id = ?").run(s.ids.track);
+
+  const runOnce = async () => {
+    callRetry(s.ids.run, { target_ids: [s.ids.target], resolve: "resend" });
+    const tr = { ...(getDb().prepare("SELECT * FROM run_profile_tracks WHERE id = ?").get(s.ids.track) as object),
+      run_id: s.ids.run, target_id: s.ids.target, email_account_id: null, account_id: "acct-x", workflow_id: s.ids.wf };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await executeStep(getDb(), s.ids.run, tr as any, s.target as any, s.stepRows as any, "acct-x", LIMITS);
+  };
+
+  await runOnce();
+  // Reset the track to the same step so a second forced resend is possible.
+  getDb().prepare("UPDATE run_profile_tracks SET state = 'failed', current_step = 0 WHERE id = ?").run(s.ids.track);
+  await runOnce();
+
+  assert.equal(sends.length, 2, "the operator's second forced resend must also send");
+  assert.ok(ledgerRow(s.ids.profile).attempt_count >= 3, "every attempt is counted");
+});
+
+test("R1 the forced resend is recorded on the ledger row, not just logged", async () => {
+  reset();
+  const s = scenario();
+  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", bodyFingerprint(RENDERED));
+  getDb().prepare("UPDATE run_profile_tracks SET state = 'failed' WHERE id = ?").run(s.ids.track);
+
+  callRetry(s.ids.run, { target_ids: [s.ids.target], resolve: "resend" });
+
+  const led = ledgerRow(s.ids.profile);
+  assert.equal(led.status, "abandoned", "the row is explicitly transitioned so re-entry is a genuine first attempt");
+  assert.match(led.error_message ?? "", /operator/i, "and the override is attributable in the record");
+});
