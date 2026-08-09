@@ -1,6 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
-import { encryptSecret } from "@/lib/crypto";
+import {
+  persistAuthenticatedState,
+  AuthenticationNotEstablishedError,
+} from "@/lib/linkedin/session";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end();
@@ -37,10 +40,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     origins: [],
   };
 
-  db.prepare("UPDATE accounts SET cookies_json = ?, is_authenticated = 1 WHERE id = ?").run(
-    encryptSecret(JSON.stringify(storageState)),
-    id
-  );
+  // Same guard as the login flows: the flag is only ever written alongside a
+  // state carrying a non-empty li_at (a whitespace-only paste reaches here).
+  try {
+    persistAuthenticatedState(id, storageState, "cookie-paste");
+  } catch (e) {
+    if (e instanceof AuthenticationNotEstablishedError) {
+      return res.status(400).json({ error: "A valid li_at cookie is required" });
+    }
+    throw e;
+  }
 
   // Evict the cached browser context so next import uses the new cookies
   const { closeSession } = await import("@/lib/linkedin/session");

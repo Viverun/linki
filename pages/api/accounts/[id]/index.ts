@@ -37,8 +37,22 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "DELETE") {
-    db.prepare("DELETE FROM accounts WHERE id = ?").run(id);
-    return res.status(204).end();
+    try {
+      const { changes } = db.prepare("DELETE FROM accounts WHERE id = ?").run(id);
+      if (changes === 0) return res.status(404).json({ error: "Not found" });
+      return res.status(204).end();
+    } catch (err) {
+      // runs.account_id references accounts(id) with no ON DELETE clause, so
+      // SQLite refuses to orphan an account's runs. Report that as a conflict
+      // the caller can act on instead of a 500 the UI can't explain.
+      if ((err as { code?: string }).code === "SQLITE_CONSTRAINT_FOREIGNKEY") {
+        return res.status(409).json({
+          error:
+            "This account still has runs attached. Stop and delete those runs first, then delete the account.",
+        });
+      }
+      throw err;
+    }
   }
 
   res.setHeader("Allow", ["GET", "PUT", "DELETE"]);

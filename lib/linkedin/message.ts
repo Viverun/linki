@@ -2,6 +2,8 @@ import type { Page } from "playwright";
 import { visitProfile } from "./visit";
 
 export class NotConnectedError extends Error {}
+/** Connected, but no messaging URN resolved — never guess the recipient by name. */
+export class MessagingUrnUnresolvedError extends Error {}
 
 export interface SendMessageResult {
   messagingUrn: string | null;
@@ -35,30 +37,34 @@ export async function sendMessage(
   linkedinUrl: string,
   messagingUrn?: string | null
 ): Promise<SendMessageResult> {
-  if (messagingUrn) {
-    const opened = await openComposeByUrn(page, messagingUrn);
-    if (opened) {
-      await sendFromComposeBox(page, text);
-      return { messagingUrn, isFirstDegree: true };
-    }
-  }
-
+  // The live visit is the ONLY authorization. A cached URN used to short-circuit
+  // this entirely — openComposeByUrn() ran first and the profile was never
+  // checked — so a DB degree=1 that had gone stale (or was written from a UI
+  // misread) sent a message to a non-connection with no verification at all.
+  // A URN is an address, never permission.
   const resolved = await visitProfile(page, linkedinUrl);
-  if (resolved.messagingUrn) {
-    const opened = await openComposeByUrn(page, resolved.messagingUrn);
-    if (opened) {
-      await sendFromComposeBox(page, text);
-      return resolved;
-    }
-  }
+
   if (!resolved.isFirstDegree) {
+    // Runner self-healing depends on this: it resets degree/connected_at to NULL.
     throw new NotConnectedError(`${fullName} is not a 1st-degree connection — refusing to message`);
   }
 
-  // Connected, but no message link could be resolved live (unusual layout) —
-  // last-resort fallback to name search.
-  await sendMessageViaTypeahead(page, fullName, text);
-  return resolved;
+  // Connected. Prefer the URN just read from the live profile; fall back to the
+  // cached one only as an address for a confirmed connection.
+  const urn = resolved.messagingUrn ?? messagingUrn ?? null;
+  if (urn && (await openComposeByUrn(page, urn))) {
+    await sendFromComposeBox(page, text);
+    return { messagingUrn: urn, isFirstDegree: true };
+  }
+
+  // Connected, but no messaging URN could be resolved. The old code fell back to
+  // searching LinkedIn's connections typeahead by display name, which is how an
+  // unrelated person with a similar/truncated name got messaged (Jul 2026), and
+  // which in Aug 2026 searched the literal vanity slug "raise-faster". A name is
+  // not an identity: fail with a dedicated error instead of guessing a recipient.
+  throw new MessagingUrnUnresolvedError(
+    `${fullName} appears connected but no messaging URN could be resolved from ${linkedinUrl} — refusing to pick a recipient by name`
+  );
 }
 
 async function openComposeByUrn(page: Page, messagingUrn: string): Promise<boolean> {
@@ -75,45 +81,11 @@ async function openComposeByUrn(page: Page, messagingUrn: string): Promise<boole
   }
 }
 
-async function sendMessageViaTypeahead(page: Page, fullName: string, text: string): Promise<void> {
-  await page.goto("https://www.linkedin.com/messaging/thread/new/", {
-    waitUntil: "domcontentloaded",
-    timeout: 30000,
-  });
-  await page.waitForTimeout(1500 + Math.random() * 1000);
-
-  // Search for recipient by name
-  const searchField = page.locator("input.msg-connections-typeahead__search-field").first();
-  await searchField.waitFor({ timeout: 10000 });
-  await searchField.click();
-  await searchField.type(fullName, { delay: 60 + Math.random() * 40 });
-  await page.waitForTimeout(1500);
-
-  // Select first result — but verify it's actually the intended person first.
-  // This search only returns 1st-degree connections; if the real target isn't
-  // connected, LinkedIn will still happily return a same/similar-named
-  // connection as the top result, and we'd silently message a stranger.
-  const firstResult = page.locator('div[class*="msg-connections-typeahead__search-result-row"]').first();
-  await firstResult.waitFor({ timeout: 8000 });
-  const resultText = (await firstResult.innerText().catch(() => "")).trim();
-  if (!resultNameMatches(resultText, fullName)) {
-    throw new Error(
-      `Typeahead search for "${fullName}" returned a non-matching result ("${resultText.replace(/\s+/g, " ")}") — refusing to send to avoid messaging the wrong person`
-    );
-  }
-  await firstResult.click({ delay: 100 });
-  await page.waitForTimeout(800);
-
-  await sendFromComposeBox(page, text);
-}
-
-function resultNameMatches(resultText: string, fullName: string): boolean {
-  const normalize = (s: string) =>
-    s.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
-  const target = normalize(fullName);
-  if (!target) return false;
-  return normalize(resultText).includes(target);
-}
+// The name-search typeahead that used to live here has been REMOVED, not just
+// bypassed. It selected a recipient by display name, which messaged an
+// unrelated person in Jul 2026 and, in Aug 2026, searched the literal vanity
+// slug "raise-faster". Messaging now requires a resolved URN; there is no
+// name-based path to fall back into, by construction.
 
 async function sendFromComposeBox(page: Page, text: string): Promise<void> {
   // Paste message into compose area

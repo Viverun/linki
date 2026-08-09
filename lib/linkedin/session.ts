@@ -160,15 +160,129 @@ export async function getSessionPage(accountId: string): Promise<Page> {
   return page;
 }
 
+// ─── Authentication guard ─────────────────────────────────────────────────────
+// B7 (Aug 2026 phantom-auth incident): an account was found with
+// is_authenticated = 1 while its persisted storage state contained NO li_at —
+// LinkedIn served /authwall for every navigation, yet the runner kept picking
+// the account up because it only ever consulted the DB flag. The saved state
+// held li_rm, trkCode and trkInfo: the cookies LinkedIn hands a LOGGED-OUT
+// visitor sitting on an authwall. Any one of them can be present on a session
+// that has never authenticated, so none of them is evidence of anything.
+//
+// li_at is the only cookie that constitutes a LinkedIn session. The rule is
+// therefore: is_authenticated = 1 is written ONLY together with a storage
+// state that carries a non-empty li_at. Every write path goes through the
+// helpers below so the flag cannot drift from the browser state again.
+
+/** Shape of the subset of Playwright's storageState() this module reasons about. */
+export type SessionStorageState = {
+  cookies?: { name: string; value: string; domain?: string }[];
+  origins?: unknown[];
+};
+
+/** Raised when a login flow finishes without LinkedIn having issued a session. */
+export class AuthenticationNotEstablishedError extends Error {
+  readonly cookieNames: string[];
+  constructor(accountId: string, cookieNames: string[]) {
+    super(
+      `LinkedIn authentication was not established for account ${accountId}: ` +
+        `the session cookie (li_at) is absent from the browser state. ` +
+        `Cookies present: ${cookieNames.length ? cookieNames.join(", ") : "(none)"}. ` +
+        `This is a logged-out/authwall session — the account has NOT been marked authenticated.`
+    );
+    this.name = "AuthenticationNotEstablishedError";
+    this.cookieNames = cookieNames;
+  }
+}
+
+/**
+ * The single source of truth for "is this browser state actually logged in?".
+ * Returns the li_at cookie, or null. Deliberately narrow: only li_at counts,
+ * it must carry a non-empty value, and (when the state records a domain) it
+ * must belong to LinkedIn.
+ */
+export function findAuthCookie(
+  state: SessionStorageState | null | undefined
+): { name: string; value: string } | null {
+  const cookies = state?.cookies;
+  if (!Array.isArray(cookies)) return null;
+  for (const c of cookies) {
+    if (!c || c.name !== "li_at") continue;
+    if (typeof c.value !== "string" || c.value.trim() === "") continue;
+    if (typeof c.domain === "string" && c.domain !== "" && !c.domain.includes("linkedin.com")) continue;
+    return { name: c.name, value: c.value };
+  }
+  return null;
+}
+
+/** True only when `state` proves an established LinkedIn session. */
+export function isAuthenticatedStorageState(state: SessionStorageState | null | undefined): boolean {
+  return findAuthCookie(state) !== null;
+}
+
+function cookieNamesOf(state: SessionStorageState | null | undefined): string[] {
+  return Array.isArray(state?.cookies) ? state!.cookies!.map(c => c?.name).filter(Boolean) : [];
+}
+
+/**
+ * Persist a storage state as an authenticated session. Writes
+ * is_authenticated = 1 if and only if li_at is present; otherwise writes
+ * nothing and throws, so no caller can report a login as successful.
+ */
+export function persistAuthenticatedState(
+  accountId: string,
+  state: SessionStorageState,
+  source: string
+): void {
+  if (!isAuthenticatedStorageState(state)) {
+    const names = cookieNamesOf(state);
+    console.error(
+      `[auth] ${source}: REFUSING to mark account ${accountId} authenticated — no li_at in the ` +
+        `browser state (LinkedIn session was never established). Cookies present: ` +
+        `${names.length ? names.join(", ") : "(none)"}. Cookies such as li_rm/trkCode/trkInfo are ` +
+        `served to logged-out visitors and are not proof of authentication.`
+    );
+    throw new AuthenticationNotEstablishedError(accountId, names);
+  }
+  getDb()
+    .prepare("UPDATE accounts SET cookies_json = ?, is_authenticated = 1 WHERE id = ?")
+    .run(encryptSecret(JSON.stringify(state)), accountId);
+}
+
+/**
+ * Refresh the stored cookies for a live session (called by the runner after
+ * each action to keep rotating cookies fresh).
+ *
+ * Non-throwing by contract: the runner calls this immediately BEFORE recording
+ * a sent invite/message, so raising here would lose the record of an action
+ * LinkedIn has already performed. When the session has died mid-run we
+ * therefore clear is_authenticated rather than throw — the account stops being
+ * picked up, and the existing SessionExpiredError path handles the in-flight
+ * work. The one thing that never happens is writing is_authenticated = 1 for a
+ * state with no li_at.
+ */
+export function refreshStoredSessionState(
+  accountId: string,
+  state: SessionStorageState
+): "saved" | "cleared" {
+  if (!isAuthenticatedStorageState(state)) {
+    const names = cookieNamesOf(state);
+    console.error(
+      `[auth] saveSessionState: account ${accountId} lost its LinkedIn session — li_at is gone ` +
+        `from the live browser context (cookies present: ${names.length ? names.join(", ") : "(none)"}). ` +
+        `Clearing is_authenticated and keeping the previous stored state; re-authentication is required.`
+    );
+    getDb().prepare("UPDATE accounts SET is_authenticated = 0 WHERE id = ?").run(accountId);
+    return "cleared";
+  }
+  persistAuthenticatedState(accountId, state, "saveSessionState");
+  return "saved";
+}
+
 export async function saveSessionState(accountId: string): Promise<void> {
   const ctx = contexts.get(accountId);
   if (!ctx) return;
-  const db = getDb();
-  const state = await ctx.storageState();
-  db.prepare("UPDATE accounts SET cookies_json = ?, is_authenticated = 1 WHERE id = ?").run(
-    encryptSecret(JSON.stringify(state)),
-    accountId
-  );
+  refreshStoredSessionState(accountId, (await ctx.storageState()) as SessionStorageState);
 }
 
 export async function closeSession(accountId: string): Promise<void> {
@@ -241,14 +355,14 @@ export async function authenticateAccount(accountId: string): Promise<void> {
     // Wait up to 3 minutes for the user to complete login and reach /feed
     await page.waitForURL("**/feed/**", { timeout: 180_000 });
 
-    // Save full storage state (cookies + localStorage) to DB
-    const state = await ctx.storageState();
-    db.prepare("UPDATE accounts SET cookies_json = ?, is_authenticated = 1 WHERE id = ?").run(
-      encryptSecret(JSON.stringify(state)),
-      accountId
-    );
-
-    await ctx.close();
+    // Save full storage state (cookies + localStorage) to DB. Guarded: reaching
+    // /feed is not by itself proof of a session — only li_at is.
+    const state = (await ctx.storageState()) as SessionStorageState;
+    try {
+      persistAuthenticatedState(accountId, state, "authenticateAccount");
+    } finally {
+      await ctx.close();
+    }
   } finally {
     await visibleBrowser.close();
   }
@@ -304,6 +418,12 @@ function sweepPendingLogins(): void {
  * calling storageState(), capturing the FULL session the runner needs.
  * Best-effort: if the account has no Sales Nav seat the nav simply doesn't add
  * the seat cookie — the rest of the (regular-LinkedIn) session is still saved.
+ *
+ * The Sales Nav navigation stays best-effort, but its failure is now LOGGED
+ * rather than silently dropped, and — critically — it can no longer produce a
+ * false "authenticated": if that navigation lands on an authwall (i.e. the
+ * login never really took), the li_at check below refuses the write and throws.
+ * Callers surface that as a login error.
  */
 async function persistLogin(accountId: string, ctx: BrowserContext, page?: Page): Promise<void> {
   if (page) {
@@ -311,16 +431,16 @@ async function persistLogin(accountId: string, ctx: BrowserContext, page?: Page)
       await page.goto("https://www.linkedin.com/sales/home", { waitUntil: "domcontentloaded", timeout: 30_000 });
       // Let Sales Nav's bootstrap requests fire so li_ep_auth_context is set.
       await page.waitForTimeout(4_000);
-    } catch {
-      // Non-fatal — a missing seat / slow load must not fail the whole login.
+    } catch (e) {
+      // Non-fatal for the seat cookie — a missing seat / slow load must not fail
+      // the login on its own. Authentication itself is decided by li_at below.
+      console.warn(`[login] account ${accountId}: Sales Nav warm-up failed (${(e as Error).message}) — continuing`);
     }
   }
-  const db = getDb();
-  const state = await ctx.storageState();
-  db.prepare("UPDATE accounts SET cookies_json = ?, is_authenticated = 1 WHERE id = ?").run(
-    encryptSecret(JSON.stringify(state)),
-    accountId
-  );
+  const state = (await ctx.storageState()) as SessionStorageState;
+  // Throws AuthenticationNotEstablishedError (and writes nothing) when li_at is
+  // absent — the guard that stops an authwall session being stored as valid.
+  persistAuthenticatedState(accountId, state, "persistLogin");
   // Drop any stale runtime context so the runner reloads the fresh cookies.
   await closeSession(accountId);
 }
@@ -331,12 +451,38 @@ async function persistLogin(accountId: string, ctx: BrowserContext, page?: Page)
  * approval — so we detect both: a visible code input = otp; a checkpoint page
  * with no code input and no captcha = device approval.
  */
+/**
+ * Does this URL look like a landed-on-the-logged-in-app URL?
+ *
+ * Matched against the PATHNAME only. An authwall URL carries the original
+ * destination in its query string
+ * (`/authwall?...&sessionRedirect=https://www.linkedin.com/sales/`), so the
+ * older whole-URL regexes could see "/sales/" inside a logged-OUT page's query
+ * and classify an authwall as authenticated. /authwall, /login and /checkpoint
+ * are rejected outright.
+ *
+ * This is only a cheap first gate: authentication is decided by li_at in
+ * persistAuthenticatedState(), never by the URL alone.
+ */
+export function isLoggedInAppUrl(rawUrl: string): boolean {
+  let path: string;
+  try {
+    const u = new URL(rawUrl);
+    if (!/(^|\.)linkedin\.com$/.test(u.hostname)) return false;
+    path = u.pathname;
+  } catch {
+    return false;
+  }
+  if (/^\/(authwall|login|uas\/login|checkpoint)(\/|$)/.test(path)) return false;
+  return /^\/feed(\/|$)/.test(path) || /^\/sales(\/|$)/.test(path);
+}
+
 async function classifyLoginState(page: Page): Promise<LoginResult> {
   const start = Date.now();
   const deadline = start + 20_000;
   while (Date.now() < deadline) {
     const url = page.url();
-    if (/\/feed\//.test(url) || /linkedin\.com\/sales\//.test(url)) {
+    if (isLoggedInAppUrl(url)) {
       return { status: "authenticated" };
     }
 

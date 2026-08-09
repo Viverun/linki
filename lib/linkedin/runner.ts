@@ -1,7 +1,7 @@
 import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
 import { getSessionPage, saveSessionState, getSessionContext } from "@/lib/linkedin/session";
-import { visitProfile } from "@/lib/linkedin/visit";
+import { visitProfile, type VisitResult } from "@/lib/linkedin/visit";
 import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError } from "@/lib/linkedin/connect";
 import { sendMessage, NotConnectedError } from "@/lib/linkedin/message";
 import { shouldSyncAccepted, syncAcceptedConnections } from "@/lib/linkedin/sync-accepted";
@@ -37,6 +37,11 @@ const PROFILE_DELAY_MIN = 8;
 const PROFILE_DELAY_MAX = 20;
 // Poll interval (ms)
 const POLL_INTERVAL_MS = 30_000;
+// How far ahead a claimed track's next_step_at is pushed while it executes.
+// Long enough to cover the slowest real step (Playwright invite sends have been
+// observed around 45s), short enough that a track orphaned by a crashed process
+// comes back on its own without manual intervention.
+const CLAIM_LEASE_MINUTES = 15;
 
 interface ScheduleConfig {
   active_hours_start: number;
@@ -85,13 +90,77 @@ function isWithinSchedule(account: ScheduleConfig): boolean {
   return frac >= (account.active_hours_start ?? 9) && frac < (account.active_hours_end ?? 18);
 }
 
+function zonedDateTimeToUtc(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timezone: string,
+): Date {
+  let guess = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
+
+  for (let i = 0; i < 3; i++) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(guess);
+
+    const get = (type: string) =>
+      parts.find(p => p.type === type)?.value ?? "0";
+
+    const localAsUtc = Date.UTC(
+      parseInt(get("year"), 10),
+      parseInt(get("month"), 10) - 1,
+      parseInt(get("day"), 10),
+      parseInt(get("hour"), 10) % 24,
+      parseInt(get("minute"), 10),
+      parseInt(get("second"), 10),
+    );
+
+    const offset = localAsUtc - guess.getTime();
+    guess = new Date(
+      Date.UTC(year, month - 1, day, hour, minute, 0) - offset
+    );
+  }
+
+  return guess;
+}
+
 function randomSlotInActiveWindow(account: ScheduleConfig, targetDate?: Date): string {
   const start = account.active_hours_start ?? 9;
   const end = account.active_hours_end ?? 18;
+  const timezone = account.timezone || "UTC";
   const base = targetDate ? new Date(targetDate) : new Date();
-  const startMs = new Date(base.getFullYear(), base.getMonth(), base.getDate(), start, 0, 0).getTime();
-  const endMs   = new Date(base.getFullYear(), base.getMonth(), base.getDate(), end,   0, 0).getTime();
-  return new Date(startMs + Math.random() * (endMs - startMs)).toISOString();
+
+  const dateParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(base);
+
+  const get = (type: string) =>
+    dateParts.find(p => p.type === type)?.value ?? "0";
+
+  const year = parseInt(get("year"), 10);
+  const month = parseInt(get("month"), 10);
+  const day = parseInt(get("day"), 10);
+
+  const startUtc = zonedDateTimeToUtc(year, month, day, start, 0, timezone);
+  const endUtc = zonedDateTimeToUtc(year, month, day, end, 0, timezone);
+
+  const slot =
+    startUtc.getTime() +
+    Math.random() * (endUtc.getTime() - startUtc.getTime());
+
+  return new Date(slot).toISOString();
 }
 
 function rescheduleToTomorrow(account: ScheduleConfig): string {
@@ -231,6 +300,34 @@ function trAdvance(db: ReturnType<typeof getDb>, tr: TrackRun, steps: WorkflowSt
 
 function trWait(db: ReturnType<typeof getDb>, tr: TrackRun, hours: number) {
   db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(addHours(hours), tr.id);
+}
+
+/**
+ * Atomically claim a due track before executing it. Returns false if the claim
+ * was lost, in which case the caller must skip the track entirely.
+ *
+ * The due-query and the execution used to be separate statements, so a track
+ * stayed `in_progress` with `next_step_at` in the past for the whole step —
+ * ~45s for a Playwright invite. Anything else reading the DB in that window
+ * (a second runner process or container, or this process restarting mid-step)
+ * saw the same row as due and ran it again, sending a duplicate invite.
+ *
+ * The WHERE clause re-asserts the exact predicate the due-query used, so the
+ * check and the claim are one statement and SQLite settles the race: exactly
+ * one caller sees changes === 1. The new next_step_at is only a lease — every
+ * terminal path in executeStep (trAdvance/trWait/trReschedule/trSkip/trFail)
+ * overwrites it, so normal scheduling is unaffected. If the process dies first,
+ * the lease expires and the track becomes due again on its own.
+ */
+export function trClaim(db: ReturnType<typeof getDb>, trackId: string): boolean {
+  // ISO-UTC via toISOString(), matching every other next_step_at write here.
+  const leaseUntil = new Date(Date.now() + CLAIM_LEASE_MINUTES * 60_000).toISOString();
+  const claimed = db.prepare(
+    `UPDATE run_profile_tracks SET next_step_at = ?
+     WHERE id = ? AND state = 'in_progress'
+       AND (next_step_at IS NULL OR datetime(next_step_at) <= datetime('now'))`
+  ).run(leaseUntil, trackId);
+  return claimed.changes === 1;
 }
 
 function trReschedule(db: ReturnType<typeof getDb>, tr: TrackRun, isoTimestamp: string) {
@@ -458,7 +555,9 @@ async function ensureApolloEnriched(db: ReturnType<typeof getDb>, target: Target
 
 // ─── step execution ──────────────────────────────────────────────────────────
 
-async function executeStep(
+// Exported for tests: lets the connect step's error handling be driven with
+// the LinkedIn modules mocked out, without standing up a whole tick.
+export async function executeStep(
   db: ReturnType<typeof getDb>,
   runId: string,
   tr: TrackRun,
@@ -502,13 +601,24 @@ async function executeStep(
       log(db, runId, target.id, "info", `Visiting ${name}`);
       const linkedinUrl = await getLinkedinUrl(db, target, accountId);
       const page = await getSessionPage(accountId);
-      let visitResult: { isFirstDegree: boolean; messagingUrn: string | null };
+      let visitResult: VisitResult;
       try { visitResult = await visitProfile(page, linkedinUrl); } finally { await page.close(); }
       await saveSessionState(accountId);
-      if (visitResult.isFirstDegree && target.degree !== 1) {
+      if (visitResult.degree === "first_degree" && target.degree !== 1) {
         db.prepare("UPDATE targets SET degree = 1, connected_at = COALESCE(connected_at, ?) WHERE id = ?").run(nowIso(), target.id);
         log(db, runId, target.id, "info", `${name} already 1st-degree — backfilled connection status`);
+      } else if (visitResult.degree === "not_first_degree" && target.degree === 1) {
+        // Self-heal a stale degree=1, mirroring the message step's reset at the
+        // NotConnectedError path. Gated on the POSITIVE observation, never on
+        // !isFirstDegree: "inconclusive" means the card was never inspected, so
+        // clearing on it would erase a correct connection whenever the page was
+        // slow, the layout drifted, or LinkedIn served an auth wall.
+        db.prepare("UPDATE targets SET degree = NULL, connected_at = NULL WHERE id = ?").run(target.id);
+        log(db, runId, target.id, "warn", `${name} no longer appears 1st-degree — resetting connection status`);
       }
+      // messaging_urn is intentionally left alone on a reset: it is an address,
+      // not authorization, and message.ts re-verifies the degree live before it
+      // is ever used to address anything.
       if (visitResult.messagingUrn) {
         db.prepare("UPDATE targets SET messaging_urn = COALESCE(messaging_urn, ?) WHERE id = ?").run(visitResult.messagingUrn, target.id);
       }
@@ -915,8 +1025,17 @@ async function executeStep(
       return;
     }
     if (err instanceof PendingInviteError) {
+      // LinkedIn already holds the invite, so the send must NOT be retried —
+      // this is the recovery path for a process that died between the invite
+      // landing and connection_requested_at being written. Recording it here
+      // makes the retry a no-op instead of a duplicate invite.
       log(db, runId, target.id, "info", `${name} invite already pending — will recheck`);
-      if (!target.connection_requested_at) db.prepare("UPDATE targets SET connection_requested_at = ? WHERE id = ?").run(nowIso(), target.id);
+      // COALESCE rather than a JS null-check on `target`: that row was read
+      // before the send, so the column may have been written since. Stamping
+      // in SQL keeps the original request time instead of overwriting it.
+      db.prepare(
+        "UPDATE targets SET connection_requested_at = COALESCE(connection_requested_at, ?) WHERE id = ?"
+      ).run(nowIso(), target.id);
       trWait(db, tr, CONNECTION_RECHECK_HOURS);
       return;
     }
@@ -1372,28 +1491,63 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
     const runStatus = db.prepare("SELECT status FROM runs WHERE id = ?").get(tr.run_id) as { status: string } | undefined;
     if (!runStatus || runStatus.status !== "running") continue;
 
+    // Claim it before any work happens — another runner may have taken this
+    // same row out of its own due-query since ours ran.
+    if (!trClaim(db, tr.id)) continue;
+
     const target = db.prepare("SELECT * FROM targets WHERE id = ?").get(tr.target_id) as Target;
     await executeStep(db, tr.run_id, tr, target, steps, tr.account_id, limits, emailAccountId, emailLimits, getWorkflowPrompt(tr.workflow_id));
     await randomDelay(PROFILE_DELAY_MIN, PROFILE_DELAY_MAX);
   }
 }
 
-function spreadEnrollBatch(
+export function spreadEnrollBatch(
   db: ReturnType<typeof getDb>,
   runId: string,
   pending: Array<{ id: string; run_profile_id: string; track: string }>,
   limits: ScheduleConfig,
-  track: string
+  track: string,
+  /** Injected only by tests, so slots are assertable without the real clock. */
+  opts: { now?: Date; random?: () => number } = {}
 ) {
   const batchSize = pending.length;
   if (batchSize === 0) return;
+  const now = opts.now ?? new Date();
+  const rand = opts.random ?? Math.random;
+  const tz = limits.timezone || "UTC";
   const start = limits.active_hours_start ?? 9;
   const end = limits.active_hours_end ?? 18;
-  const { hour, minute } = getLocalParts(limits.timezone || "UTC");
+  const { hour, minute } = getLocalParts(tz, now);
   const nowFrac = hour + minute / 60;
-  const windowMs = (end - start) * 3600_000;
-  const bucketMs = windowMs / batchSize;
-  const dayStartMs = new Date().setHours(start, 0, 0, 0);
+  const dateParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(now);
+
+  const getDatePart = (type: string) =>
+    dateParts.find(p => p.type === type)?.value ?? "0";
+
+  const year = parseInt(getDatePart("year"), 10);
+  const month = parseInt(getDatePart("month"), 10);
+  const day = parseInt(getDatePart("day"), 10);
+  const dayStartMs = zonedDateTimeToUtc(year, month, day, start, 0, tz).getTime();
+  const dayEndMs = zonedDateTimeToUtc(year, month, day, end, 0, tz).getTime();
+
+  // Buckets are laid out from whichever is LATER: the window's start, or now.
+  //
+  // Anchoring them to today's active_hours_start meant a batch enrolled partway
+  // through the window drew slots that had already passed, so every such contact
+  // became due on the very next tick — precisely the burst the spreading exists
+  // to prevent (verified Aug 2026: enrolled 14:06:38 into a 09:00-18:00 window,
+  // executed 14:07:08). Re-basing divides the time that is actually LEFT in the
+  // day among the batch, so slots are always >= now and still spread out.
+  //
+  // Enrolling before the window opens is unaffected: dayStartMs wins, and the
+  // distribution is identical to before.
+  const spreadStartMs = Math.max(dayStartMs, now.getTime());
+  const bucketMs = Math.max(0, dayEndMs - spreadStartMs) / batchSize;
 
   for (let i = 0; i < pending.length; i++) {
     const row = pending[i];
@@ -1403,9 +1557,8 @@ function spreadEnrollBatch(
     if (claimed.changes === 0) continue;
     const slot = (() => {
       if (nowFrac >= end - 0.25) return rescheduleToTomorrow(limits);
-      const bucketStart = dayStartMs + i * bucketMs;
-      const bucketEnd = bucketStart + bucketMs;
-      return new Date(bucketStart + Math.random() * (bucketEnd - bucketStart)).toISOString();
+      const bucketStart = spreadStartMs + i * bucketMs;
+      return new Date(bucketStart + rand() * bucketMs).toISOString();
     })();
     db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(slot, row.id);
     const tgt = db.prepare("SELECT full_name, linkedin_url FROM targets WHERE id = (SELECT target_id FROM run_profiles WHERE id = ?)").get(row.run_profile_id) as { full_name: string | null; linkedin_url: string } | undefined;

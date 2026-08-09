@@ -346,7 +346,15 @@ function LinkedInTab({ initialAccounts }: { initialAccounts: LiAccount[] }) {
 
   async function deleteAccount(id: string) {
     if (!confirm("Delete this LinkedIn account?")) return;
-    await fetch(`/api/accounts/${id}`, { method: "DELETE" });
+    const res = await fetch(`/api/accounts/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      // A failed DELETE must not be reported as success: the row is still in
+      // the DB, so dropping it from local state only hides it until a refresh.
+      // 500s render as HTML, so don't assume the body parses as JSON.
+      const error = await res.json().catch(() => null);
+      toast.error(error?.error ?? "Failed to delete account");
+      return;
+    }
     toast.success("Deleted");
     setAccounts((prev) => prev.filter((a) => a.id !== id));
   }

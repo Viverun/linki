@@ -11,6 +11,21 @@ data/
 scripts/*
 !scripts/mirror-ee.js
 !scripts/strip-mirrored-pages.js
+# Also KEEP the live LinkedIn retest harness: it has to run INSIDE the container,
+# where the pinned Chromium and the mounted /data/linki.db session live — running
+# it on the host would use a different browser fingerprint. retest-connect.ts is
+# the entrypoint; the two test-* files are the ESM resolve hooks it (and
+# `npm test`) load via --import. See `npm run retest:connect`.
+!scripts/retest-connect.ts
+!scripts/test-setup.mjs
+!scripts/test-resolve-hooks.mjs
+
+# Local scratch diagnostics. Superseded by scripts/retest-connect.ts, and they
+# import via absolute /app/... paths that break `next build`'s typecheck.
+/diag.ts
+/invite-diag.ts
+/whoami.ts
+*.bak
 mcp/
 playwright-browsers/
 .env*

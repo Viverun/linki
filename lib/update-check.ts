@@ -5,6 +5,10 @@
  * State is kept in memory (reset on restart, which is fine — it re-checks immediately).
  */
 
+// Imported explicitly rather than taken from the global: tsconfig pulls in the
+// "dom" lib, whose setInterval returns a number with no unref().
+import { setInterval } from "node:timers";
+
 const DOCKER_HUB_TAGS_URL =
   "https://hub.docker.com/v2/repositories/moaljumaa/linki/tags?page_size=50&ordering=last_updated";
 
@@ -83,6 +87,9 @@ export function scheduleUpdateCheck() {
   // Run immediately on startup (non-blocking)
   checkForUpdate();
 
-  // Then every 12 hours
-  setInterval(checkForUpdate, POLL_INTERVAL_MS);
+  // Then every 12 hours. unref'd so a background version poll can never be the
+  // reason the process stays alive — without it, anything that touches getDb()
+  // (which schedules this) inherits a 12-hour handle and never exits. That is
+  // what wedged `npm test`: the suite passed, then sat on this timer.
+  setInterval(checkForUpdate, POLL_INTERVAL_MS).unref();
 }

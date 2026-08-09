@@ -9,6 +9,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "retest:connect": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/test-setup.mjs scripts/retest-connect.ts",
+    "test": "node --experimental-strip-types --experimental-test-module-mocks --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --disable-warning=ExperimentalWarning --import ./scripts/test-setup.mjs --test \"lib/**/*.test.ts\" \"tests/**/*.test.ts\"",
     "mirror:ee": "node scripts/mirror-ee.js"
   },
   "dependencies": {
