@@ -255,3 +255,33 @@ test("a successful send still records the request and schedules the 6h recheck",
   assert.equal(tk.current_step, 0, "connect waits for acceptance rather than advancing");
   assert.ok(Math.abs(hoursAhead(tk.next_step_at!) - 6) < 0.1, "6h recheck scheduled");
 });
+
+// ─── D4.3: F2's self-healing claim, verified rather than asserted ────────────
+// Task 3 makes 'completed' terminal, which removes the PATCH→running→retry route
+// the audit cited as F2's manual recovery. The remaining claim is that the
+// divergence self-heals on RE-ENROLMENT. That is a claim about behaviour, so it
+// gets a test rather than a paragraph. See docs/audit-corrections.md, F2.
+
+test("F2 self-heal: a sent-but-unrecorded invitation is stamped on re-enrolment with zero clicks", async () => {
+  // The exact F2 shape: LinkedIn holds a pending invitation, the DB does not
+  // know (connection_requested_at IS NULL) because verifyInvitationSent threw
+  // after the invite landed.
+  const s = scenario({ connectionRequestedAt: null });
+  assert.equal(requestedAtOf(s.targetId), null, "precondition: DB has no record of the invitation");
+
+  sendBehaviour = () => { throw new PendingInviteError("Invitation already pending"); };
+  const before = sendCalls;
+
+  await run(s);
+
+  assert.equal(sendCalls, before + 1, "the shipped guard path runs");
+  const stamped = requestedAtOf(s.targetId);
+  assert.ok(stamped, "connection_requested_at is stamped from LinkedIn's own pending state");
+  assert.equal(trackOf(s.trackId).state, "in_progress", "the track survives — no dead end");
+
+  // And the next pass sends nothing: the divergence is closed, not papered over.
+  const after = sendCalls;
+  sendBehaviour = () => {};
+  await run(s);
+  assert.equal(sendCalls, after, "zero further invitation attempts once the DB agrees with LinkedIn");
+});

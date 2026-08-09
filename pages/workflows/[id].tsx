@@ -2730,11 +2730,16 @@ export default function WorkflowDetailPage({
 
   async function pauseRun() {
     if (!activeRun) return;
-    await fetch(`/api/runs/${activeRun.id}`, {
+    const res = await fetch(`/api/runs/${activeRun.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "paused" }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast.error(err.error ?? "Could not pause this campaign");
+      return;
+    }
     toast.success("Paused");
     refreshStats();
   }
@@ -2748,11 +2753,16 @@ export default function WorkflowDetailPage({
 
   async function stopRun() {
     if (!activeRun) return;
-    await fetch(`/api/runs/${activeRun.id}`, {
+    const res = await fetch(`/api/runs/${activeRun.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "completed" }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast.error(err.error ?? "Could not stop this campaign");
+      return;
+    }
     toast.success("Campaign stopped");
     setShowStop(false);
     refreshStats();

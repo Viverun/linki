@@ -1,6 +1,32 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 
+/**
+ * The only statuses the run state machine recognises.
+ *
+ * This route previously wrote whatever it was given. A garbage value orphaned
+ * the run — tick() selects only 'running' and the auto-complete pass only
+ * finalises runs it selected, so neither could ever see it again — and
+ * 'completed' → 'running' restarted LinkedIn automation on a finished campaign
+ * whose tracks tick() then genuinely picks up (verified against tick()'s own
+ * query, not inferred).
+ */
+const RUN_STATUSES = ["running", "paused", "completed"] as const;
+type RunStatus = (typeof RUN_STATUSES)[number];
+
+/**
+ * 'completed' is terminal. The auto-complete pass sets it only once every track
+ * is terminal, so re-entering 'running' would re-run finished work. The UI only
+ * ever sends 'paused' and 'completed' here (resume goes through
+ * POST /api/runs/[id]/start), so this table is a superset of real usage and
+ * cannot break pause or stop.
+ */
+const ALLOWED_TRANSITIONS: Record<RunStatus, RunStatus[]> = {
+  running: ["paused", "completed"],
+  paused: ["running", "completed"],
+  completed: [],
+};
+
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
   const id = req.query.id as string;
@@ -72,7 +98,47 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === "PATCH") {
     const { status } = req.body;
     if (!status) return res.status(400).json({ error: "status required" });
-    db.prepare("UPDATE runs SET status = ? WHERE id = ?").run(status, id);
+
+    if (!RUN_STATUSES.includes(status as RunStatus)) {
+      // An unrecognised value orphans the run: tick() selects only 'running',
+      // and the auto-complete pass only finalises runs it selected, so the run
+      // becomes invisible to both and its tracks never terminate.
+      return res.status(400).json({
+        error: `Invalid status '${status}'. Allowed: ${RUN_STATUSES.map(s => `'${s}'`).join(", ")}.`,
+        allowed: RUN_STATUSES,
+      });
+    }
+
+    // Read-then-write in one transaction so a concurrent PATCH cannot slip
+    // between the transition check and the update.
+    const result = db.transaction(() => {
+      const current = db.prepare("SELECT status FROM runs WHERE id = ?").get(id) as { status: string } | undefined;
+      if (!current) return { code: 404 as const };
+      if (current.status === status) return { code: 200 as const };   // idempotent no-op
+      if (!ALLOWED_TRANSITIONS[current.status as RunStatus]?.includes(status as RunStatus)) {
+        return { code: 409 as const, from: current.status };
+      }
+      db.prepare("UPDATE runs SET status = ? WHERE id = ?").run(status, id);
+      return { code: 200 as const };
+    })();
+
+    if (result.code === 404) return res.status(404).json({ error: "Run not found" });
+    if (result.code === 409) {
+      // Actionable, not a bare refusal. 'completed' is terminal by design: the
+      // auto-complete pass has already finalised every track, so resurrecting
+      // the run would re-run finished work. The supported route forward is a
+      // fresh enrolment, which also re-derives connection state from LinkedIn
+      // (a pending invitation is re-detected via PendingInviteError rather than
+      // re-sent). See docs/audit-corrections.md, F2.
+      const hint = result.from === "completed"
+        ? "A completed campaign is final. To contact these people again, enrol them in a new run — their LinkedIn state is re-checked on the way, so an already-pending invitation is detected rather than re-sent."
+        : `Allowed transitions from '${result.from}': ${(ALLOWED_TRANSITIONS[result.from as RunStatus] ?? []).map(s => `'${s}'`).join(", ") || "none"}.`;
+      return res.status(409).json({
+        error: `Cannot change a run from '${result.from}' to '${status}'. ${hint}`,
+        from: result.from,
+        to: status,
+      });
+    }
     return res.json({ ok: true });
   }
 

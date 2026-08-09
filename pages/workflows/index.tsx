@@ -195,7 +195,14 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   }
 
   async function pauseRun(workflowId: string, runId: string) {
-    await fetch(`/api/runs/${runId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "paused" }) });
+    // The route now refuses illegal transitions, so a 4xx must not be rendered
+    // as a successful pause with an optimistic row update.
+    const res = await fetch(`/api/runs/${runId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "paused" }) });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast.error(err.error ?? "Could not pause this campaign");
+      return;
+    }
     toast.success("Paused");
     setWorkflows((prev) => prev.map((w) => w.id === workflowId ? { ...w, active_status: "paused" } : w));
   }
