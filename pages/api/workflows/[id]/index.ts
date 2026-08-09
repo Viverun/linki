@@ -45,8 +45,35 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "DELETE") {
-    db.prepare("DELETE FROM runs WHERE workflow_id = ?").run(id);
-    db.prepare("DELETE FROM workflows WHERE id = ?").run(id);
+    // Refuse while a run is live. Deleting the run row out from under an
+    // executing step leaves the runner writing to rows that no longer exist:
+    // its next log() insert violates logs.run_id → runs(id) and throws, AFTER
+    // whatever LinkedIn action that step had already performed. Mirrors the 409
+    // already used by DELETE /api/accounts/[id].
+    const live = db.prepare(
+      "SELECT COUNT(*) c FROM runs WHERE workflow_id = ? AND status IN ('running', 'paused')"
+    ).get(id) as { c: number };
+    if (live.c > 0) {
+      return res.status(409).json({
+        error: `This campaign has ${live.c} active run${live.c === 1 ? "" : "s"}. Stop ${live.c === 1 ? "it" : "them"} first, then delete the campaign.`,
+        active_runs: live.c,
+      });
+    }
+
+    // One transaction: the two statements are not independent. If the second
+    // failed after the first succeeded, the runs would be gone and the workflow
+    // would remain — a state no retry can reconcile.
+    //
+    // Only these two statements are needed; the rest is done by cascades, and
+    // adding explicit deletes for them would fight the FK graph:
+    //   runs            → run_profiles (CASCADE) → run_profile_tracks (CASCADE)
+    //                                            → step_side_effects (CASCADE)
+    //                   → logs (CASCADE)
+    //   workflows       → workflow_steps (CASCADE)
+    db.transaction(() => {
+      db.prepare("DELETE FROM runs WHERE workflow_id = ?").run(id);
+      db.prepare("DELETE FROM workflows WHERE id = ?").run(id);
+    })();
     return res.json({ ok: true });
   }
 

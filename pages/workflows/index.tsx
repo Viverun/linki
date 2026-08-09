@@ -170,7 +170,16 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   }
 
   async function deleteWorkflow(id: string) {
-    await fetch(`/api/workflows/${id}`, { method: "DELETE" });
+    // Deletion can now be refused while a run is live. Showing "Campaign
+    // deleted" and removing the row on a 409 would be the same class of bug
+    // already fixed once for account deletion in pages/settings.tsx.
+    const res = await fetch(`/api/workflows/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast.error(err.error ?? "Could not delete this campaign");
+      setDeleteId(null);
+      return;
+    }
     toast.success("Campaign deleted");
     setWorkflows((prev) => prev.filter((w) => w.id !== id));
     setDeleteId(null);
