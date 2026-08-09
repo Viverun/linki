@@ -2783,13 +2783,25 @@ export default function WorkflowDetailPage({
       body: JSON.stringify({ target_ids: [targetId] }),
     });
     if (res.ok) {
+      // A 200 no longer means "everything re-armed": retry now refuses tracks
+      // whose message may already have been delivered. Reflect what actually
+      // happened instead of optimistically marking the row in_progress.
+      const body = await res.json().catch(() => ({}));
+      const outcomes: Array<{ outcome: string; reason?: string }> = body.outcomes ?? [];
+      const blocked = outcomes.filter((o) => o.outcome === "blocked");
+      if (blocked.length > 0) {
+        toast.error(blocked[0].reason ?? "Not retried — a previous attempt may already have been delivered");
+        refreshProspects();
+        refreshStats();
+        return;
+      }
       toast.success("Retrying");
       setProspects((prev) =>
         prev.map((p) => p.target_id === targetId ? { ...p, state: "in_progress", error_message: null } : p)
       );
       refreshStats();
     } else {
-      const err = await res.json();
+      const err = await res.json().catch(() => ({}));
       toast.error(err.error ?? "Failed to retry");
     }
   }
@@ -2847,6 +2859,17 @@ export default function WorkflowDetailPage({
     }
     if (!results.every((r) => r.ok)) { toast.error("Some actions failed"); return; }
     if (action === "retry") {
+      // Same contract change as retryProspect: a 200 can carry blocked tracks.
+      const bodies = await Promise.all(results.map((r) => r.json().catch(() => ({}))));
+      const allOutcomes = bodies.flatMap((b: { outcomes?: Array<{ outcome: string; reason?: string }> }) => b.outcomes ?? []);
+      const blocked = allOutcomes.filter((o) => o.outcome === "blocked");
+      if (blocked.length > 0) {
+        toast.error(`${blocked.length} not retried — a previous attempt may already have been delivered`);
+        refreshProspects();
+        refreshStats();
+        setSelected(new Set());
+        return;
+      }
       toast.success(`Retried ${targetIds.length} prospect${targetIds.length !== 1 ? "s" : ""}`);
       setProspects((prev) => prev.map((p) => targetIds.includes(p.target_id) ? { ...p, state: "in_progress", error_message: null } : p));
     } else {

@@ -472,6 +472,42 @@ function runMigrations(db: Database.Database) {
     "ALTER TABLE lists ADD COLUMN purpose TEXT",
     // Manual/CSV-only field — no automation reads or writes this, reference data only.
     "ALTER TABLE targets ADD COLUMN phone TEXT",
+    // Write-ahead ledger for irreversible LinkedIn side effects (messages, InMail).
+    //
+    // The act itself happens outside the database, so the three writes that follow
+    // a send can never be made atomic with it. Instead the runner records the
+    // INTENT before sending and confirms after, which turns "did we already send
+    // this?" into a question the database can answer after any crash, lock error,
+    // or post-send bookkeeping failure. Without it, a throw anywhere between the
+    // Send click and `targets.message_sent_at` leaves the track failed with no
+    // record of delivery, and Retry re-sends to a real person.
+    //
+    // step_ref is a SCHEME-PREFIXED identity, not a foreign key. It cannot be
+    // workflow_steps.id: saving a campaign deletes every step and re-inserts it
+    // with a fresh uuid (pages/workflows/[id].tsx + steps.ts), which would orphan
+    // every row here and silently disable the guard. "pos:<message_position>" is
+    // stable across re-saves and is the identity a human means by "follow-up #2".
+    // The prefix reserves room for "stepid:<uuid>" once steps gain stable ids,
+    // so the two schemes can coexist with no data migration.
+    `CREATE TABLE IF NOT EXISTS step_side_effects (
+      id                TEXT PRIMARY KEY,
+      run_profile_id    TEXT NOT NULL REFERENCES run_profiles(id) ON DELETE CASCADE,
+      track             TEXT NOT NULL,
+      step_ref          TEXT NOT NULL,
+      target_id         TEXT NOT NULL,
+      action            TEXT NOT NULL CHECK(action IN ('message', 'inmail')),
+      status            TEXT NOT NULL CHECK(status IN ('in_flight', 'confirmed', 'abandoned')),
+      body_fingerprint  TEXT,
+      attempt_count     INTEGER NOT NULL DEFAULT 1,
+      started_at        TEXT NOT NULL,
+      confirmed_at      TEXT,
+      error_message     TEXT
+    )`,
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_step_side_effects ON step_side_effects(run_profile_id, track, step_ref, action)",
+    // Layer 2 lookup: has this exact rendered body already gone to this person in
+    // this enrolment under a DIFFERENT step_ref? Catches the position-shift case,
+    // where re-saving a campaign renumbers an already-delivered message.
+    "CREATE INDEX IF NOT EXISTS ix_step_side_effects_fingerprint ON step_side_effects(run_profile_id, target_id, body_fingerprint)",
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch { /* column already exists */ }

@@ -1,5 +1,5 @@
 import { getDb } from "@/lib/db";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { getSessionPage, saveSessionState, getSessionContext } from "@/lib/linkedin/session";
 import { visitProfile, type VisitResult } from "@/lib/linkedin/visit";
 import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError } from "@/lib/linkedin/connect";
@@ -272,6 +272,89 @@ function renderTemplate(body: string, target: Target): string {
     .replace(/\{\{title\}\}/gi,      target.title ?? "")
     .replace(/\{\{location\}\}/gi,   target.location ?? "")
     .trim();
+}
+
+// ─── side-effect ledger ──────────────────────────────────────────────────────
+// Irreversible LinkedIn actions (message, InMail) happen outside the database,
+// so the writes that follow one can never be atomic with it. Record the INTENT
+// first, confirm after: "did we already send this?" then survives a crash, a
+// SQLITE_BUSY, or a browser teardown failure between the Send click and
+// targets.message_sent_at. Without this a post-send throw fails the track with
+// no record of delivery, and Retry sends the same message to the same human
+// again — the exact harm this whole branch exists to prevent.
+
+/**
+ * Raised when a previous attempt may already have delivered this message, so
+ * sending again would risk a duplicate. Deliberately NOT auto-recoverable:
+ * LinkedIn gives messaging no equivalent of verifyInvitationSent(), so silence
+ * has to mean "possibly delivered" and a human has to resolve it.
+ */
+export class UnresolvedSideEffectError extends Error {}
+
+export type SideEffectAction = "message" | "inmail";
+
+export interface SideEffectRow {
+  id: string;
+  status: "in_flight" | "confirmed" | "abandoned";
+  step_ref: string;
+  body_fingerprint: string | null;
+  attempt_count: number;
+}
+
+/** Scheme-prefixed step identity. See the migration comment in lib/db.ts. */
+export function stepRefOf(step: { message_position: number | null }): string {
+  return `pos:${step.message_position ?? 1}`;
+}
+
+/**
+ * sha256 of the rendered body, whitespace-normalised. Case and punctuation are
+ * preserved — two messages differing only in case are different messages.
+ * The hash is stored; the plaintext is never logged anywhere new.
+ */
+export function bodyFingerprint(text: string): string {
+  return createHash("sha256").update(text.trim().replace(/\s+/g, " ")).digest("hex");
+}
+
+function sideEffectFor(
+  db: ReturnType<typeof getDb>,
+  runProfileId: string, track: string, stepRef: string, action: SideEffectAction
+): SideEffectRow | undefined {
+  return db.prepare(
+    `SELECT id, status, step_ref, body_fingerprint, attempt_count FROM step_side_effects
+     WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
+  ).get(runProfileId, track, stepRef, action) as SideEffectRow | undefined;
+}
+
+/**
+ * Layer 2. Has this exact body already gone to this person in this enrolment
+ * under a DIFFERENT step_ref? That is the position-shift case: re-saving a
+ * campaign with a new message inserted earlier renumbers an already-delivered
+ * message, so Layer 1's position key no longer matches and would re-send.
+ * Scoped to (run_profile_id, target_id) on purpose — blocking identical text
+ * across unrelated campaigns is a product decision, not this guard's business.
+ */
+function conflictingFingerprint(
+  db: ReturnType<typeof getDb>,
+  runProfileId: string, targetId: string, stepRef: string, fingerprint: string | null
+): SideEffectRow | undefined {
+  if (!fingerprint) return undefined;
+  return db.prepare(
+    `SELECT id, status, step_ref, body_fingerprint, attempt_count FROM step_side_effects
+     WHERE run_profile_id = ? AND target_id = ? AND body_fingerprint = ?
+       AND step_ref != ? AND status IN ('in_flight', 'confirmed') LIMIT 1`
+  ).get(runProfileId, targetId, fingerprint, stepRef) as SideEffectRow | undefined;
+}
+
+/** Records intent. Must be committed BEFORE the irreversible action. */
+function sideEffectBegin(
+  db: ReturnType<typeof getDb>,
+  tr: TrackRun, stepRef: string, action: SideEffectAction, fingerprint: string | null
+): void {
+  db.prepare(
+    `INSERT INTO step_side_effects
+       (id, run_profile_id, track, step_ref, target_id, action, status, body_fingerprint, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'in_flight', ?, ?)`
+  ).run(randomUUID(), tr.run_profile_id, tr.track, stepRef, tr.target_id, action, fingerprint, nowIso());
 }
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -654,8 +737,11 @@ export async function executeStep(
       log(db, runId, target.id, "info", `Sending connection request to ${name}`);
       const linkedinUrl = await getLinkedinUrl(db, target, accountId);
       const page = await getSessionPage(accountId);
-      try { await sendConnectionRequest(page, linkedinUrl); } finally { await page.close(); }
-      await saveSessionState(accountId);
+      try { await sendConnectionRequest(page, linkedinUrl); } finally { await page.close().catch(() => { /* page already gone */ }); }
+      // Best-effort: sendConnectionRequest only returns once verifyInvitationSent
+      // has confirmed the invite is pending, so the invitation already exists. A
+      // failure to refresh the session cache must not lose that fact.
+      await saveSessionState(accountId).catch(e => log(db, runId, target.id, "warn", `Session cache refresh failed: ${e instanceof Error ? e.message : e}`));
       db.prepare("UPDATE targets SET connection_requested_at = ? WHERE id = ?").run(nowIso(), target.id);
       trWait(db, tr, CONNECTION_RECHECK_HOURS);
       log(db, runId, target.id, "info", `Connection request sent to ${name} — will recheck in ${CONNECTION_RECHECK_HOURS}h`);
@@ -739,19 +825,55 @@ export async function executeStep(
         return;
       }
 
+      // ── side-effect ledger: consult BEFORE sending ──────────────────────────
+      // Layer 1 is the position-keyed row; Layer 2 is the body fingerprint, which
+      // catches the same message resurfacing under a renumbered position after a
+      // campaign re-save. Both refuse rather than guess: a message has no
+      // LinkedIn-side "already sent" signal to check, unlike an invitation.
+      const stepRef = stepRefOf(step);
+      const fingerprint = bodyFingerprint(messageText);
+      const prior = sideEffectFor(db, tr.run_profile_id, tr.track, stepRef, "message");
+
+      if (prior?.status === "confirmed") {
+        // Convergent: a previous attempt delivered this and only the bookkeeping
+        // failed. Finish the bookkeeping now instead of re-sending.
+        db.prepare("UPDATE targets SET message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?").run(nowIso(), target.id);
+        trRecordContext(db, tr, { linkedinMessage: messageText });
+        trAdvance(db, tr, steps);
+        log(db, runId, target.id, "info", `Message to ${name} was already delivered — skipping send and advancing`);
+        return;
+      }
+      if (prior?.status === "in_flight") {
+        throw new UnresolvedSideEffectError(
+          `A previous attempt to message ${name} may already have been delivered (ledger ${stepRef} still in flight). ` +
+          `Refusing to send again — resolve this manually before retrying.`
+        );
+      }
+      const collision = conflictingFingerprint(db, tr.run_profile_id, tr.target_id, stepRef, fingerprint);
+      if (collision) {
+        throw new UnresolvedSideEffectError(
+          `This exact message body was already sent to ${name} at step ${collision.step_ref} (now ${stepRef}) — ` +
+          `the campaign was likely re-saved and the step renumbered. Refusing to send a duplicate.`
+        );
+      }
+      // Commit the intent. If this insert fails, nothing is sent.
+      sideEffectBegin(db, tr, stepRef, "message", fingerprint);
+
       db.prepare("UPDATE run_profile_tracks SET last_step_at = datetime('now') WHERE id = ?").run(tr.id);
       log(db, runId, target.id, "info", `Sending message to ${name}`);
       const messageLinkedinUrl = await getLinkedinUrl(db, target, accountId);
       const page = await getSessionPage(accountId);
+      let messagingUrnResult: string | null = null;
       try {
         if (!target.full_name) throw new Error(`Target ${target.id} has no full_name — cannot search messaging`);
         const result = await sendMessage(page, target.full_name, messageText, messageLinkedinUrl, freshTarget.messaging_urn);
-        if (result.messagingUrn) {
-          db.prepare("UPDATE targets SET messaging_urn = COALESCE(messaging_urn, ?) WHERE id = ?").run(result.messagingUrn, target.id);
-        }
+        messagingUrnResult = result.messagingUrn;
       } catch (err) {
+        // Nothing was delivered on these paths, so the intent is retractable.
+        db.prepare("UPDATE step_side_effects SET status = 'abandoned', error_message = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'message'")
+          .run(err instanceof Error ? err.message.slice(0, 500) : String(err), tr.run_profile_id, tr.track, stepRef);
         if (err instanceof NotConnectedError) {
-          await saveSessionState(accountId);
+          await saveSessionState(accountId).catch(e => log(db, runId, target.id, "warn", `Session cache refresh failed: ${e instanceof Error ? e.message : e}`));
           db.prepare("UPDATE targets SET degree = NULL, connected_at = NULL WHERE id = ?").run(target.id);
           log(db, runId, target.id, "warn", `${name} no longer appears 1st-degree — resetting connection status and rescheduling`);
           trWait(db, tr, CONNECTION_RECHECK_HOURS);
@@ -759,13 +881,32 @@ export async function executeStep(
         }
         throw err;
       } finally {
-        await page.close();
+        await page.close().catch(() => { /* page already gone */ });
       }
-      await saveSessionState(accountId);
-      db.prepare("UPDATE targets SET message_sent_at = ? WHERE id = ?").run(nowIso(), target.id);
-      trRecordContext(db, tr, { linkedinMessage: messageText });
-      trAdvance(db, tr, steps);
-      log(db, runId, target.id, "info", `Message sent to ${name}`);
+
+      // ── past this line the message HAS been delivered ───────────────────────
+      // Everything below is bookkeeping. None of it may throw out of this branch:
+      // a failure here previously produced trFail with message_sent_at unset,
+      // which is exactly what made Retry re-send to a real person.
+      try {
+        db.transaction(() => {
+          db.prepare("UPDATE step_side_effects SET status = 'confirmed', confirmed_at = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'message'")
+            .run(nowIso(), tr.run_profile_id, tr.track, stepRef);
+          db.prepare("UPDATE targets SET message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?").run(nowIso(), target.id);
+          if (messagingUrnResult) {
+            db.prepare("UPDATE targets SET messaging_urn = COALESCE(messaging_urn, ?) WHERE id = ?").run(messagingUrnResult, target.id);
+          }
+        })();
+        trRecordContext(db, tr, { linkedinMessage: messageText });
+        trAdvance(db, tr, steps);
+        log(db, runId, target.id, "info", `Message sent to ${name}`);
+      } catch (bookkeepingErr) {
+        log(db, runId, target.id, "error",
+          `Message to ${name} WAS delivered but bookkeeping failed: ${bookkeepingErr instanceof Error ? bookkeepingErr.message : bookkeepingErr}`);
+      }
+      // Best-effort session cache refresh — never a reason to fail a delivered step.
+      await saveSessionState(accountId).catch(e => log(db, runId, target.id, "warn", `Session cache refresh failed: ${e instanceof Error ? e.message : e}`));
+      return;
 
     } else if (step.step_type === "sales_inmail") {
       // Sales Navigator InMail — reaches NON-connections (no degree gate), needs a
@@ -1044,6 +1185,15 @@ export async function executeStep(
       const slot = rescheduleToTomorrow(accountLimits);
       log(db, runId, target.id, "warn", `No InMail credits left on this account — pausing InMail sends until tomorrow, rescheduled ${name} to ${slot}`);
       trReschedule(db, tr, slot);
+      return;
+    }
+    // Last specific branch before the catch-all. Placed here deliberately: the
+    // four branches above must keep their existing routing, and the InMail check
+    // above matches on SUBSTRING, so this error's message must never contain
+    // "No InMail credits left" or it would be captured there instead.
+    if (err instanceof UnresolvedSideEffectError) {
+      log(db, runId, target.id, "error", `${name}: ${msg}`);
+      trFail(db, tr, msg);
       return;
     }
     log(db, runId, target.id, "error", `Error on ${name}: ${msg}`);
