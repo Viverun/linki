@@ -6,6 +6,13 @@ import { encryptSecret, isEncrypted } from "@/lib/crypto";
 
 const DB_PATH = process.env.LINKI_DB_PATH || path.join(process.cwd(), "linki.db");
 
+/**
+ * Pinned to better-sqlite3's own constructor default so the explicit pragma
+ * stays a provable no-op. Raising it would change latency under contention and
+ * make this line blameable for something; that is not what it is for.
+ */
+export const BUSY_TIMEOUT_MS = 5000;
+
 let db: Database.Database;
 
 export function getDb(): Database.Database {
@@ -13,6 +20,30 @@ export function getDb(): Database.Database {
     db = new Database(DB_PATH);
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
+    // REDUNDANT TODAY, DELIBERATELY KEPT. Do not delete as dead code, and do not
+    // read this as a fix for anything.
+    //
+    // better-sqlite3 v12.6.2 already applies this exact value from its `timeout`
+    // constructor option (node_modules/better-sqlite3/lib/database.js:34 —
+    // `const timeout = 'timeout' in options ? options.timeout : 5000`), so every
+    // connection in this repo, including read-only ones, has always had a 5s
+    // busy timeout. A Phase 1 audit finding (F3) claimed otherwise; it had
+    // grepped for the pragma string and found nothing, which measured the
+    // absence of a line rather than the absence of the behaviour. See
+    // docs/audit-corrections.md.
+    //
+    // What it guards against tomorrow: a `{ timeout: 0 }` on a connection opened
+    // elsewhere, or a library major bump changing the default, either of which
+    // would silently remove protection the runner's post-send bookkeeping now
+    // depends on. Pinned to the library's own default so it stays a provable
+    // no-op and can never be blamed for a latency change.
+    //
+    // Placed before initDb/runMigrations on purpose: the migration loop swallows
+    // every error (`try { db.exec(sql) } catch {}`, the repo idiom for "column
+    // already exists"), so a lock error inside CREATE TABLE would be discarded
+    // and the app would boot with step_side_effects missing and the
+    // duplicate-message guard silently absent.
+    db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
     initDb(db);
     runMigrations(db);
     scheduleUpdateCheck();

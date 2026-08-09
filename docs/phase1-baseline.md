@@ -92,6 +92,31 @@ invitation present. Covered by the existing `/data` gitignore rule.
 This is an ad-hoc snapshot for this work only. A real backup/restore procedure
 for `/data` remains an open gap.
 
+## Standing test rule — multi-site coverage
+
+Derived from two surviving mutants in Task 1 (M8, M16), both the same error: a
+test covered **one** emission site of a code path that has **two**, so a mutation
+to the uncovered site changed nothing observable.
+
+> When a mutation targets code that runs at more than one call site, branch, or
+> push, the test must exercise **every** site — or the mutation-table entry must
+> name which sites are covered and why the others are unreachable.
+
+Worked examples: `retry.ts` pushes outcomes from five places (non-ledger re-arm,
+confirmed-advance, in-flight blocked, forced resend, mark_delivered), so a test
+asserting a field on outcomes must hit more than one of them.
+`stepRefOf` is called from both `runner.ts` and `retry.ts`.
+
+## Reproduce-before-fixing rule
+
+Two Phase 1 findings (F3, and the earlier "transaction across network work")
+were retracted because both were absence-based inferences from grep rather than
+measurements. See `docs/audit-corrections.md`.
+
+> A finding must be reproduced by a test that fails against unmodified code, for
+> the reason the finding claims, before any fix is written. If the reproduction
+> passes, retract the finding instead of fixing it.
+
 ## `step_ref` scheme (Task 1)
 
 `step_side_effects.step_ref` is a **scheme-prefixed identity**, currently

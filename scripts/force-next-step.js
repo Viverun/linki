@@ -55,6 +55,10 @@ function widenSchedule(db, table, id) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const db = new Database(DB_PATH);
+  // Same rationale as lib/db.ts: this script is exactly the "second process"
+  // that makes SQLITE_BUSY reachable, so it must wait rather than throw — and
+  // must not make the running app throw either.
+  db.pragma("busy_timeout = 5000");
 
   if (args.list) {
     const runs = db

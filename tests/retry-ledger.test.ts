@@ -311,3 +311,24 @@ test("1b every outcome carries target_id so the UI can name the person", () => {
   assert.equal(rearmBody.outcomes[0].outcome, "rearmed");
   assert.equal(rearmBody.outcomes[0].target_id, rearmIds.target, "re-armed outcome names the person too");
 });
+
+test("1b mark_delivered is rejected for a CONNECT step (pinning the implicit case)", () => {
+  // Connect steps never get a ledger row, so the rejection currently falls out
+  // of the "no in_flight row" branch rather than an explicit action check.
+  // Pinned here so a future refactor that makes connect ledger-governed — the
+  // M8 mutation — cannot quietly let an operator mark an INVITATION as
+  // delivered, which would suppress the PendingInviteError recovery F2 needs.
+  const ids = scenario({ stepType: "connect", ledger: { stepRef: "pos:1", status: "in_flight" } });
+  const db = getDb();
+
+  const r = callRetry(ids.run, { target_ids: [ids.target], resolve: "mark_delivered" });
+
+  const body = r.body as { outcomes: Array<{ outcome: string; reason?: string }> };
+  assert.equal(body.outcomes[0].outcome, "blocked", "a connect step must never be markable as delivered");
+  assert.equal(
+    (db.prepare("SELECT status FROM step_side_effects WHERE run_profile_id = ?").get(ids.profile) as { status: string }).status,
+    "in_flight", "the ledger row is untouched");
+  assert.equal(
+    (db.prepare("SELECT message_sent_at FROM targets WHERE id = ?").get(ids.target) as { message_sent_at: string | null }).message_sent_at,
+    null, "and no message timestamp is invented for a connect step");
+});

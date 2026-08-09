@@ -104,6 +104,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       // else (connect, visit, delay, email) re-arms exactly as before.
       const action = step?.step_type === "message" ? "message" : step?.step_type === "sales_inmail" ? "inmail" : null;
       if (!step || !action) {
+        // mark_delivered means "record that it happened, do not act". Falling
+        // through to a plain re-arm here would turn that into a real retry — on
+        // a connect step, an actual invitation attempt. Refuse instead.
+        if (resolution === "mark_delivered") {
+          outcomes.push({
+            track_id: c.id, target_id: c.target_id, outcome: "blocked",
+            reason: `mark_delivered applies to message steps only, not ${step?.step_type ?? "an unknown step"}`,
+          });
+          continue;
+        }
         rearm.run(c.id);
         outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "rearmed" });
         continue;
