@@ -3,7 +3,7 @@ import { randomUUID, createHash } from "crypto";
 import { getSessionPage, saveSessionState, getSessionContext } from "@/lib/linkedin/session";
 import { visitProfile, type VisitResult } from "@/lib/linkedin/visit";
 import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError } from "@/lib/linkedin/connect";
-import { sendMessage, NotConnectedError } from "@/lib/linkedin/message";
+import { sendMessage, NotConnectedError, MessagingUrnUnresolvedError } from "@/lib/linkedin/message";
 import { shouldSyncAccepted, syncAcceptedConnections } from "@/lib/linkedin/sync-accepted";
 import { sendEmail } from "@/lib/email/sender";
 import { shouldSyncEmailInbox, syncEmailInbox } from "@/lib/email/inbox";
@@ -345,7 +345,42 @@ function conflictingFingerprint(
   ).get(runProfileId, targetId, fingerprint, stepRef) as SideEffectRow | undefined;
 }
 
-/** Records intent. Must be committed BEFORE the irreversible action. */
+/**
+ * True only for failures that PROVABLY happen before the Send click, so the
+ * recorded intent can safely be retracted and the step retried.
+ *
+ * Traced against lib/linkedin/message.ts, where the click is `sendBtn.click()`
+ * at :108:
+ *   - NotConnectedError          thrown at :49, before compose is even opened
+ *   - MessagingUrnUnresolvedError thrown at :65, reached only when
+ *                                openComposeByUrn() returned false, i.e. the
+ *                                compose box never rendered and nothing was typed
+ *   - the runner's own no-full_name guard, thrown before sendMessage is called
+ *
+ * Everything else — a locator timeout inside sendFromComposeBox, a teardown
+ * race, and above all `page.waitForTimeout(2000)` at message.ts:109 which runs
+ * AFTER the click — may coexist with a delivered message, so it must not
+ * retract the intent. Default is false: unknown means possibly-delivered.
+ */
+function isPreSendFailure(err: unknown): boolean {
+  if (err instanceof NotConnectedError) return true;
+  if (err instanceof MessagingUrnUnresolvedError) return true;
+  return err instanceof Error && /has no full_name/.test(err.message);
+}
+
+/**
+ * Records intent. Must be committed BEFORE the irreversible action.
+ *
+ * Upsert, not insert: a previous attempt that failed BEFORE the send leaves an
+ * `abandoned` row under the same unique key, and a plain INSERT would then throw
+ * a constraint error on every subsequent attempt — permanently wedging a step
+ * that never actually sent anything. Re-arming that row back to `in_flight` and
+ * counting the attempt is the whole point of `attempt_count`.
+ *
+ * Only `abandoned` rows are re-armed. `in_flight` and `confirmed` are filtered
+ * out by the pre-send gate before this is ever called, so a delivered message
+ * can never be reset to `in_flight` here.
+ */
 function sideEffectBegin(
   db: ReturnType<typeof getDb>,
   tr: TrackRun, stepRef: string, action: SideEffectAction, fingerprint: string | null
@@ -353,7 +388,15 @@ function sideEffectBegin(
   db.prepare(
     `INSERT INTO step_side_effects
        (id, run_profile_id, track, step_ref, target_id, action, status, body_fingerprint, started_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'in_flight', ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, 'in_flight', ?, ?)
+     ON CONFLICT(run_profile_id, track, step_ref, action) DO UPDATE SET
+       status           = 'in_flight',
+       body_fingerprint = excluded.body_fingerprint,
+       started_at       = excluded.started_at,
+       confirmed_at     = NULL,
+       error_message    = NULL,
+       attempt_count    = step_side_effects.attempt_count + 1
+     WHERE step_side_effects.status = 'abandoned'`
   ).run(randomUUID(), tr.run_profile_id, tr.track, stepRef, tr.target_id, action, fingerprint, nowIso());
 }
 
@@ -869,9 +912,25 @@ export async function executeStep(
         const result = await sendMessage(page, target.full_name, messageText, messageLinkedinUrl, freshTarget.messaging_urn);
         messagingUrnResult = result.messagingUrn;
       } catch (err) {
-        // Nothing was delivered on these paths, so the intent is retractable.
-        db.prepare("UPDATE step_side_effects SET status = 'abandoned', error_message = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'message'")
-          .run(err instanceof Error ? err.message.slice(0, 500) : String(err), tr.run_profile_id, tr.track, stepRef);
+        // Retract the intent ONLY for errors that provably precede the Send
+        // click. Everything else stays in_flight, because a throw after the
+        // click is indistinguishable here from one before it — message.ts:109
+        // (`waitForTimeout` immediately after `sendBtn.click()`) can throw on a
+        // dead page with the message already delivered. Marking that abandoned
+        // would let Retry re-arm and send it twice, which is F1 through a new
+        // door. Unrecognised errors therefore fail CLOSED, not open.
+        if (isPreSendFailure(err)) {
+          db.prepare("UPDATE step_side_effects SET status = 'abandoned', error_message = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'message'")
+            .run(err instanceof Error ? err.message.slice(0, 500) : String(err), tr.run_profile_id, tr.track, stepRef);
+        } else {
+          db.prepare("UPDATE step_side_effects SET error_message = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'message'")
+            .run(
+              `left in_flight — may have been delivered: ${err instanceof Error ? err.message.slice(0, 400) : String(err)}`,
+              tr.run_profile_id, tr.track, stepRef
+            );
+          log(db, runId, target.id, "warn",
+            `${name}: message step failed after the compose box was reached — leaving the ledger in flight because delivery cannot be ruled out`);
+        }
         if (err instanceof NotConnectedError) {
           await saveSessionState(accountId).catch(e => log(db, runId, target.id, "warn", `Session cache refresh failed: ${e instanceof Error ? e.message : e}`));
           db.prepare("UPDATE targets SET degree = NULL, connected_at = NULL WHERE id = ?").run(target.id);

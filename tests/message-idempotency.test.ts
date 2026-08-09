@@ -25,8 +25,10 @@ const mockModule = mock.module.bind(mock) as unknown as
 interface SendRecord { fullName: string; text: string; url: string; cachedUrn: string | null }
 
 const sends: SendRecord[] = [];
-/** What sendMessage does on the next call. */
+/** Throws AFTER the send click is recorded — the delivered-but-failed window. */
 let sendBehaviour: () => void = () => {};
+/** Throws BEFORE the send click — nothing was delivered. */
+let preSendBehaviour: () => void = () => {};
 /** What saveSessionState does — the N2 failure injection point. */
 let saveBehaviour: () => void = () => {};
 
@@ -35,7 +37,11 @@ mockModule("@/lib/linkedin/message", {
   exports: {
     ...realMessage,
     sendMessage: async (_page: unknown, fullName: string, text: string, url: string, cachedUrn: string | null) => {
+      // preSendBehaviour throws BEFORE the click is recorded (nothing delivered).
+      preSendBehaviour();
       sends.push({ fullName, text, url, cachedUrn });
+      // postSendBehaviour throws AFTER the click — the message.ts:109 window,
+      // where page.waitForTimeout(2000) runs with the message already delivered.
       sendBehaviour();
       return { messagingUrn: "urn:li:fsd_profile:ACoAATEST", isFirstDegree: true };
     },
@@ -138,7 +144,7 @@ function seedLedger(profileId: string, targetId: string, stepRef: string, status
   ).run(`se-${Math.random().toString(36).slice(2)}`, profileId, stepRef, targetId, status, fingerprint);
 }
 
-function reset() { sends.length = 0; sendBehaviour = () => {}; saveBehaviour = () => {}; }
+function reset() { sends.length = 0; sendBehaviour = () => {}; preSendBehaviour = () => {}; saveBehaviour = () => {}; }
 
 // ─── 1–2: post-send failures must not look like send failures (F1/N2) ────────
 
@@ -326,4 +332,77 @@ test("16 the four pre-existing error types still route to their original branche
   seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", null);
   await run(s);
   assert.doesNotMatch(trackOf(s.ids.track).error_message ?? "", /No InMail credits left/);
+});
+
+// ─── 17–19: the `abandoned` classification (A1) ──────────────────────────────
+// A throw from inside the send helper AFTER the click is indistinguishable at
+// the runner's catch site from one before it. If post-click throws retract the
+// intent, Retry re-sends and F1 is restored through a different door.
+
+test("17 a throw AFTER the send click leaves the ledger in_flight and blocks re-entry", async () => {
+  reset();
+  const s = scenario();
+  sendBehaviour = () => { throw new Error("Target page, context or browser has been closed"); };
+
+  await run(s);
+
+  assert.equal(sends.length, 1, "the message was delivered before the throw");
+  const rows = ledgerRows(s.ids.profile);
+  assert.equal(rows[0].status, "in_flight", "must NOT be abandoned — delivery cannot be ruled out");
+  assert.equal(trackOf(s.ids.track).state, "failed");
+
+  // Re-entry must refuse rather than re-send.
+  reset();
+  const before = sends.length;
+  await run(s);
+  assert.equal(sends.length, before, "zero second send");
+});
+
+test("18 a throw BEFORE the send click abandons the intent so retry can proceed", async () => {
+  reset();
+  const s = scenario();
+  const { NotConnectedError } = await import("@/lib/linkedin/message");
+  preSendBehaviour = () => { throw new NotConnectedError("not 1st degree"); };
+
+  await run(s);
+
+  assert.equal(sends.length, 0, "nothing was delivered");
+  assert.equal(ledgerRows(s.ids.profile)[0].status, "abandoned", "intent is retractable");
+
+  // The ledger no longer blocks the step. NotConnectedError also resets
+  // degree=NULL (correct: the target stopped being a connection), so restore
+  // that separately — otherwise the degree gate, not the ledger, is what defers
+  // the retry and this test would prove nothing about the ledger.
+  getDb().prepare("UPDATE targets SET degree = 1 WHERE id = ?").run(s.ids.target);
+  reset();
+  await run(s);
+  assert.equal(sends.length, 1, "the abandoned intent allows exactly one send on retry");
+  const rows = ledgerRows(s.ids.profile);
+  assert.equal(rows.length, 1, "the row is re-armed in place, not duplicated");
+  assert.equal(rows[0].status, "confirmed");
+  const attempts = getDb().prepare("SELECT attempt_count FROM step_side_effects WHERE run_profile_id = ?").get(s.ids.profile) as { attempt_count: number };
+  assert.equal(attempts.attempt_count, 2, "the second attempt is counted");
+});
+
+test("19 an unrecognised error fails CLOSED — in_flight, not abandoned", async () => {
+  reset();
+  const s = scenario();
+  sendBehaviour = () => { throw new Error("something nobody anticipated"); };
+
+  await run(s);
+
+  assert.equal(ledgerRows(s.ids.profile)[0].status, "in_flight",
+    "unknown errors must never retract the intent");
+});
+
+test("19b MessagingUrnUnresolvedError is provably pre-click and DOES abandon", async () => {
+  reset();
+  const s = scenario();
+  const { MessagingUrnUnresolvedError } = await import("@/lib/linkedin/message");
+  preSendBehaviour = () => { throw new MessagingUrnUnresolvedError("no urn"); };
+
+  await run(s);
+
+  assert.equal(sends.length, 0);
+  assert.equal(ledgerRows(s.ids.profile)[0].status, "abandoned");
 });

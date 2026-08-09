@@ -237,3 +237,77 @@ test("12 deleting a run leaves zero orphaned step_side_effects rows", () => {
   ).get() as { c: number };
   assert.equal(orphans.c, 0, "no orphans anywhere in the table");
 });
+
+// ─── 1b: mark_delivered — the operator's safe exit from an in_flight row ─────
+// Without it, "skip" leaves the track failed forever and "resend" duplicates.
+// That is the same permanent dead-end as F2, introduced by the fix for F1.
+
+test("1b mark_delivered confirms the ledger, stamps the target and advances — with zero sends", () => {
+  const ids = scenario({ ledger: { stepRef: "pos:1", status: "in_flight" } });
+  const db = getDb();
+
+  const r = callRetry(ids.run, { target_ids: [ids.target], resolve: "mark_delivered" });
+
+  assert.equal(r.status, 200);
+  const body = r.body as { retried: number; outcomes: Array<{ outcome: string; target_id: string; reason?: string }> };
+  assert.equal(body.outcomes[0].outcome, "marked_delivered");
+
+  const led = db.prepare("SELECT status, confirmed_at, error_message FROM step_side_effects WHERE run_profile_id = ?").get(ids.profile) as
+    { status: string; confirmed_at: string | null; error_message: string | null };
+  assert.equal(led.status, "confirmed");
+  assert.ok(led.confirmed_at, "confirmed_at recorded");
+  assert.match(led.error_message ?? "", /operator-asserted/,
+    "the record must distinguish an operator assertion from a system confirmation");
+
+  const t = db.prepare("SELECT message_sent_at FROM targets WHERE id = ?").get(ids.target) as { message_sent_at: string | null };
+  assert.ok(t.message_sent_at, "target stamped");
+
+  const track = trackOf(ids.track);
+  assert.equal(track.state, "in_progress");
+  assert.equal(track.current_step, 1, "advanced past the delivered step so nothing re-sends");
+});
+
+test("1b mark_delivered is rejected for a non-message (inmail) ledger row", () => {
+  const ids = scenario({ ledger: { stepRef: "pos:1", status: "in_flight" } });
+  const db = getDb();
+  db.prepare("UPDATE step_side_effects SET action = 'inmail' WHERE run_profile_id = ?").run(ids.profile);
+  db.prepare("UPDATE workflow_steps SET step_type = 'sales_inmail' WHERE workflow_id = ?").run(ids.wf);
+
+  const r = callRetry(ids.run, { target_ids: [ids.target], resolve: "mark_delivered" });
+
+  const body = r.body as { outcomes: Array<{ outcome: string; reason?: string }> };
+  assert.equal(body.outcomes[0].outcome, "blocked");
+  assert.match(body.outcomes[0].reason ?? "", /message steps only/);
+  assert.equal(
+    (db.prepare("SELECT status FROM step_side_effects WHERE run_profile_id = ?").get(ids.profile) as { status: string }).status,
+    "in_flight", "ledger untouched");
+});
+
+test("1b mark_delivered is rejected when there is no in_flight row", () => {
+  const ids = scenario();   // no ledger at all
+
+  const r = callRetry(ids.run, { target_ids: [ids.target], resolve: "mark_delivered" });
+
+  const body = r.body as { outcomes: Array<{ outcome: string; reason?: string }> };
+  assert.equal(body.outcomes[0].outcome, "blocked");
+  assert.match(body.outcomes[0].reason ?? "", /requires an in-flight message ledger row/);
+  assert.equal(trackOf(ids.track).state, "failed", "not re-armed");
+});
+
+test("1b every outcome carries target_id so the UI can name the person", () => {
+  // Cover BOTH push sites: the blocked path (message + ledger) and the plain
+  // re-arm path (connect, no ledger). A test that only exercises one of them
+  // cannot detect target_id being dropped from the other.
+  const blockedIds = scenario({ ledger: { stepRef: "pos:1", status: "in_flight" } });
+  const blockedBody = callRetry(blockedIds.run, { target_ids: [blockedIds.target] }).body as
+    { outcomes: Array<{ track_id: string; target_id: string; outcome: string }> };
+  assert.equal(blockedBody.outcomes[0].outcome, "blocked");
+  assert.equal(blockedBody.outcomes[0].target_id, blockedIds.target, "blocked outcome names the person");
+  assert.equal(blockedBody.outcomes[0].track_id, blockedIds.track);
+
+  const rearmIds = scenario({ stepType: "connect" });
+  const rearmBody = callRetry(rearmIds.run, { target_ids: [rearmIds.target] }).body as
+    { outcomes: Array<{ track_id: string; target_id: string; outcome: string }> };
+  assert.equal(rearmBody.outcomes[0].outcome, "rearmed");
+  assert.equal(rearmBody.outcomes[0].target_id, rearmIds.target, "re-armed outcome names the person too");
+});

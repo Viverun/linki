@@ -2776,11 +2776,11 @@ export default function WorkflowDetailPage({
     }
   }
 
-  async function retryProspect(runId: string, targetId: string) {
+  async function retryProspect(runId: string, targetId: string, resolve?: "resend" | "mark_delivered") {
     const res = await fetch(`/api/runs/${runId}/retry`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_ids: [targetId] }),
+      body: JSON.stringify(resolve ? { target_ids: [targetId], resolve } : { target_ids: [targetId] }),
     });
     if (res.ok) {
       // A 200 no longer means "everything re-armed": retry now refuses tracks
@@ -2791,6 +2791,12 @@ export default function WorkflowDetailPage({
       const blocked = outcomes.filter((o) => o.outcome === "blocked");
       if (blocked.length > 0) {
         toast.error(blocked[0].reason ?? "Not retried — a previous attempt may already have been delivered");
+        refreshProspects();
+        refreshStats();
+        return;
+      }
+      if (outcomes.some((o) => o.outcome === "marked_delivered")) {
+        toast.success("Marked as delivered — the campaign moved on without sending");
         refreshProspects();
         refreshStats();
         return;
@@ -3338,6 +3344,19 @@ export default function WorkflowDetailPage({
                                 className="inline-flex items-center p-1 rounded text-base-content/20 hover:text-info hover:bg-info/10 transition-colors"
                               >
                                 <RiRefreshLine size={13} />
+                              </button>
+                            )}
+                            {/* Distinct operator action, deliberately NOT worded like a retry:
+                                it records a human assertion that the message arrived and moves
+                                the campaign on without sending anything. Only offered when the
+                                step is actually blocked on a possibly-delivered message. */}
+                            {p.state === "failed" && p.error_message?.includes("may already have been delivered") && (
+                              <button
+                                title="Only if you have checked LinkedIn yourself and confirmed the message arrived. Records your assertion and moves the campaign on. Sends nothing."
+                                onClick={() => retryProspect(p.run_id, p.target_id, "mark_delivered")}
+                                className="inline-flex items-center px-1 rounded text-[10px] text-warning/70 hover:text-warning hover:bg-warning/10 transition-colors whitespace-nowrap"
+                              >
+                                I verified delivery
                               </button>
                             )}
                             {p.state !== "completed" && (

@@ -17,26 +17,49 @@ import { stepRefOf } from "@/lib/linkedin/runner";
  * recorded. Breaking that would turn a recoverable divergence into a dead end.
  */
 
-type Outcome = "rearmed" | "advanced" | "blocked" | "skipped";
+type Outcome = "rearmed" | "advanced" | "blocked" | "skipped" | "marked_delivered";
 
 interface TrackOutcome {
   track_id: string;
+  /** The UI lists prospects, not tracks — without this it cannot say WHO was blocked. */
+  target_id: string;
   outcome: Outcome;
   reason?: string;
 }
+
+/** Marker kept in the stored record so an operator assertion is never mistaken
+ *  for a system confirmation. LinkedIn gives messaging no delivery receipt, so
+ *  the provenance of a 'confirmed' row is the only thing that distinguishes
+ *  "we saw it work" from "a human said it worked". */
+const OPERATOR_ASSERTION = "operator-asserted delivery (not system-confirmed)";
+
+/**
+ * - "skip"           default. A possibly-delivered message is left alone and the
+ *                    track stays failed.
+ * - "resend"         operator accepts the duplicate risk and re-arms.
+ * - "mark_delivered" operator has checked LinkedIn themselves and confirms the
+ *                    message arrived. Records that assertion and advances past
+ *                    the step. Sends nothing and opens no browser.
+ *
+ * Without the third option, refusing to auto-resolve an in_flight row leaves the
+ * operator with only "stay broken forever" or "risk a duplicate" — structurally
+ * the same dead end as F2, introduced by the fix for F1.
+ */
+const RESOLUTIONS = ["skip", "resend", "mark_delivered"] as const;
+type Resolution = (typeof RESOLUTIONS)[number];
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end();
 
   const db = getDb();
   const runId = req.query.id as string;
-  const { target_ids, resolve } = req.body as { target_ids: string[]; resolve?: "skip" | "resend" };
+  const { target_ids, resolve } = req.body as { target_ids: string[]; resolve?: Resolution };
 
   if (!target_ids?.length) return res.status(400).json({ error: "target_ids required" });
-  if (resolve !== undefined && resolve !== "skip" && resolve !== "resend") {
-    return res.status(400).json({ error: "resolve must be 'skip' or 'resend'" });
+  if (resolve !== undefined && !RESOLUTIONS.includes(resolve)) {
+    return res.status(400).json({ error: `resolve must be one of ${RESOLUTIONS.map(r => `'${r}'`).join(", ")}` });
   }
-  const resolution: "skip" | "resend" = resolve ?? "skip";
+  const resolution: Resolution = resolve ?? "skip";
 
   const run = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
   if (!run) return res.status(404).json({ error: "Run not found" });
@@ -82,7 +105,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const action = step?.step_type === "message" ? "message" : step?.step_type === "sales_inmail" ? "inmail" : null;
       if (!step || !action) {
         rearm.run(c.id);
-        outcomes.push({ track_id: c.id, outcome: "rearmed" });
+        outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "rearmed" });
         continue;
       }
 
@@ -94,26 +117,58 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (ledger?.status === "confirmed") {
         // Already delivered. Re-arming in place would re-send, so move past it.
         advance.run(c.current_step + 1, c.id);
-        outcomes.push({ track_id: c.id, outcome: "advanced", reason: `${action} already delivered at ${ledger.step_ref} — advanced past it` });
+        outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "advanced", reason: `${action} already delivered at ${ledger.step_ref} — advanced past it` });
         continue;
       }
 
       if (ledger?.status === "in_flight") {
+        if (resolution === "mark_delivered") {
+          if (action !== "message") {
+            outcomes.push({
+              track_id: c.id, target_id: c.target_id, outcome: "blocked",
+              reason: `mark_delivered applies to message steps only, not ${action}`,
+            });
+            continue;
+          }
+          // Operator asserts they checked LinkedIn and the message arrived.
+          // Records the assertion, advances past the step. No send, no browser.
+          db.prepare(
+            `UPDATE step_side_effects SET status = 'confirmed', confirmed_at = ?, error_message = ?
+             WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'message'`
+          ).run(new Date().toISOString(), OPERATOR_ASSERTION, c.run_profile_id, c.track, ledger.step_ref);
+          db.prepare("UPDATE targets SET message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?")
+            .run(new Date().toISOString(), c.target_id);
+          advance.run(c.current_step + 1, c.id);
+          console.warn(`[retry] run=${runId} track=${c.id} operator MARKED a possibly-delivered message as delivered (no send performed)`);
+          outcomes.push({
+            track_id: c.id, target_id: c.target_id, outcome: "marked_delivered",
+            reason: OPERATOR_ASSERTION,
+          });
+          continue;
+        }
         if (resolution === "resend") {
           rearm.run(c.id);
-          outcomes.push({ track_id: c.id, outcome: "rearmed", reason: `operator forced resend of a possibly-delivered ${action}` });
+          outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "rearmed", reason: `operator forced resend of a possibly-delivered ${action}` });
           continue;
         }
         outcomes.push({
           track_id: c.id,
+          target_id: c.target_id,
           outcome: "blocked",
           reason: `a previous ${action} attempt may already have been delivered — not re-armed. Pass resolve:"resend" to force.`,
         });
         continue;
       }
 
+      if (resolution === "mark_delivered") {
+        outcomes.push({
+          track_id: c.id, target_id: c.target_id, outcome: "blocked",
+          reason: "mark_delivered requires an in-flight message ledger row; this track has none",
+        });
+        continue;
+      }
       rearm.run(c.id);
-      outcomes.push({ track_id: c.id, outcome: "rearmed" });
+      outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "rearmed" });
     }
   })();
 
@@ -122,7 +177,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     if (forced > 0) console.warn(`[retry] run=${runId} operator FORCED resend of ${forced} possibly-delivered action(s)`);
   }
 
-  const retried = outcomes.filter(o => o.outcome === "rearmed" || o.outcome === "advanced").length;
+  const retried = outcomes.filter(o => o.outcome === "rearmed" || o.outcome === "advanced" || o.outcome === "marked_delivered").length;
   // `ok` and `retried` keep their original names and meaning; `outcomes` is additive.
   return res.json({ ok: true, retried, outcomes });
 }
