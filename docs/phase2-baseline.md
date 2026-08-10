@@ -29,9 +29,9 @@ legitimately and constantly. It is replaced by the tripwires below.
 | `integrity_check` / `foreign_key_check` | ok / 0 |
 | Tables | 28 |
 | `step_side_effects` rows | **0** (matters for P2-3's scheme switch) |
-| Key counts | accounts 1 · targets 5 · lists 4 · list_targets 6 · workflows 5 · workflow_steps 7 · runs 9 · run_profiles 9 · run_profile_tracks 9 · logs 40 · app_settings 9 · users 1 |
-| Runs | 7 completed, 2 paused, **0 running** |
-| Tracks | 5 completed, 2 failed, 2 in_progress |
+| Key counts | accounts 1 · targets 5 · lists 4 · list_targets 6 · workflows 5 · workflow_steps 7 · **runs 8** · **run_profiles 8** · **run_profile_tracks 8** · **logs 38** · app_settings 9+ · users 1 — see the authorised-deletion log below |
+| Runs | 7 completed, **1 paused**, 0 running |
+| Tracks | 5 completed, 2 failed, **1 in_progress** |
 | WAL / main | 2,830,472 B / 335,872 B |
 
 **Live invitation rows — must not change:**
@@ -130,10 +130,14 @@ exist on disk and be reported ignored by `git check-ignore`:
 diag.ts
 invite-diag.ts
 whoami.ts
-lib/linkedin/runner.ts.bak
 scripts/demo-connect-message.ts
 tests/demo-harness.test.ts
 ```
+
+**Five, not six.** `lib/linkedin/runner.ts.bak` was deleted on 2026-08-10: it was
+byte-identical to `git show 7d8b930:lib/linkedin/runner.ts`, so it held nothing
+history did not, while being a stale snapshot of the file that changed most across
+two phases — the kind of thing someone eventually diffs against and reasons from.
 
 They live in `.git/info/exclude`, not `.gitignore`, so QA-artifact filenames do
 not appear in a public repository — and because an ignored file cannot be staged
@@ -141,3 +145,41 @@ by `git add -A` without `-f`, which turns a habit into a control.
 
 `scripts/preflight.sh` enforces this, plus `tsc`, `npm test`, and the eslint
 baseline, and must pass before every commit.
+
+## Authorised deletions — keep this current
+
+Row counts replaced `md5` as the integrity signal, so an authorised deletion that
+leaves the baseline stale turns every later check into an unexplained divergence.
+That is precisely how a real corruption gets waved through months later. Every
+deliberate change to the counts is recorded here, in the same commit that makes it.
+
+### 2026-08-10 — `prodqa-rf-track` and its parent run
+
+**What:** the production-QA execution created during Phase 1's authorised Connect
+test against `raise-faster` — 1 run (`prodqa-rf-run`), 1 run_profile
+(`prodqa-rf-rp`), 1 track (`prodqa-rf-track`), 2 logs.
+
+**Why:** production-shaped QA data that would mislead any future audit of "what
+runs exist and why". Same precedent as Phase 1's `qa-phaseb-*` and `qa-restart-*`
+cleanups.
+
+**Authorised by:** operator, Phase 2 §2.
+
+**Evidence preserved first:** the deletion cascades `logs`, which held the only log
+rows for the one real LinkedIn invitation Linki has ever sent. Exported to
+`data/backups/prodqa-rf-provenance-20260810T100615Z.json` before deleting, and referenced from
+`docs/audit-corrections.md` as the provenance for Phase 1's connection-sending
+claim. DB backup: `data/backups/pre-prodqa-delete-20260810T100615Z.db` (opened and verified).
+
+**Counts:** runs 9 → **8** · run_profiles 9 → **8** · run_profile_tracks 9 → **8**
+· logs 40 → **38**. Runs by status 7 completed / 2 paused → 7 completed / **1
+paused**. Tracks 5/2/2 → 5/2/**1**.
+
+**Unchanged and verified after:** schema fingerprint `9436e671d7feec57`;
+`integrity_check` ok; `foreign_key_check` 0; all five referential checks 0; and the
+`raise-faster` **target row with its real pending invitation**
+(`connection_requested_at = 2026-08-09T05:27:59.968Z`) untouched — the target was
+never part of this deletion.
+
+**Cap-counter check:** no deleted `logs` row was dated today (both were 2026-08-09
+against a current date of 2026-08-10). See the rule in `docs/operations.md`.

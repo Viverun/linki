@@ -14,7 +14,7 @@ bad()  { echo "FAIL — $1"; fail=1; }
 # artifact replaced by another still counts six.
 LOCAL_ONLY=(
   "diag.ts" "invite-diag.ts" "whoami.ts"
-  "lib/linkedin/runner.ts.bak" "scripts/demo-connect-message.ts" "tests/demo-harness.test.ts"
+  "scripts/demo-connect-message.ts" "tests/demo-harness.test.ts"
 )
 
 step "local-only files ignored"
@@ -42,10 +42,23 @@ else
   grep -E '^✖' /tmp/preflight-test.log | sort -u | head -5 | sed 's/^/    /'
 fi
 
-step "eslint at baseline (40 problems)"
+# NOT an equality check. An equality check punishes improvement: the first person
+# to legitimately fix a lint error gets a failing gate, and the predictable
+# response is to bypass or delete the gate — a worse outcome than 40 lint errors.
+# A gate should catch regression and never block progress. Same principle as the
+# test-count tripwire. Lower the baseline here when errors are genuinely fixed.
+ESLINT_BASELINE="${ESLINT_BASELINE:-40}"
+step "eslint <= baseline (${ESLINT_BASELINE})"
 n=$(npx eslint . 2>&1 | grep -oE '[0-9]+ problems' | head -1 | grep -oE '^[0-9]+' | head -1)
 n=${n:-unknown}
-[ "${n}" = "40" ] && ok || bad "${n} problems, baseline is 40 (new lint is a regression)"
+if [ "${n}" = "unknown" ]; then
+  bad "could not parse eslint output"
+elif [ "${n}" -le "${ESLINT_BASELINE}" ]; then
+  ok
+  [ "${n}" -lt "${ESLINT_BASELINE}" ] && echo "    (improved: ${n} < ${ESLINT_BASELINE} — lower ESLINT_BASELINE in this script)"
+else
+  bad "${n} problems, baseline ${ESLINT_BASELINE} — new lint is a regression"
+fi
 
 echo
 if [ "${fail}" = "0" ]; then echo "PREFLIGHT PASS — safe to commit"; else echo "PREFLIGHT FAIL — do not commit"; fi

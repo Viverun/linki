@@ -285,3 +285,21 @@ Two of the audit's findings fell to measurement. Ratings derived from reading
 code without executing it should be treated as hypotheses until a failing
 reproduction exists. That applies to the findings still open (F4–F7, N3, N6, N7,
 N8) as much as it did to F3.
+
+---
+
+## Provenance for Phase 1's connection-sending claim
+
+Phase 1 reported one real LinkedIn invitation sent end-to-end through the shipped
+runner path to `raise-faster`. The run, run_profile, track and log rows that
+recorded it were production-QA artifacts, deleted on 2026-08-10 by authorisation
+(Phase 2 §2) because production-shaped QA data misleads later audits.
+
+The evidence was exported before deletion to
+`data/backups/prodqa-rf-provenance-20260810T100615Z.json`, containing the `runs`,
+`run_profiles`, `run_profile_tracks`, `logs` and `step_side_effects` rows, plus a
+snapshot of the `raise-faster` target.
+
+The target row itself was **not** deleted, and remains the live evidence:
+`connection_requested_at = 2026-08-09T05:27:59.968Z`, `degree = NULL`, with the
+invitation still pending on LinkedIn.

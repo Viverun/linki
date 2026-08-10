@@ -127,3 +127,29 @@ baseline 40 problems. Exit 0 means safe to commit.
 It exists because Phase 2 shipped a commit containing a failing test: the suite
 had been run as a report rather than as a gate. A report you can skim past; a
 non-zero exit you cannot.
+
+**A gate is code, and untested gate code fails in the direction of passing.** This
+has now happened twice across two phases. The first run of `preflight.sh` carried
+two defects of its own — an eslint parse that produced `40\n0` and compared false,
+and a check that flagged the script's own unstaged self. Both would have made the
+gate noisy and then ignored. Exercise a new gate against both a passing and a
+failing tree before trusting it.
+
+The eslint check is deliberately `<=` a baseline rather than `==`. An equality
+check punishes improvement: whoever fixes a lint error first gets a failing gate,
+and then removes the gate.
+
+## Never delete a run whose logs include today's date
+
+`logs` doubles as the daily-cap counter: the runner counts today's
+`Connection request sent%` / `Message sent%` rows to decide how much allowance
+remains (`runner.ts:1436-1452`). Deleting a run cascades its logs, so removing
+same-day rows **silently gives back cap allowance the account has already spent** —
+and the account does not get that allowance back on LinkedIn's side.
+
+Before deleting any run:
+
+    SELECT COUNT(*) FROM logs WHERE run_id = ? AND date(created_at) = date('now');
+
+Must be **0** while any campaign is active. If it is not, either wait until
+tomorrow or accept and record that the day's cap is now understated.
