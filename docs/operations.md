@@ -117,8 +117,12 @@ identity check over the six specific paths, in `scripts/preflight.sh`.
 ## `scripts/preflight.sh` — run before every commit
 
 ```
-./scripts/preflight.sh && git commit ...
+git add <explicit paths> && ./scripts/preflight.sh && git commit ...
 ```
+
+**Chain it with `&&`.** Running it and reading the output is a report; only the
+chain is a gate. And run it *after* staging — run before, it correctly flags the
+very files you are about to commit as untracked, which trains you to ignore it.
 
 Checks: the six local-only paths exist and are ignored (identity, not count); no
 unexpected untracked files; `tsc --noEmit`; `npm test`; eslint still at the

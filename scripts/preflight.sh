@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# Run BEFORE every commit. Phase 2 shipped a commit with a failing test because
-# the suite was run as a report rather than a gate; this makes it a gate.
+# Run AFTER staging, IMMEDIATELY BEFORE committing, and CHAIN IT:
 #
-#   ./scripts/preflight.sh   -> exit 0 = safe to commit
+#   git add <paths> && ./scripts/preflight.sh && git commit ...
+#
+# The chain is the point. Phase 2 shipped a commit with a failing test because the
+# suite was run as a report rather than a gate. It then happened a second time in
+# a milder form: preflight was run BEFORE `git add`, correctly reported the new
+# file as untracked, and the commit proceeded anyway because the output was piped
+# to `tail` instead of gating the command. A gate you read is a report. A gate you
+# chain with && is a gate.
+#
+# Order matters: run this AFTER staging, or the untracked check fires on the very
+# files you are about to commit.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 fail=0
