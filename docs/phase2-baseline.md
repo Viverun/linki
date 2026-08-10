@@ -157,7 +157,8 @@ be wrong teaches you to stop trusting the column.
 | … Phase 2 commits through `613d04d` | *not recorded per commit* | see the note below |
 | Pre-P2-2 (`613d04d`) | **287** | measured: `git revert --no-commit HEAD` on `943df6e`, then `npm test` |
 | P2-2 (`943df6e`) | **304** | 287 + 17 new in `tests/degraded-alerting.test.ts` |
-| §1 isolation (this commit) | **308** | 304 + 4 new in `tests/health-isolation.test.ts` |
+| §1 isolation (`c89ca98`) | **308** | 304 + 4 new in `tests/health-isolation.test.ts` |
+| P2-4 backup (`252d784`) | **321** | 308 + 13 new in `tests/backup.test.ts`; confirmed by revert rehearsal returning exactly 308 |
 
 **The 288 → 287 correction.** The P2-2 working notes carried 287 as "288",
 which made the arithmetic land at 305 against a measured 304. The gap was
