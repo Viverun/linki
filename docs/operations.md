@@ -153,6 +153,36 @@ supervisor would read that as unhealthy, and the restart budget would burn down
 against something a restart cannot fix. **The endpoint that decides whether to
 restart must not depend on the subsystem it judges.**
 
+## Reproducing a wrong-recipient defect NEVER uses the live account
+
+A defect whose failure mode is "acts on the wrong person" must be reproduced in
+the harness. Never against LinkedIn, never with the real account, no exceptions
+for "just to confirm it's real".
+
+The reasoning is not caution for its own sake. An invitation is **irreversible**
+and it lands on an **uninvolved third party** who did not consent to being part
+of a test. Withdrawing it does not undo the notification they already received,
+and it starts a ~3-week cooldown before that person can be invited again for real.
+There is no version of this experiment whose cost falls only on the operator.
+
+What genuinely needs to come from real data is the **URL shape** — and reading a
+URL is not sending an invitation. Capture the shape, put it in a fixture, and
+reproduce in `FakePage`.
+
+Two claims get conflated when reporting this class of work, and they must be
+reported separately:
+
+1. **The code path mishandles the input.** Provable in the harness.
+2. **The input actually occurs in production.** Provable only from observed data,
+   or from a code path that can produce it.
+
+N7 is the worked example: claim 1 was proved in `FakePage`; claim 2 was NOT
+proved, because the URL was synthesised. Reporting it as "reproduced live"
+merged the two and implied an invitation existed that did not. When claim 2
+cannot be proved from observed data, look for a code path that produces the
+input instead — for N7 that turned out to be an unvalidated field on
+`POST /api/targets`, which settled reachability without touching LinkedIn at all.
+
 ## Tests that assert on source text
 
 A test that greps source is measuring the file, not the behaviour. Sometimes

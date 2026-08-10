@@ -279,6 +279,90 @@ Phase 2 fix is an operator-assertion stamp for `connect`, symmetric with the
 
 ---
 
+## N7 — SEVERITY CORRECTED, P2 -> P0. The first correction that runs UPWARD.
+
+The audit rated N7 **P2**, with reachability explicitly marked "NOT VERIFIED",
+and stated it would be **P0 if reachability were ever demonstrated**.
+
+Reachability is now demonstrated. The severity is corrected to **P0**.
+
+### What was proved, and by what means — stated precisely
+
+Two claims were merged in an early report of this work. They are not the same
+claim and only one of them was proved by the reproduction.
+
+| Claim | Status | Means |
+|---|---|---|
+| 1. The code path accepts a vanity-less URL and selects a **bystander's** CTA, clicking Send | **PROVED** | `FakePage` harness. `sendClicked = true` against a CTA whose href carried `vanityName=somebody-else` |
+| 2. LinkedIn itself emits a `flagshipProfileUrl` lacking `/in/<vanity>` | **NOT PROVED** | the URL used was **synthesised** for the test |
+
+**No LinkedIn interaction occurred at any point.** `FakePage` is an in-memory
+object; the `playwright` import in that test file is `import type` and is erased
+at runtime; no chromium process ran; and the database shows zero
+`connection_requested_at` values and zero `logs` rows dated 2026-08-10. The four
+recorded invitations remain the authorised QA sends of 2026-08-08/09.
+
+An early report of this work said N7 was "reproduced live". That was wrong, and
+wrong in the most expensive direction — it reads as "against production
+LinkedIn", which would mean a real invitation sitting in an uninvolved person's
+inbox and an incident to remediate. There is no such invitation.
+
+### So why P0, if Claim 2 is unproved?
+
+Because reachability does not depend on Claim 2. Asking that question surfaced a
+second route, provable from code and confirmed by execution:
+
+- `resolveLinkedinUrl` (`lib/linkedin/runner.ts:655`) gates on
+  `target.linkedin_url?.includes("/in/")`. That is a **substring test, not a
+  shape test**.
+- `POST /api/targets` (`pages/api/targets/index.ts`) validates only that
+  `linkedin_url` is **truthy**. No shape check at all.
+
+So each of these is stored, passes the gate, and yields a null vanity:
+
+```
+https://www.linkedin.com/in/          gate=true   vanity=null
+https://example.com/in/               gate=true   vanity=null
+linkedin.com/in/?trk=x                gate=true   vanity=null
+https://www.linkedin.com/in//         gate=true   vanity=null
+```
+
+Any operator pasting a truncated or wrong URL into the contact form reaches the
+null-vanity condition. No attacker and no LinkedIn quirk is required. That is
+production-reachable by an ordinary mistake, and it terminates in an
+**irreversible invitation to a person nobody chose** — hence P0.
+
+The CSV path is NOT affected: `lib/csv-import.ts:94-95` runs
+`normalizeLinkedinUrl` and rejects a row whose URL is not a valid
+`linkedin.com/in/` profile. Manual creation is the unguarded path.
+
+No malformed row exists in the live database — all five targets carry valid
+vanities — so the defect was never triggered here. Reachable is not the same as
+triggered, and the severity reflects the former.
+
+### Unknown #1 — STILL OPEN
+
+*Can `flagshipProfileUrl` lack `/in/`?* Unresolved. It requires real observed
+data and none was gathered. It stays listed as **structurally possible, not
+demonstrated**, and nothing in this correction should be read as answering it.
+N7's severity no longer depends on it.
+
+### The asymmetry, which is the actual lesson
+
+This is the **fourth** correction to the audit and the **first that runs
+upward**. The previous three — F3 retracted, the transaction claim retracted,
+F8 recharacterised — all *overstated*, and a habit had formed of expecting
+corrections to deflate findings.
+
+"NOT VERIFIED" was read as "probably not reachable". It means **nobody looked**.
+Those are different statements, and an unverified-reachability finding is exactly
+as likely to be under-rated as over-rated. Where the consequence is irreversible
+and lands on a third party, the asymmetry in *cost* is severe: over-rating buys
+an unnecessary guard, under-rating sends a stranger an invitation.
+
+The rule this yields: an unverified reachability claim is not evidence of low
+severity. Either look, or rate it as if it is reachable.
+
 ## Standing correction to how findings are rated
 
 Two of the audit's findings fell to measurement. Ratings derived from reading
