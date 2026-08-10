@@ -153,3 +153,25 @@ Before deleting any run:
 
 Must be **0** while any campaign is active. If it is not, either wait until
 tomorrow or accept and record that the day's cap is now understated.
+
+## Do not generate files with shell heredocs
+
+Three meta-tooling failures across two phases, and the third was this: an
+unquoted heredoc (`<<PY` rather than `<<'PY'`) command-substituted every backtick
+in the source before the interpreter saw it, and three documentation files were
+committed with every backticked term silently deleted.
+
+**Use the file-write tool.** There is no shell between the content and the disk,
+so the mistake is inexpressible rather than remembered — the same move that
+retired `git add -A`.
+
+If a heredoc is genuinely unavoidable: quote the delimiter, then read the file
+back and diff it against intent. An unquoted heredoc also evaluates `$(...)` at
+write time, which bakes a single result in as a literal — a backup script naming
+files by `$(date)` is exactly that shape and would silently write to one filename
+forever.
+
+**All three failures were in the tooling around the change, never in the change.**
+Each was caught by an independent check — a changed untracked count, a re-read of
+the file, a re-run mutation — and none by the tool reporting failure. Tooling that
+reports its own success is not a control. See `docs/generation-audit.md`.
