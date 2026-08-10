@@ -17,7 +17,31 @@ let db: Database.Database;
 
 export function getDb(): Database.Database {
   if (!db) {
-    db = new Database(DB_PATH);
+    // Build into a LOCAL, and publish to the module singleton only once the
+    // connection is fully initialised.
+    //
+    // Assigning `db` first (as this did) meant a throw in initDb/runMigrations
+    // left a cached, half-built handle behind: every later getDb() returned it
+    // without error, so the app would run with step_side_effects missing and
+    // every message step failing closed on `no such table`. A retry loop on top
+    // of that is worse than the loud crash it replaces — it turns a visible
+    // failure into a silently half-initialized runner.
+    const fresh = new Database(DB_PATH);
+    try {
+      initialiseConnection(fresh);
+    } catch (err) {
+      // Leave the singleton unset so a later call genuinely re-initialises, and
+      // close the orphan so a failed boot cannot leak a file handle per attempt.
+      try { fresh.close(); } catch { /* already gone */ }
+      throw err;
+    }
+    db = fresh;
+    scheduleUpdateCheck();
+  }
+  return db;
+}
+
+function initialiseConnection(db: Database.Database): void {
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     // REDUNDANT TODAY, DELIBERATELY KEPT. Do not delete as dead code, and do not
@@ -46,9 +70,6 @@ export function getDb(): Database.Database {
     db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
     initDb(db);
     runMigrations(db);
-    scheduleUpdateCheck();
-  }
-  return db;
 }
 
 function runParallelTracksMigration(db: Database.Database) {

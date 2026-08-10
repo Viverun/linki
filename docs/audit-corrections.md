@@ -90,6 +90,59 @@ test that fails against unmodified code, *for the reason the finding claims*,
 before any fix is written. If the reproduction passes, the finding is retracted
 rather than fixed. This is why N4, N5 and F8 each carry a reproduction step.
 
+**Extended after F8.** F8 was not an absence-based grep — it was a
+reading-comprehension inference about control flow, and it was wrong in the same
+way. Three audit claims have now been corrected by measurement, and in two of
+them the stated mechanism was wrong while a real defect sat next to it. So the
+rule is not "don't trust greps". It is:
+
+> **Don't trust any finding whose mechanism has not been executed.**
+
+---
+
+## F8 — RECHARACTERISED, not retracted
+
+**Claimed:** `globalLoop()`'s outer `.catch()` logs and stops the runner forever,
+so an unexpected throw anywhere kills it while HTTP keeps serving.
+
+**Measured.** Every `await` inside `while (true)` is already guarded:
+
+| line | await | guarded? |
+|---|---|---|
+| `runner.ts:1279` | `tick(db)` | `try/catch`, logs and continues |
+| `runner.ts:1284-5` | `import` + `processScheduledImports` | own `try/catch` |
+| `runner.ts:1289` | `sleep(POLL_INTERVAL_MS)` | a `setTimeout` promise; cannot reject |
+
+**A throw from inside `tick` does not stop the loop.** The audit's mechanism was
+wrong.
+
+The one reachable fatal path is `getDb()` at `runner.ts:1275` — inside
+`globalLoop`, outside the `while`. Reachable via an unreadable or corrupt DB
+file, or a missing `NEXTAUTH_SECRET` surfacing while migrating stored secrets.
+
+**And the severity is worse than claimed in one respect:**
+`g.__linkiGlobalRunnerStarted` is set *before* the failure and never reset, so
+`ensureGlobalRunnerStarted()` is a permanent no-op afterwards. Verified: after
+the fault is cleared, a second call performs zero `getDb()` calls. The runner
+cannot be revived in-process by `POST /api/runs/[id]/start` or anything else —
+only a process restart. Narrower than claimed on tick failures; worse than
+claimed on recoverability.
+
+---
+
+## NF-4 — a permanently-throwing `tick` is invisible (not in the audit)
+
+Because `tick` is wrapped inside `while (true)`, a tick that throws on *every*
+iteration — persistent `SQLITE_CANTOPEN` inside tick, a browser that will not
+launch, a plain code bug — leaves the loop spinning forever, logging, and
+accomplishing nothing. Nothing surfaces it: the process is alive, HTTP serves,
+and a loop-start heartbeat advances the whole time.
+
+This is the real "wedged but alive" runner. The guard reset does nothing for it.
+It is the failure the heartbeat actually earns its keep against, and it requires
+distinguishing *loop liveness* from *tick completion* — one marker cannot express
+it.
+
 ---
 
 ## F2 — rating rests on a recovery route that Task 3 removes
