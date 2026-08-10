@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { promisify } from "node:util";
+import { codeOnly } from "@/tests/support/source-text";
 
 const execFileAsync = promisify(execFile);
 
@@ -94,12 +95,22 @@ test("a non-object payload: no action, loudly", async () => {
 
 test("the live health route emits the version the predicate expects", async () => {
   const { readFile } = await import("node:fs/promises");
-  const route = await readFile("pages/api/health.ts", "utf8");
-  const pred = await readFile("scripts/health-predicate.js", "utf8");
-  const routeVersion = route.match(/const HEALTH_SCHEMA = (\d+)/)?.[1];
-  const predVersion = pred.match(/const EXPECTED_SCHEMA = (\d+)/)?.[1];
-  assert.ok(routeVersion, "route declares HEALTH_SCHEMA");
-  assert.equal(routeVersion, predVersion, "route and predicate must agree on the contract version");
+  // Comments stripped: `.match()` returns the FIRST hit, so a stale
+  // `// legacy: const HEALTH_SCHEMA = 1` above a live `= 2` fed the OLD number
+  // to this assertion while route and predicate silently disagreed about the
+  // contract version — precisely the drift this test exists to catch (A3).
+  const route = codeOnly(await readFile("pages/api/health.ts", "utf8"));
+  const pred = codeOnly(await readFile("scripts/health-predicate.js", "utf8"));
+
+  const routeMatches = [...route.matchAll(/const HEALTH_SCHEMA = (\d+)/g)];
+  const predMatches = [...pred.matchAll(/const EXPECTED_SCHEMA = (\d+)/g)];
+  // Exactly one declaration each. Two live declarations would make "the version"
+  // ambiguous, and picking the first would be a guess.
+  assert.equal(routeMatches.length, 1, "the route must declare HEALTH_SCHEMA exactly once");
+  assert.equal(predMatches.length, 1, "the predicate must declare EXPECTED_SCHEMA exactly once");
+
+  assert.equal(routeMatches[0][1], predMatches[0][1],
+    "route and predicate must agree on the contract version");
   assert.match(route, /health_schema: HEALTH_SCHEMA/, "and every response carries it");
 });
 
@@ -109,23 +120,48 @@ test("an unanswerable server IS acted on — that is what a restart fixes", asyn
 
 test("the Dockerfile and compose both call the shared predicate, not an inline copy", async () => {
   const { readFile } = await import("node:fs/promises");
-  const dockerfile = await readFile("Dockerfile", "utf8");
-  const compose = await readFile("docker-compose.yml", "utf8");
+  // Comments stripped. A2: replacing the real CMD with an inline curl and
+  // leaving `# was: CMD node scripts/health-predicate.js` behind kept this test
+  // green — the healthcheck would have stopped consulting the shared predicate
+  // while the test still said it did.
+  const dockerfile = codeOnly(await readFile("Dockerfile", "utf8"), { style: "hash", strings: false });
+  const compose = codeOnly(await readFile("docker-compose.yml", "utf8"), { style: "hash", strings: false });
+
+  // strings:false — a Dockerfile CMD and a compose healthcheck ARE quoted text.
+  // Blanking literals here would erase the very thing being asserted.
   assert.match(dockerfile, /CMD node scripts\/health-predicate\.js/);
   assert.match(compose, /health-predicate\.js/);
+
   // An inline duplicate is exactly how the two callers would drift apart.
-  assert.doesNotMatch(dockerfile, /restart_will_help===?true/, "no inline copy of the predicate");
-  assert.doesNotMatch(compose, /restart_will_help===?true/, "no inline copy of the predicate");
+  // Whitespace-tolerant: the original `/restart_will_help===?true/` would have
+  // let `restart_will_help === true` through, which is how anyone would actually
+  // write it.
+  const INLINE_COPY = /restart_will_help\s*===?\s*true/;
+  assert.doesNotMatch(dockerfile, INLINE_COPY, "no inline copy of the predicate");
+  assert.doesNotMatch(compose, INLINE_COPY, "no inline copy of the predicate");
+
   const ignore = await readFile(".dockerignore", "utf8");
   assert.match(ignore, /!scripts\/health-predicate\.js/, "must be present in the image");
 });
 
 test("scripts/watchdog.sh uses the shared predicate and enforces a restart budget", async () => {
   const { readFile } = await import("node:fs/promises");
-  const sh = await readFile("scripts/watchdog.sh", "utf8");
-  assert.match(sh, /health-predicate\.js/, "one definition, two callers");
+  const raw = await readFile("scripts/watchdog.sh", "utf8");
+  // strings:false — this script's echoed text IS its behaviour; BUDGET EXHAUSTED
+  // is what an operator reads in the log, not incidental prose.
+  const sh = codeOnly(raw, { style: "hash", strings: false });
+
+  // A1: the script could stop invoking the predicate altogether — replacing it
+  // with an inline `curl | grep` — and the header comment naming the file kept
+  // this green. Match the INVOCATION, not the mention.
+  assert.match(sh, /node\s+.*health-predicate\.js/, "one definition, two callers — and it is actually invoked");
   assert.match(sh, /FAILURES_BEFORE_ACTION/, "requires N consecutive failures");
   assert.match(sh, /MAX_RESTARTS_PER_HOUR/, "restart budget — autoheal had none");
   assert.match(sh, /BUDGET EXHAUSTED/, "and says so rather than silently continuing");
-  assert.doesNotMatch(sh, /docker\.sock/, "no socket mount: that is root-equivalent on the host");
+
+  // Checked against the RAW text on purpose: a socket mount hidden inside a
+  // comment is still a socket mount waiting to be uncommented, and the cost of
+  // a false positive here (someone renames a comment) is trivial next to the
+  // cost of a miss (root-equivalent host access).
+  assert.doesNotMatch(raw, /docker\.sock/, "no socket mount: that is root-equivalent on the host");
 });

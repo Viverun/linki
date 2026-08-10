@@ -20,7 +20,13 @@ after(() => rmSync(dbDir, { recursive: true, force: true }));
 
 test("D7: the singleton is published only AFTER initialisation completes", async () => {
   const { readFile } = await import("node:fs/promises");
-  const src = await readFile("lib/db.ts", "utf8");
+  const { codeOnly } = await import("@/tests/support/source-text");
+
+  // Comments AND strings stripped. A4: reinstating the D7 ordering bug while
+  // adding a comment that merely mentions `initialiseConnection(fresh)` kept
+  // this test green — indexOf found the token in the prose, so the ordering
+  // check compared against a position that had nothing to do with the code.
+  const src = codeOnly(await readFile("lib/db.ts", "utf8"));
   const fn = src.slice(src.indexOf("export function getDb"), src.indexOf("function initialiseConnection"));
 
   const buildsLocal = /const fresh = new Database\(DB_PATH\)/.test(fn);

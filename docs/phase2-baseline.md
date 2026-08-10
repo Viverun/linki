@@ -15,7 +15,7 @@ legitimately and constantly. It is replaced by the tripwires below.
 | Gate | Baseline |
 |---|---|
 | HEAD | `4af831c` |
-| `git status --porcelain` | **0 untracked** — the six local-only paths moved to `.git/info/exclude` |
+| `git status --porcelain` | **0 untracked** — the five local-only paths moved to `.git/info/exclude` (see the identity tripwire below; this row said "six" until 2026-08-10) |
 | `npx tsc --noEmit` | 0 errors |
 | `npm test` | **264** = 238 tracked + 26 untracked (`demo-harness`) |
 | `npm run build` | exit 0 |
@@ -145,6 +145,37 @@ by `git add -A` without `-f`, which turns a habit into a control.
 
 `scripts/preflight.sh` enforces this, plus `tsc`, `npm test`, and the eslint
 baseline, and must pass before every commit.
+
+## Test-count reconciliation
+
+The count is a tripwire, so it has to reconcile exactly. A row that is known to
+be wrong teaches you to stop trusting the column.
+
+| Point | Tests | How it was established |
+|---|---|---|
+| Phase 2 baseline (`4af831c`) | 264 | recorded above: 238 tracked + 26 untracked |
+| … Phase 2 commits through `613d04d` | *not recorded per commit* | see the note below |
+| Pre-P2-2 (`613d04d`) | **287** | measured: `git revert --no-commit HEAD` on `943df6e`, then `npm test` |
+| P2-2 (`943df6e`) | **304** | 287 + 17 new in `tests/degraded-alerting.test.ts` |
+| §1 isolation (this commit) | **308** | 304 + 4 new in `tests/health-isolation.test.ts` |
+
+**The 288 → 287 correction.** The P2-2 working notes carried 287 as "288",
+which made the arithmetic land at 305 against a measured 304. The gap was
+resolved by measurement, not by adjusting a number until it fit:
+
+1. `git revert --no-commit` on the P2-2 commit, then `npm test` → **287**.
+2. Inventory diff of every `test("…")` declaration in `tests/` between
+   `HEAD~1` and `HEAD`, excluding the new file → **224 before, 224 after,
+   zero removed or renamed**, confirming no pre-existing test was lost.
+
+The commit touched exactly one test file, and it was the new one. The
+off-by-one was in note-keeping, not in the suite.
+
+**Per-commit counts before `613d04d` were not recorded at the time.** They are
+deliberately left blank rather than reconstructed: re-deriving them now would
+mean checking out old commits and re-running, and a number recovered that way
+and written into a baseline table is indistinguishable, later, from one measured
+when it mattered. Blank is honest; a plausible-looking number is not.
 
 ## Authorised deletions — keep this current
 

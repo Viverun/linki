@@ -153,6 +153,60 @@ supervisor would read that as unhealthy, and the restart budget would burn down
 against something a restart cannot fix. **The endpoint that decides whether to
 restart must not depend on the subsystem it judges.**
 
+## Tests that assert on source text
+
+A test that greps source is measuring the file, not the behaviour. Sometimes
+that is the only durable guard available — you cannot easily execute "the
+Dockerfile calls the shared predicate". But it fails in one specific, quiet way:
+
+> **The code's own explanatory comments satisfy the assertion.**
+
+This is not a theoretical risk. Six source assertions were audited and **five
+were passing against prose**:
+
+| # | What could break while the test stayed green |
+|---|---|
+| A1 | `watchdog.sh` stops invoking `health-predicate.js` entirely — the header comment naming the file keeps `assert.match(sh, /health-predicate\.js/)` satisfied |
+| A2 | the Dockerfile `CMD` is replaced with an inline `curl`, leaving `# was: CMD node scripts/health-predicate.js` behind |
+| A3 | `HEALTH_SCHEMA` drifts 1 → 2 with a `// legacy: … = 1` comment above it; `.match()` returns the FIRST hit, so route and predicate silently disagree about the contract version |
+| A4 | the D7 ordering bug is reinstated, with a comment mentioning `initialiseConnection(fresh)` supplying the token the `indexOf` ordering check reads |
+| A5b | an inline copy of the predicate written `restart_will_help === true` slips past `/restart_will_help===?true/`, because nobody writes it without spaces |
+
+### The rule
+
+1. **Strip comments always.**
+2. **Strip string literals when the assertion is about structure.** Keep them
+   only when the emitted text *is* the behaviour — a shell script's
+   `echo "BUDGET EXHAUSTED"` is real operator-visible output, not prose — and
+   say so at the call site.
+3. **Validate with an adversarial mutation**: change the code so the TEXT still
+   satisfies the assertion but the BEHAVIOUR is broken. If the test survives, it
+   is a grep wearing a test's clothes.
+
+`tests/support/source-text.ts` provides `codeOnly()`, `stripComments()` and
+`stripStrings()`. Deliberate exceptions exist and should be justified inline:
+`tests/health-isolation.ts` reads import specifiers *out of* string literals, and
+the `docker.sock` check reads raw text on purpose — a socket mount hidden in a
+comment is still one waiting to be uncommented.
+
+### A mutation harness must prove the mutation landed
+
+Two of the findings above were initially recorded from mutations that never
+applied: the target literal did not exist (`node scripts/health-predicate.js` is
+really `node "${COMPOSE_DIR}/scripts/health-predicate.js"`), so `replace()` was a
+no-op, the untouched test passed, and the harness printed SURVIVED. A third pass
+reported five spurious survivals because the runner command was held in a shell
+variable, and **zsh does not word-split unquoted variables** — `timeout` received
+one giant argv[0], nothing ran, and zero failures were counted as zero kills.
+
+A harness that cannot distinguish *"the test missed it"* from *"nothing was
+mutated"* or *"nothing ran"* manufactures false findings, which are worse than no
+findings: they send you to fix tests that were already correct. Before believing
+a SURVIVED, assert both ends —
+
+- the mutated file differs from its backup, and
+- the run emitted a test summary at all.
+
 ## Banned: `git add -A`
 
 **With or without a path filter.** Six local-only paths live in

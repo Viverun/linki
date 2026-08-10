@@ -19,8 +19,12 @@ step() { printf '%-42s' "$1"; }
 ok()   { echo "OK"; }
 bad()  { echo "FAIL — $1"; fail=1; }
 
-# The six local-only paths, by IDENTITY not count. A count drifts silently: one
-# artifact replaced by another still counts six.
+# The five local-only paths, by IDENTITY not count. A count drifts silently: one
+# artifact replaced by another still counts five.
+#
+# (This comment said "six" while listing five, for several commits — exactly the
+# silent drift it warns about, in the sentence warning about it. Prose is not a
+# check; the two loops below are.)
 LOCAL_ONLY=(
   "diag.ts" "invite-diag.ts" "whoami.ts"
   "scripts/demo-connect-message.ts" "tests/demo-harness.test.ts"
@@ -33,6 +37,26 @@ for f in "${LOCAL_ONLY[@]}"; do
   git check-ignore -q "$f" || missing="${missing} ${f}(NOT-IGNORED)"
 done
 [ -z "${missing}" ] && ok || bad "${missing}"
+
+# The reverse direction, which nothing checked before.
+#
+# The loop above proves every DECLARED path is ignored. It cannot notice a path
+# added to .git/info/exclude and never declared here — that file silently stops
+# being covered by preflight while still being invisible to `git status`, which
+# is the combination that lets a local-only artifact drift out of view entirely.
+# Two lists that must agree need checking in both directions (the D5 rule).
+step "exclude list matches LOCAL_ONLY"
+undeclared=""
+if [ -f .git/info/exclude ]; then
+  while IFS= read -r line; do
+    case "${line}" in ''|'#'*) continue ;; esac
+    entry="${line#/}"
+    declared=0
+    for f in "${LOCAL_ONLY[@]}"; do [ "${f}" = "${entry}" ] && declared=1; done
+    [ "${declared}" -eq 1 ] || undeclared="${undeclared} ${entry}"
+  done < .git/info/exclude
+fi
+[ -z "${undeclared}" ] && ok || bad "in .git/info/exclude but not in LOCAL_ONLY:${undeclared}"
 
 # Untracked = neither ignored nor staged. Anything here is either a new file you
 # forgot to `git add`, or a local artifact that belongs in .git/info/exclude.
