@@ -51,8 +51,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     db = getDb();
     db.prepare("SELECT 1").get();
   } catch (err) {
+    // A bad NEXTAUTH_SECRET, wrong permissions, or a corrupt file all repeat
+    // identically after a restart — and each restart kills in-flight work.
     return res.status(503).json({
-      ok: false, db: "unreachable",
+      ok: false, db: "unreachable", restart_will_help: false,
       reason: err instanceof Error ? err.constructor.name : "unknown",
     });
   }
@@ -65,11 +67,15 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       "SELECT COUNT(*) c FROM sqlite_master WHERE type = 'table' AND name = 'step_side_effects'"
     ).get() as { c: number };
     if (ledger.c !== 1) {
-      return res.status(503).json({ ok: false, db: "ok", schema: "incomplete", reason: "step_side_effects_missing" });
+      // A swallowed migration repeats on every boot. Restarting just loops.
+      return res.status(503).json({
+        ok: false, db: "ok", schema: "incomplete", restart_will_help: false,
+        reason: "step_side_effects_missing",
+      });
     }
 
     const settings = db.prepare(
-      "SELECT key, value FROM app_settings WHERE key IN ('runner_progress_at','runner_progress_phase','runner_tick_failures','runner_last_error_class')"
+      "SELECT key, value FROM app_settings WHERE key IN ('runner_progress_at','runner_progress_phase','runner_tick_failures','runner_last_error_class','runner_revivals')"
     ).all() as Array<{ key: string; value: string }>;
     const get = (k: string) => settings.find(s => s.key === k)?.value ?? null;
 
@@ -79,28 +85,40 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
     const dead = secondsSince === null || secondsSince * 1000 > LIVENESS_THRESHOLD_MS;
     if (dead) {
+      // The ONLY restart-fixable 503: the database is fine, the schema is
+      // complete, and the loop simply is not running. The in-process watchdog
+      // gets first refusal; the supervisor is the backstop for a process that
+      // cannot help itself.
       return res.status(503).json({
-        ok: false, db: "ok", schema: "ok",
-        runner: { state: "dead", last_progress_at: progressAt, seconds_since_progress: secondsSince },
+        ok: false, db: "ok", schema: "ok", restart_will_help: true,
+        runner: {
+          state: "dead", last_progress_at: progressAt, seconds_since_progress: secondsSince,
+          revivals: parseInt(get("runner_revivals") ?? "0", 10) || 0,
+        },
       });
     }
 
     const degraded = failures >= DEGRADED_AFTER_FAILURES;
     return res.status(200).json({
-      ok: true, db: "ok", schema: "ok",
+      ok: true, db: "ok", schema: "ok", restart_will_help: false,
       runner: {
         state: degraded ? "degraded" : "healthy",
         last_progress_at: progressAt,
         seconds_since_progress: secondsSince,
         phase: get("runner_progress_phase"),
         consecutive_tick_failures: failures,
+        // Repeated automatic revivals are a symptom worth seeing even while the
+        // instance reads healthy right now.
+        revivals: parseInt(get("runner_revivals") ?? "0", 10) || 0,
         // Class only, never a message — messages carry profile URLs (I9).
         last_error_class: degraded ? (get("runner_last_error_class") || null) : null,
       },
     });
   } catch (err) {
+    // An unexpected query failure against a reachable DB is not a liveness
+    // problem and will recur.
     return res.status(503).json({
-      ok: false, db: "ok", schema: "unknown",
+      ok: false, db: "ok", schema: "unknown", restart_will_help: false,
       reason: err instanceof Error ? err.constructor.name : "unknown",
     });
   }

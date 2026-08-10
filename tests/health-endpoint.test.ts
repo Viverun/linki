@@ -123,3 +123,71 @@ test("I9: the payload leaks no counts, identifiers, env values or error messages
   }
   assert.ok(!/targets|accounts|logs/.test(json), "no table names or counts");
 });
+
+// ─── P2-1 Part B: restart_will_help, and the probe that consumes it ─────────
+// Three of the four 503 reasons repeat identically after a restart, and every
+// restart kills in-flight LinkedIn work. A supervisor acting on the raw status
+// would restart-loop forever.
+
+/** The exact predicate the Dockerfile/compose probe evaluates. */
+const probeExitsNonZero = (body: any) =>   // eslint-disable-line @typescript-eslint/no-explicit-any
+  !!(body.runner && body.runner.state === "dead" && body.restart_will_help === true);
+
+test("P2-1: restart_will_help is TRUE only for a dead runner on a healthy DB", () => {
+  setKey("runner_progress_at", stale());
+  setKey("runner_tick_failures", "0");
+  const r = call();
+  assert.equal(r.status, 503);
+  assert.equal(r.body.runner.state, "dead");
+  assert.equal(r.body.restart_will_help, true);
+  assert.equal(probeExitsNonZero(r.body), true, "the probe must act on this one");
+});
+
+test("P2-1: restart_will_help is FALSE for a missing ledger table — a restart loops forever", () => {
+  const db = getDb();
+  setKey("runner_progress_at", stale());     // also dead, to prove schema wins
+  db.exec("ALTER TABLE step_side_effects RENAME TO step_side_effects_backup");
+  try {
+    const r = call();
+    assert.equal(r.status, 503, "a human must still see it");
+    assert.equal(r.body.restart_will_help, false);
+    assert.equal(probeExitsNonZero(r.body), false, "but the supervisor must NOT act");
+  } finally {
+    db.exec("ALTER TABLE step_side_effects_backup RENAME TO step_side_effects");
+  }
+});
+
+test("P2-1: a degraded runner never triggers a restart", () => {
+  setKey("runner_progress_at", fresh());
+  setKey("runner_tick_failures", "9");
+  const r = call();
+  assert.equal(r.status, 200);
+  assert.equal(r.body.runner.state, "degraded");
+  assert.equal(r.body.restart_will_help, false);
+  assert.equal(probeExitsNonZero(r.body), false,
+    "D14: a deterministic tick failure is not fixed by a restart, and the restart kills work");
+});
+
+test("P2-1: a healthy runner never triggers a restart", () => {
+  setKey("runner_progress_at", fresh());
+  setKey("runner_tick_failures", "0");
+  assert.equal(probeExitsNonZero(call().body), false);
+});
+
+test("P2-1: revivals are surfaced so repeated automatic recoveries are not silent", () => {
+  setKey("runner_progress_at", fresh());
+  setKey("runner_tick_failures", "0");
+  setKey("runner_revivals", "4");
+  const r = call();
+  assert.equal(r.body.runner.revivals, 4, "visible even while currently healthy");
+});
+
+test("P2-1: the shipped probe command matches the predicate under test", async () => {
+  // Guards against the Dockerfile and the tests drifting apart.
+  const { readFile } = await import("node:fs/promises");
+  for (const f of ["Dockerfile", "docker-compose.yml"]) {
+    const src = await readFile(f, "utf8");
+    assert.match(src, /state===?'dead'/, `${f}: probe checks for the dead state`);
+    assert.match(src, /restart_will_help===?true/, `${f}: probe gates on restart_will_help`);
+  }
+});

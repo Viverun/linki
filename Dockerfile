@@ -74,7 +74,13 @@ EXPOSE 3000
 # failure. /api/health returns 503 ONLY for a dead runner; a degraded one (a tick
 # failing repeatedly) returns 200 with a flag, because restarting mid-step is the
 # hazard the side-effect ledger exists to prevent.
+# Exits non-zero ONLY for a dead runner that a restart can actually fix. Three of
+# the four 503 reasons (unreachable DB, incomplete schema, unexpected query
+# failure) repeat identically after a restart, so acting on the raw status would
+# restart-loop forever and kill in-flight LinkedIn work each time. /api/health
+# still returns 503 for those so a human sees them; the probe just does not act.
+# A failed fetch is treated as dead — the server is not answering at all.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>r.json().then(b=>process.exit(b.runner&&b.runner.state==='dead'&&b.restart_will_help===true?1:0))).catch(()=>process.exit(1))"
 
 CMD ["npm", "start"]

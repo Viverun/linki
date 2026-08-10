@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { randomUUID, createHash } from "crypto";
+import { setInterval as nodeSetInterval } from "node:timers";
 import { getSessionPage, saveSessionState, getSessionContext } from "@/lib/linkedin/session";
 import { visitProfile, type VisitResult } from "@/lib/linkedin/visit";
 import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError } from "@/lib/linkedin/connect";
@@ -1359,6 +1360,68 @@ export function ensureGlobalRunnerStarted(): void {
 /** Observable liveness for tests, without reaching into module internals. */
 export function runnerState(): { running: boolean; attempts: number } {
   return { running: !!g.__linkiRunner?.loop, attempts: g.__linkiRunner?.attempts ?? 0 };
+}
+
+/**
+ * How stale the progress marker may be before the watchdog treats the runner as
+ * dead. Must match LIVENESS_THRESHOLD_MS in pages/api/health.ts — both are
+ * derived from the timeout budget in docs/phase1-baseline.md (worst single step
+ * ~345s + randomDelay <=20s = ~365s, with ~64% margin).
+ */
+export const WATCHDOG_STALE_MS = 600_000;
+const WATCHDOG_INTERVAL_MS = 60_000;
+
+/**
+ * Polls liveness and revives a dead loop.
+ *
+ * Phase 1 made the loop retry its one known fatal path (getDb) and made
+ * liveness observable, but nothing POLLED it: ensureGlobalRunnerStarted has
+ * exactly two callers — instrumentation at boot and runs/[id]/start on operator
+ * action — and neither runs on a timer (NF-6). A loop that exits for any other
+ * reason therefore waits for a human.
+ *
+ * INVARIANT — this is why it is safe to revive automatically:
+ * a fresh progress marker means a step is advancing, because markers are written
+ * at every executeStep boundary, after the accepted-connections sync, and at
+ * loop-iteration start. So "marker older than WATCHDOG_STALE_MS" cannot mean
+ * "busy"; it can only mean the loop is not running. The watchdog never races
+ * live LinkedIn work.
+ *
+ * Returns whether it intervened, so the behaviour is testable without timers.
+ */
+export function runnerWatchdogTick(db: ReturnType<typeof getDb>): boolean {
+  try {
+    if (runnerState().running) return false;          // a loop (or its retry) is alive
+    const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(HEARTBEAT_KEYS.progressAt) as { value: string } | undefined;
+    const ageMs = row?.value ? Date.now() - new Date(row.value).getTime() : Infinity;
+    if (ageMs <= WATCHDOG_STALE_MS) return false;     // progressing — never intervene
+
+    const prev = db.prepare("SELECT value FROM app_settings WHERE key = 'runner_revivals'").get() as { value: string } | undefined;
+    const count = (parseInt(prev?.value ?? "0", 10) || 0) + 1;
+    putSetting(db, "runner_revivals", String(count));
+    console.warn(`[runner] watchdog: progress marker is ${Math.round(ageMs / 1000)}s old — reviving the loop (revival #${count})`);
+    ensureGlobalRunnerStarted();
+    return true;
+  } catch (err) {
+    // A watchdog that can throw is a liability, not a safety net.
+    console.warn("[runner] watchdog tick failed:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+const gw = global as typeof global & { __linkiWatchdog?: NodeJS.Timeout };
+
+/**
+ * Registered at boot next to the runner, on a timer INDEPENDENT of the loop so
+ * it survives the loop's death. unref'd, following lib/update-check.ts: a
+ * watchdog must never be the reason a process cannot exit.
+ */
+export function startRunnerWatchdog(): void {
+  if (gw.__linkiWatchdog) return;
+  gw.__linkiWatchdog = nodeSetInterval(() => {
+    try { runnerWatchdogTick(getDb()); } catch { /* never propagate */ }
+  }, WATCHDOG_INTERVAL_MS);
+  gw.__linkiWatchdog.unref();
 }
 
 const RECOVERY_BACKOFF_MS = [30_000, 60_000, 120_000];
