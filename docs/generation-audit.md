@@ -74,8 +74,26 @@ that the file is correct.
 | 1 | `git add -A -- <paths>` staged three local-only files | the staging command |
 | 2 | A commit shipped with a failing test | the gate that ran the suite as a report |
 | 3 | An unquoted heredoc corrupted three docs | the file-writing mechanism |
+| 4 | Ran preflight, saw FAIL, committed anyway | the gate's invocation |
 
-None of the three was in the change being made. All three were in the tooling
+None of the four was in the change being made. All four were in the tooling
 around it, and each was caught by an independent check rather than by the tool
 reporting failure — a changed untracked count, a re-read of the file, a re-run
-mutation. Tooling that reports its own success is not a control.
+mutation, a re-read of output already printed. Tooling that reports its own
+success is not a control.
+
+## Structural resolutions
+
+Each failure got a fix that makes it inexpressible rather than remembered:
+
+| # | Resolution |
+|---|---|
+| 1 | The five local-only paths live in `.git/info/exclude`, so `git add -A` cannot stage them without `-f`. `git add -An` stages zero files |
+| 2 | `scripts/preflight.sh` exits non-zero — a suite run as a report became a gate |
+| 3 | Files are written with the file-write tool; no shell sits between content and disk |
+| 4 | `scripts/hooks/pre-commit` invokes preflight via `core.hooksPath`, so `git commit` refuses. Verified by staging a deliberate failure and confirming HEAD did not move |
+
+Failure #4 is the instructive one: it was *already documented* as "chain it with
+`&&`", and documentation did not prevent it happening. A rule that depends on
+remembering to apply it will eventually not be applied. The hook removes the
+remembering.

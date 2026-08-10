@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Refuses the commit if scripts/preflight.sh fails.
+#
+# This is the CONTROL. The `git add && ./scripts/preflight.sh && git commit`
+# habit is not: Phase 2 ran preflight, saw PREFLIGHT FAIL, and committed anyway
+# because the output had been piped to `tail` instead of gating the command. A
+# gate you read is a report. A gate git enforces is a gate.
+#
+# Install (local config, so a fresh clone needs it — see docs/operations.md):
+#   git config core.hooksPath scripts/hooks
+#
+# Bypass is still possible with `git commit --no-verify`, which is the point:
+# explicit rather than accidental.
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+
+echo "── pre-commit: running preflight ──"
+if bash scripts/preflight.sh; then
+  exit 0
+fi
+
+cat >&2 <<'MSG'
+
+COMMIT REFUSED by scripts/hooks/pre-commit.
+
+Fix what preflight reported above. If a check is wrong, fix the check — do not
+route around it. To bypass deliberately (and say why in the commit message):
+
+    git commit --no-verify
+
+MSG
+exit 1

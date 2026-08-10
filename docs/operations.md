@@ -120,9 +120,19 @@ identity check over the six specific paths, in `scripts/preflight.sh`.
 git add <explicit paths> && ./scripts/preflight.sh && git commit ...
 ```
 
-**Chain it with `&&`.** Running it and reading the output is a report; only the
-chain is a gate. And run it *after* staging — run before, it correctly flags the
-very files you are about to commit as untracked, which trains you to ignore it.
+**The pre-commit hook is the control; the `&&` chain is only a convenience.**
+
+Install it once per clone — `core.hooksPath` is local config, so it does not
+travel with the repository:
+
+    git config core.hooksPath scripts/hooks
+
+`git commit` then refuses outright when preflight fails. `--no-verify` still
+bypasses it, which is the point: explicit rather than accidental. If you use it,
+say why in the commit message.
+
+Run preflight *after* staging — run before, it correctly flags the very files you
+are about to commit as untracked, which trains you to ignore it.
 
 Checks: the six local-only paths exist and are ignored (identity, not count); no
 unexpected untracked files; `tsc --noEmit`; `npm test`; eslint still at the
