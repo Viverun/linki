@@ -234,9 +234,20 @@ export async function openInviteDialog(page: Page, linkedinUrl: string, vanity: 
   // pointer events, and even a forced click is a no-op on this layout
   // (verified Aug 2026 — force-click succeeded, no dialog appeared). The href
   // navigation is the working path and is deliberately kept.
-  const directConnect = vanity
-    ? ownConnectLink(page, vanity)
-    : page.locator('a[aria-label*="Invite"][aria-label*="to connect"]:visible, a[href*="custom-invite"]:visible').first();
+  // N7: refuse without a vanity, exactly as Case 2 below already does.
+  //
+  // The fallback this replaces was
+  //   a[aria-label*="Invite"][aria-label*="to connect"]:visible, a[href*="custom-invite"]:visible
+  // which is unscoped — it matches ANY invitation link on the page. LinkedIn
+  // renders that same markup for "People also viewed" and "More profiles for
+  // you", so with nothing to bind to, `.first()` can resolve to a stranger and
+  // send them a real, irreversible invitation. Case 2 (:343) already refuses on
+  // precisely this reasoning; this made the same function reach the opposite
+  // conclusion depending on which way in it took.
+  if (!vanity) {
+    throw new InviteUiError(`Cannot resolve a target vanity for ${linkedinUrl} — refusing to pick a Connect link`);
+  }
+  const directConnect = ownConnectLink(page, vanity);
 
   if ((await directConnect.count()) > 0) {
     // Click the real CTA so LinkedIn's own SPA opens the invite modal.

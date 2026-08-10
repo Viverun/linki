@@ -365,3 +365,66 @@ test("a Message link in the top card does not imply connected while Connect is o
 
   await sendConnectionRequest(page, PROFILE);
 });
+
+// ─── N7: the two "no vanity" paths must agree ────────────────────────────────
+//
+// openInviteDialog has two ways in. Case 2 (the More menu) already refuses:
+//   "Without a vanity there is nothing to bind to, and guessing is how you
+//    invite a stranger."  (connect.ts:343)
+// Case 1 (the direct CTA) fell back to an UNSCOPED selector —
+//   a[aria-label*="Invite"][aria-label*="to connect"]:visible, a[href*="custom-invite"]:visible
+// — which matches any invitation link anywhere on the page. LinkedIn renders
+// exactly that markup for "People also viewed" and "More profiles for you", so
+// on a profile whose own URL carries no parseable vanity, the first match can
+// belong to a completely different person. Same function, same reasoning,
+// opposite behaviour.
+
+/** A URL that reaches the profile but yields no vanity: vanityNameOf returns null. */
+const NO_VANITY_PROFILE = "https://www.linkedin.com/in/";
+
+test("N7 repro: a profile with no resolvable vanity must not invite a bystander", async () => {
+  // The page offers a Connect CTA that belongs to SOMEONE ELSE — the shape of a
+  // sidebar recommendation. With no vanity there is nothing to bind to, so the
+  // unscoped fallback would happily click it.
+  const fake = new FakePage([
+    { match: /\/in\//, state: () => ({
+        ...connectableProfile(),
+        ownConnectHref: "/preload/custom-invite/?vanityName=somebody-else",
+      }) },
+    { match: /custom-invite/, state: () => ({ sendButton: true, dialogText: "Add a note" }) },
+  ]);
+
+  await assert.rejects(
+    () => sendConnectionRequest(fake as unknown as Page, NO_VANITY_PROFILE),
+    InviteUiError,
+    "must refuse, exactly as the More-menu path already does"
+  );
+});
+
+test("N7: refusing happens with ZERO clicks — no invitation can have been sent", async () => {
+  // The guarantee that matters. Throwing after clicking is not a fix: the
+  // invitation is irreversible and the ledger would have nothing recorded.
+  const fake = new FakePage([
+    { match: /\/in\//, state: () => ({
+        ...connectableProfile(),
+        ownConnectHref: "/preload/custom-invite/?vanityName=somebody-else",
+      }) },
+    { match: /custom-invite/, state: () => ({ sendButton: true, dialogText: "Add a note" }) },
+  ]);
+
+  await assert.rejects(() => sendConnectionRequest(fake as unknown as Page, NO_VANITY_PROFILE));
+  assert.equal(fake.ctx.sendClicked, false, "no Send was clicked");
+  assert.deepEqual(fake.ctx.clicks, [], "and nothing at all was clicked — not even the CTA");
+});
+
+test("N7: a resolvable vanity still connects normally", async () => {
+  // The refusal must be scoped to the null case only. This is the control that
+  // stops the fix from being "disable invitations".
+  const fake = new FakePage([
+    { match: /\/in\//, state: connectableProfile },
+    { match: /custom-invite/, state: () => ({ sendButton: true, dialogText: "Add a note" }) },
+    { match: /invitation-manager/, state: () => ({ sentInvitations: ["jamil-khan-55a621346"] }) },
+  ]);
+  await sendConnectionRequest(fake as unknown as Page, PROFILE);
+  assert.equal(fake.ctx.sendClicked, true, "a normal invitation is unaffected");
+});
