@@ -169,3 +169,84 @@ recomputed deterministically on save and is the identity a human means by
 
 The `"pos:"` prefix reserves room for `"stepid:<uuid>"` once steps gain stable
 ids (the real fix for N3), so both schemes can coexist with no data migration.
+
+---
+
+# Phase 1 closure addenda
+
+## Findings table — scope qualifiers travel with the row
+
+| ID | Status |
+|---|---|
+| F1 | **CLOSED (OSS build) / PARTIAL (premium paths)** — Layer 2's body fingerprint cannot catch a position shift when the body is non-deterministic, i.e. the AI writer (`runner.ts:707-723`) or the random multi-template pick (`runner.ts:727`). Neither is reachable without `ee/` and templates, but anyone reading this row with `ee/` present must see the caveat here, not three sections away. Retired by Phase 2 item 3 (stable step ids ⇒ `step_ref` becomes `"stepid:<uuid>"`). |
+| N1, N2, N4, N5 | CLOSED |
+| F3 | RETRACTED |
+| F8 | PARTIAL — in-process retry of the `getDb()` fatal path plus observability; nothing acts on the healthcheck without a supervisor (NF-6) |
+
+## Test reconciliation — complete
+
+| Commit | Tracked | Δ | Contents |
+|---|---|---|---|
+| `85934ab` | 151 | — | baseline |
+| `c7f7d47` | 176 | +25 | message ledger |
+| `a288f92` | 184 | +8 | fail-closed + mark_delivered |
+| `2cd0814` | 192 | +8 | F3 retraction |
+| `10e23f6` | 203 | +11 | run status (10) + D4.3 self-heal in an existing file (1) |
+| `b965d04` | 209 | +6 | workflow delete guard |
+| `ed49581` | 215 | +6 | resend + scoping |
+| `4c40c9d` | 220 | +5 | db-init-atomicity (3) + runner-loop-survival (2) |
+| `da52810` | **238** | +18 | health (9) + proxy (5) + runner-loop-survival D14/D13 (4) |
+
+**238 tracked + 26 untracked (`demo-harness`) = 264**, matching `npm test`.
+
+The 241 → 246 step after D7 was **+5, not +3**: `db-init-atomicity.test.ts` (3)
+plus `runner-loop-survival.test.ts` (2). The earlier report said "three tests",
+counting one file and not the other. Recorded because the phase's own rule is
+that unreconciled arithmetic is a finding.
+
+## Restart risk profile — verified, not assumed
+
+`tick()` early-returns at `runner.ts:1428` (`if (activeRuns.length === 0) return`)
+**before** the first `shouldSyncAccepted` call at `:1440`. Both runs in the
+database are `paused` and zero runs are `running`.
+
+**Therefore the restart performs no LinkedIn navigation at all.** It is a schema
+migration and nothing else.
+
+Two facts the checklist depends on:
+
+- **An idle tick still writes its progress marker.** `recordProgress(db, "loop")`
+  runs at iteration start, before `tick()`, so the marker advances every 30 s
+  even with no running runs. `/api/health` therefore returns 200 on an idle
+  instance — step 6 of the checklist is valid.
+- **Both armed tracks sit on a `connect` step, not a message step**, and both
+  targets already have `connection_requested_at` set (`zahidhamdule`
+  2026-08-08T15:35:31Z; `raise-faster` 2026-08-09T05:27:59Z). If either run is
+  resumed, the connect branch takes the DB-only "already requested" recheck path
+  (`runner.ts:639-650`) and calls `trWait` — **no invitation is sent, no browser
+  opens.** `prodqa-rf-track` is the production-QA execution from earlier in the
+  session; it was never cleaned up because cleanup was never authorised.
+
+## What a future reader should take from Phase 1
+
+Of the most serious problems found in this phase, **three were created or exposed
+by the remediation itself, not by the original audit**: the unconditional
+`abandoned` classification, `resend` delivering nothing, and the poisoned
+`getDb()` singleton that the planned F8 retry would have been built on top of.
+
+That is the argument for the gates. Reproduce before fixing — three audit claims
+were corrected by measurement, one of them a control-flow inference rather than a
+grep. Write the negative-path test — five of five found a defect, two of which the
+audit never saw.
+
+## Phase 2 order
+
+1. Supervisor acting on `dead` only, plus NF-6's missing automatic caller.
+2. NF-4 degraded response — alert, not restart (D14).
+3. **N3 + NF-1 stable step ids** — retires N3, NF-1, NF-3 and F1's premium caveat
+   together, because `step_ref` migrates to `"stepid:<uuid>"` (the scheme prefix
+   exists for exactly this).
+4. `/data` backup/restore — the only irrecoverable failure in the system.
+5. F4 signup disable — five lines against the P0-on-exposure.
+6. N6 — must land *before* any non-UTC account is added, not after.
+7. Then F7, F5, F6, N7, N8's remaining sites, and the lint sweep.

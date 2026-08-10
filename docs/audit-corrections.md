@@ -145,6 +145,67 @@ it.
 
 ---
 
+## NF-6 — the loop reset has exactly one in-process caller, and it is operator-driven
+
+M26 showed the `.finally` reset in `ensureGlobalRunnerStarted` is unreachable
+while `runLoopWithRecovery` never resolves. Defence in depth, not a mechanism.
+
+Callers of `ensureGlobalRunnerStarted()` in the process:
+
+| Caller | When |
+|---|---|
+| `instrumentation.ts:6` | once per process, at boot |
+| `pages/api/runs/[id]/start.ts:19` | whenever an operator starts a run |
+
+So revival after a hard loop exit **is** possible in-process — but only if an
+operator starts a run. Nothing polls, and `/api/health` deliberately does not:
+it is read-only, and an unauthenticated endpoint must never be able to start
+work.
+
+**Therefore F8's claim is: in-process RETRY of the known fatal path (`getDb()`),
+plus observability.** Not "automatic recovery". A loop exit outside the retry
+path waits for an operator action or a process restart. A small authenticated
+"revive" route, or reusing `runs/[id]/start`, is the Phase 2 candidate.
+
+---
+
+## F7 — the mechanism that keeps its severity unchanged
+
+Terse phrasing ("read once but compensated") does not survive a reader. The
+mechanism:
+
+`connectsSentToday` / `messagesSentToday` are computed **once** per tick from the
+`logs` table (`runner.ts:1436-1452`). The planning loop then walks every due
+track and maintains `connectsPlanned` / `messagesPlanned`, gating each admission
+on `sentToday + planned >= limit` and incrementing `planned` for every track it
+admits (`runner.ts:1642`). **The stale read is corrected by the in-tick planned
+counter**, so a tick that runs for an hour across ten tracks still cannot admit
+more than `limit - sentToday` sends: admission is decided up front, in one pass,
+before any step executes.
+
+Two-line reproduction of the invariant:
+
+```
+limit 30, sentToday 28  ->  planned admits exactly 2 of N due connect tracks
+                            (toReschedule receives the rest, before trClaim)
+```
+
+**Midnight straddle — stated explicitly.** A tick that begins at 23:58 UTC
+allocates against the *old* day's count, and sends land after 00:00 on the new
+day. Those sends are therefore not counted against the new day either, because
+the next tick re-reads `logs` filtered by `date(created_at) = date('now')` and
+the rows carry the new date. Net effect: a straddling tick can overshoot by at
+most the slots it had already allocated (`limit - sentToday`), and never more —
+it cannot allocate twice. This is bounded and is **not** the N6 defect. N6 is the
+separate, larger problem that the cap window is UTC while the schedule window is
+timezone-aware, so a non-UTC account whose working hours cross UTC midnight gets
+two full allocations in one local working day.
+
+F7's severity is unchanged: caps remain bypassable only by calling `executeStep`
+directly, never by ordinary operation under load.
+
+---
+
 ## NF-5 — `tick()` has no cap on due tracks
 
 `tick()` executes every due track sequentially with no batch limit, so a single
