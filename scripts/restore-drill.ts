@@ -41,7 +41,7 @@ function newestSnapshot(): string {
     .filter(f => /^linki-auto-\d{8}T\d{6}Z\.db$/.test(f))
     .sort()
     .reverse();
-  if (candidates.length === 0) throw new Error(`no auto snapshot found in ${SOURCE_DIR} — run scripts/backup.js first`);
+  if (candidates.length === 0) throw new Error(`no auto snapshot found in ${SOURCE_DIR} — run scripts/backup.mjs first`);
   return join(SOURCE_DIR, candidates[0]);
 }
 

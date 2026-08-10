@@ -87,6 +87,31 @@ safety copies (`pre-prodqa-delete-*.db`, `linki-prePhase1-*.db`) are left alone
 permanently — those are exactly what you reach for during an incident, and
 retention eating them would be the worst possible timing.
 
+## Where backups actually land
+
+**By default, nowhere safe.** `BACKUP_DIR` defaults to `data/backups`, which is
+*inside* the `./data` bind mount — the very volume these snapshots exist to
+survive losing. `docker compose down -v`, a corrupted mount, or an `rm -rf` on
+the wrong parent takes the database and every snapshot of it together.
+
+`BACKUP_OFFSITE_DIR` is **opt-in and empty by default**. When it is unset the
+script logs a `WARNING` on every run rather than exiting 0 in silence, because a
+green cron job is otherwise indistinguishable from a protected system.
+
+| | Default | Retention applies? | On failure |
+|---|---|---|---|
+| `BACKUP_DIR` | `data/backups` — **inside the volume** | yes | run fails, non-zero |
+| `BACKUP_OFFSITE_DIR` | unset — **opt-in** | yes, same `BACKUP_RETAIN` | run fails **loudly**, non-zero; the on-volume snapshot survives |
+
+Retention prunes **both** locations. Pruning only the primary would leave the
+second directory growing without bound, ending as a full disk — which is the one
+condition that stops new backups being written at all.
+
+A missing or unwritable off-volume path fails the run. There is deliberately no
+silent fallback to "we kept the on-volume copy": a second location that quietly
+stopped receiving copies is something you discover during an incident, which is
+the worst possible moment.
+
 ## "Off-volume", stated honestly
 
 `/data` inside the container is a bind mount of `./data` on the host. So:
@@ -204,24 +229,70 @@ The positive case also guards against a false pass: `decryptSecret` passes
 "decrypt" perfectly and prove nothing. The drill asserts the value is genuinely
 enveloped before decrypting it.
 
-### RTO — measured, and what it does not include
+### RTO — measured end to end
 
-**0.01s wall-clock** for copy + open + `integrity_check` + `foreign_key_check` +
-table verification + cookie decryption, on a 344 KB database.
+Two phases, both measured on 2026-08-10 against the live system:
 
-State plainly what that number is and is not. It is the **data-restoration**
-portion, and it is small because the database is small. Full operational RTO adds:
-
-| Phase | Measured? |
+| Phase | Measured |
 |---|---|
-| Copy, verify, decrypt | **yes — 0.01s** |
-| `docker compose down` / `up -d` and app boot | **no** |
-| Re-authenticating each account (stale cookies) | **no — manual, and the dominant term** |
+| Restore the data: copy + `integrity_check` + `foreign_key_check` + table verification + cookie decryption | **0.01s** |
+| Boot: `docker run` against the restored copy until `/api/health` returns 200 | **2.94s** |
+| **Restore → serving** | **≈3s** |
+| Re-authenticating each account (stale cookies) | **not measured — manual, and the dominant term** |
 
-The container phases are deliberately unmeasured here: measuring them would mean
-booting a second Linki instance against a restored copy, and two processes
-against one account is precisely the hazard the single-process precondition
-exists to prevent. Measure them at the next real deploy, and update this table.
+The boot phase reported `runner.state: healthy`, `schema: ok`, `db: ok`.
 
-The honest summary: **the data comes back in under a second; the system comes
-back at the speed of re-authenticating accounts.**
+Both numbers are for a 344 KB database on this host. They will grow with the
+database, but not by much: `VACUUM INTO` is linear in size and Next.js boot is
+constant.
+
+**Re-authentication remains the real cost.** Everything above says the software
+is serving; it does not say the automation can act. See the cookie-rotation
+section — a day-old snapshot restores perfectly and may still need every account
+re-authenticated through the UI before any work resumes.
+
+#### Booting the drill instance is safe, and here is the argument
+
+Rehearsing the boot phase means starting a second Linki instance. The hazard is
+not database contention — the scratch copy is a separate file — it is **two
+browsers driving one LinkedIn account**. That cannot happen here, and the reason
+is structural rather than hopeful:
+
+1. **`tick()` returns before any navigation.** `lib/linkedin/runner.ts:1578` is
+   `if (activeRuns.length === 0) return;`, and `activeRuns` selects only
+   `runs.status = 'running'`. Everything that touches LinkedIn — the
+   accepted-connections sync (`:1589`), the email inbox sync (`:1645`), and every
+   step execution — sits *after* that line.
+2. **The snapshot has zero running runs**: 7 completed, 1 paused. Paused is not
+   running, so `activeRuns` is empty on every tick.
+3. **The import scheduler also returns immediately**: `list_imports` has 0 rows,
+   and `processScheduledImports` returns unless one is `scheduled`.
+
+Run it on a different port, with the restored copy at a path **outside `./data`**,
+and with `ALERT_WEBHOOK_URL` unset.
+
+Verified empirically rather than left as reasoning. After ~45s of running (one
+poll interval is 30s), the drill container's entire log was:
+
+```
+▲ Next.js 16.1.6
+✓ Starting...
+[runner] Global loop started
+✓ Ready in 1117ms
+```
+
+Occurrences in the log — `linkedin.com` 0, `playwright` 0, `chromium` 0,
+`sync-accepted` 0, `Accepted-connections` 0, `Tick —` 0, `invitation` 0,
+`Navigating` 0. The restored copy's `logs` table was unchanged at 38 rows, and
+`runs.running` stayed 0.
+
+`Tick —` at zero is the load-bearing observation: that line is logged at
+`runner.ts:1580`, immediately *after* the early return, so its absence is direct
+evidence that every tick took the early exit. Meanwhile `runner_progress_at` was
+being written, which proves the loop really was running rather than the instance
+being inert — the 200 means something.
+
+Tear down afterwards (`docker rm -f`) and confirm the container and the scratch
+copy are gone. The live instance was untouched throughout: still `Up`, still
+healthy, and `data/linki.db` was never opened for writing by the drill.
+

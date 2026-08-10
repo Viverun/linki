@@ -1,6 +1,6 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync, truncateSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, chmodSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync, truncateSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -311,6 +311,67 @@ test("P2-4: an off-volume copy is made when configured", () => {
   const copy = new Database(join(offsite, name), { readonly: true });
   assert.equal(copy.pragma("integrity_check", { simple: true }), "ok", "and the copy is itself valid");
   copy.close();
+});
+
+test("C2: retention applies to the off-volume copy too", () => {
+  // Pruning only the primary leaves the second location growing without bound,
+  // which ends as a full disk — the one condition that stops new backups being
+  // written at all.
+  const src = makeSource(5);
+  const dest = join(root, "c2-primary");
+  const offsite = join(root, "c2-offsite");
+  for (const day of ["01", "02", "03", "04"]) {
+    backup.createBackup({
+      sourcePath: src, destDir: dest, offsiteDir: offsite, retain: 2,
+      now: new Date(`2026-08-${day}T03:00:00.000Z`),
+    });
+  }
+  assert.equal(autos(dest).length, 2, "primary pruned to 2");
+  assert.equal(autos(offsite).length, 2, "and so is the off-volume copy");
+  assert.deepEqual(autos(offsite), autos(dest), "the same two, not a divergent set");
+});
+
+test("C2: an unwritable off-volume path fails LOUDLY", () => {
+  // Never a silent fallback to "we kept the on-volume copy". A second location
+  // that quietly stopped receiving copies is discovered during an incident.
+  const src = makeSource(5);
+  const dest = join(root, "c2-loud-primary");
+
+  // A read-only DIRECTORY, so the failure lands squarely on the COPY. The first
+  // version of this test used a file where a directory was expected — which made
+  // mkdirSync fail, and also made the later prune() throw ENOTDIR. A mutation
+  // that swallowed the copy error survived it: the test was passing because
+  // *something* threw, not because the copy failure was loud.
+  const readonlyOffsite = join(root, "c2-readonly-offsite");
+  mkdirSync(readonlyOffsite, { recursive: true });
+  chmodSync(readonlyOffsite, 0o555);
+  after(() => { try { chmodSync(readonlyOffsite, 0o755); } catch { /* gone */ } });
+
+  assert.throws(
+    () => backup.createBackup({ sourcePath: src, destDir: dest, offsiteDir: readonlyOffsite }),
+    /EACCES|EPERM/,
+    "the run must fail on the copy itself, not report success with one copy"
+  );
+  assert.equal(readdirSync(readonlyOffsite).length, 0, "and nothing landed off-volume");
+  // The primary is still written — one copy beats none — but the exit is non-zero.
+  assert.equal(autos(dest).length, 1, "the on-volume snapshot survives the failure");
+});
+
+test("C2: an unset off-volume path warns rather than passing quietly", () => {
+  const src = makeSource(5);
+  const dest = join(root, "c2-warn");
+  const lines: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => { lines.push(a.join(" ")); };
+  try {
+    backup.createBackup({ sourcePath: src, destDir: dest });
+  } finally {
+    console.log = realLog;
+  }
+  assert.ok(
+    lines.some(l => /WARNING.*BACKUP_OFFSITE_DIR/.test(l)),
+    "the default puts snapshots on the same volume as the database — exiting 0 in silence overstates the protection"
+  );
 });
 
 test("P2-4: the script contains no baked-in shell substitution", () => {

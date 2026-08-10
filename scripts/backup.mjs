@@ -233,10 +233,25 @@ function createBackup(opts = {}) {
   prune(destDir, retain);
 
   if (offsiteDir) {
+    // Any failure here propagates. The on-volume snapshot is already committed,
+    // which is the right outcome — one copy beats none — but "the off-volume
+    // copy silently stopped happening" is exactly how you discover, during an
+    // incident, that the second location has been empty for six weeks.
     fs.mkdirSync(offsiteDir, { recursive: true });
     const offsitePath = path.join(offsiteDir, finalName);
     fs.copyFileSync(finalPath, offsitePath);
     log(`copied to ${offsitePath}`);
+    // Retention applies THERE TOO. Pruning only the primary leaves the off-volume
+    // directory growing without bound, which ends as a full disk — and a full disk
+    // is the one condition that stops new backups being written at all.
+    prune(offsiteDir, retain);
+  } else {
+    // The default BACKUP_DIR is inside the bind-mounted ./data. Snapshots written
+    // there share the fate of the database they protect: `docker compose down -v`,
+    // a corrupted mount, or an rm on the wrong parent takes both. That is not a
+    // backup strategy, and the script should say so rather than exit 0 looking
+    // successful.
+    log("WARNING: BACKUP_OFFSITE_DIR is not set — every snapshot is on the same volume as the live database. See docs/backup-restore.md.");
   }
 
   return finalPath;

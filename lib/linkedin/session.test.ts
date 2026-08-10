@@ -17,6 +17,8 @@ const {
   persistAuthenticatedState,
   refreshStoredSessionState,
   AuthenticationNotEstablishedError,
+  decryptSessionState,
+  UnencryptedSessionError,
 } = await import("./session");
 const { getDb } = await import("@/lib/db");
 
@@ -203,4 +205,66 @@ test("real logged-in URLs still classify as logged in", () => {
 test("non-LinkedIn hosts never classify as logged in", () => {
   assert.equal(isLoggedInAppUrl("https://linkedin.com.evil.example/feed/"), false);
   assert.equal(isLoggedInAppUrl("not a url"), false);
+});
+
+// ─── NF-8: a session that was never encrypted must not silently work ─────────
+//
+// decryptSecret passes NON-enveloped input straight through, by design, so that
+// rows predating the encryption migration keep working. The consequence at the
+// cookie read path is that a plaintext cookies_json decrypts to itself, parses,
+// and drives the browser — with encryption at rest absent and nothing saying so.
+
+const cryptoModule = await import("@/lib/crypto");
+const encrypt = cryptoModule.encryptSecret;
+
+test("NF-8 repro: a PLAINTEXT session blob is refused, not silently used", () => {
+  const plaintext = JSON.stringify(state("li_at", "JSESSIONID"));
+  // Precondition: this is exactly what decryptSecret does with it today.
+  const { decryptSecret } = cryptoModule;
+  assert.equal(decryptSecret(plaintext), plaintext,
+    "decryptSecret returns non-enveloped input unchanged — that is the hazard");
+
+  assert.throws(
+    () => decryptSessionState("acct-1", plaintext),
+    (err: unknown) => err instanceof UnencryptedSessionError,
+    "the read path must refuse a session that was never encrypted"
+  );
+});
+
+test("NF-8: an ENVELOPED session still decrypts and parses normally", () => {
+  const original = state("li_at", "JSESSIONID");
+  const enveloped = encrypt(JSON.stringify(original));
+  const out = decryptSessionState("acct-1", enveloped) as { cookies: Array<{ name: string }> };
+  assert.deepEqual(out.cookies.map(c => c.name), ["li_at", "JSESSIONID"]);
+});
+
+test("NF-8: an enveloped-but-CORRUPT blob still falls back to re-auth, as before", () => {
+  // The distinction that keeps this narrow. A corrupt blob or a rotated
+  // NEXTAUTH_SECRET is recoverable by re-authenticating, and was already handled
+  // that way — only "never encrypted" is escalated to a throw.
+  const corrupt = encrypt(JSON.stringify(state("li_at"))).slice(0, -8) + "AAAAAAAA";
+  assert.equal(decryptSessionState("acct-1", corrupt), undefined,
+    "undefined means 'no usable state, re-authenticate' — not a hard failure");
+});
+
+test("NF-8/I9: the error names the account and nothing else", () => {
+  const plaintext = JSON.stringify(state("li_at"));
+  try {
+    decryptSessionState("acct-42", plaintext);
+    assert.fail("should have thrown");
+  } catch (err) {
+    const msg = (err as Error).message;
+    assert.match(msg, /acct-42/, "the operator needs to know which account");
+    assert.ok(!msg.includes("li_at"), "but never a cookie name");
+    assert.ok(!msg.includes(plaintext), "and never the blob");
+  }
+});
+
+test("NF-8: other decryptSecret callers are untouched — optional fields still pass through", () => {
+  // The fix is deliberately at the cookie read path only. imap_password and
+  // api_key legitimately rely on the pass-through for not-yet-migrated rows, and
+  // lib/db.ts's migration reads plaintext by definition.
+  const { decryptSecret } = cryptoModule;
+  assert.equal(decryptSecret("plain-api-key"), "plain-api-key");
+  assert.equal(decryptSecret(null), null);
 });

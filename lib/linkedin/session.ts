@@ -2,7 +2,7 @@ import { chromium } from "playwright-extra";
 import type { Browser, BrowserContext, Page } from "playwright";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { getDb } from "@/lib/db";
-import { encryptSecret, decryptSecret } from "@/lib/crypto";
+import { encryptSecret, decryptSecret, isEncrypted } from "@/lib/crypto";
 
 chromium.use(StealthPlugin());
 
@@ -55,6 +55,53 @@ async function getBrowser(headless = HEADLESS): Promise<Browser> {
   return browser;
 }
 
+/**
+ * NF-8: a stored session that was never encrypted must not silently work.
+ *
+ * `decryptSecret` returns NON-enveloped input unchanged — deliberately, so that
+ * rows predating the encryption migration keep working while `lib/db.ts`
+ * back-fills them. The consequence is that a plaintext `cookies_json`, arriving
+ * from a bug, a half-finished migration, or a hand-edited row, decrypts to
+ * itself, parses, and drives the browser perfectly. Encryption at rest would be
+ * absent and nothing anywhere would say so.
+ *
+ * The check lives HERE, at the one place a cookie blob is decrypted for use, not
+ * inside `decryptSecret` — that pass-through has legitimate callers for optional
+ * fields (`imap_password`, `api_key`) and for the migration itself.
+ */
+export class UnencryptedSessionError extends Error {
+  constructor(accountId: string) {
+    // Account id only. Never the blob, never a cookie name or value (I9).
+    super(
+      `Account ${accountId} has a session stored WITHOUT encryption at rest. ` +
+      `Refusing to use it. Re-authenticate the account so the session is written ` +
+      `through encryptSecret, or check whether lib/db.ts's encryption migration ran.`
+    );
+    this.name = "UnencryptedSessionError";
+  }
+}
+
+/**
+ * Decrypts a stored session blob for use.
+ *
+ * Two failure modes, deliberately treated differently:
+ *
+ *   not enveloped  -> THROW. A security invariant is violated, and "this account
+ *                     needs re-authenticating" is the wrong description of it.
+ *   won't decrypt  -> undefined, so the caller falls back to re-auth. A corrupt
+ *   or won't parse    blob or a rotated NEXTAUTH_SECRET is a real, recoverable
+ *                     situation and was already handled this way.
+ */
+export function decryptSessionState(accountId: string, cookiesJson: string): object | undefined {
+  if (!isEncrypted(cookiesJson)) throw new UnencryptedSessionError(accountId);
+  try {
+    return JSON.parse(decryptSecret(cookiesJson)!);
+  } catch {
+    // Invalid storage state — will need re-auth
+    return undefined;
+  }
+}
+
 async function getOrCreateContext(accountId: string): Promise<BrowserContext> {
   const db = getDb();
   const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId) as
@@ -68,11 +115,7 @@ async function getOrCreateContext(accountId: string): Promise<BrowserContext> {
 
     let storageState: object | undefined;
     if (account.cookies_json) {
-      try {
-        storageState = JSON.parse(decryptSecret(account.cookies_json)!);
-      } catch {
-        // Invalid storage state — will need re-auth
-      }
+      storageState = decryptSessionState(accountId, account.cookies_json);
     }
 
     const ctx = await b.newContext(contextOptions(storageState));

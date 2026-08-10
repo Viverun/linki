@@ -67,7 +67,7 @@ If a heredoc is genuinely unavoidable: quote the delimiter, then read the file
 back and diff it against intent. "The generator reported success" is not evidence
 that the file is correct.
 
-## The pattern across four failures
+## The pattern across five failures
 
 | # | Failure | Where the defect lived |
 |---|---|---|
@@ -75,8 +75,18 @@ that the file is correct.
 | 2 | A commit shipped with a failing test | the gate that ran the suite as a report |
 | 3 | An unquoted heredoc corrupted three docs | the file-writing mechanism |
 | 4 | Ran preflight, saw FAIL, committed anyway | the gate's invocation |
+| 5 | The mutation harness reported findings that were not real | **the review loop itself** |
 
-None of the four was in the change being made. All four were in the tooling
+**#5 differs in kind.** The first four corrupted an *artifact* — a staged file, a
+commit, three docs, a gate's verdict — and each was visible by inspecting the
+artifact. #5 corrupted the *review loop*: the harness that decides whether a test
+is trustworthy produced findings that did not exist, sending effort at tests that
+were already correct and, in its third mode, capable of certifying a test that
+detects nothing. An artifact you can re-read. A review loop that lies to you has
+no such check above it — which is why the fix had to be adversarial validation of
+the harness rather than more care in using it.
+
+None of the five was in the change being made. All were in the tooling
 around it, and each was caught by an independent check rather than by the tool
 reporting failure — a changed untracked count, a re-read of the file, a re-run
 mutation, a re-read of output already printed. Tooling that reports its own
@@ -92,6 +102,7 @@ Each failure got a fix that makes it inexpressible rather than remembered:
 | 2 | `scripts/preflight.sh` exits non-zero — a suite run as a report became a gate |
 | 3 | Files are written with the file-write tool; no shell sits between content and disk |
 | 4 | `scripts/hooks/pre-commit` invokes preflight via `core.hooksPath`, so `git commit` refuses. Verified by staging a deliberate failure and confirming HEAD did not move |
+| 5 | `scripts/mutate.sh` proves the mutation landed, proves the run happened, and attributes each kill to a NAMED test — a file-level failure is reported INCONCLUSIVE, never as a kill. Validated with a syntax error and an import-time throw |
 
 Failure #4 is the instructive one: it was *already documented* as "chain it with
 `&&`", and documentation did not prevent it happening. A rule that depends on

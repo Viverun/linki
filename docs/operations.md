@@ -189,7 +189,7 @@ were passing against prose**:
 the `docker.sock` check reads raw text on purpose — a socket mount hidden in a
 comment is still one waiting to be uncommented.
 
-### A mutation harness must prove the mutation landed
+### The mutation harness, and what its failures do and do not put in question
 
 Two of the findings above were initially recorded from mutations that never
 applied: the target literal did not exist (`node scripts/health-predicate.js` is
@@ -206,6 +206,39 @@ a SURVIVED, assert both ends —
 
 - the mutated file differs from its backup, and
 - the run emitted a test summary at all.
+
+### Three ways the harness has misreported — and the bound on the damage
+
+`scripts/mutate.sh` is the harness. Mutation testing is this project's primary
+evidence standard, so the harness is load-bearing: if it misreports, the evidence
+base becomes noise. It has misreported in three distinct ways.
+
+| # | Mode | What it produces | Direction |
+|---|---|---|---|
+| 1 | **NO-OP** — the target literal did not exist, so the replace changed nothing | a false SURVIVOR | fails **safe** |
+| 2 | **BROKEN RUN** — the runner command was expanded unquoted from a shell variable, and zsh does not word-split, so it never executed | a false SURVIVOR | fails **safe** |
+| 3 | **INCONCLUSIVE** — the mutation broke compilation, so the test FILE failed to load and `node --test` reported `tests 1 / fail 1` naming the file | a false KILL | fails **unsafe** |
+
+**The bound, stated explicitly because it matters for everything already
+recorded:** modes 1 and 2 can only invent a false *survivor*. Neither can
+manufacture a kill — a test that did not run cannot report a failure, and an
+unmutated file cannot make a passing test fail. So every mutation recorded as
+KILLED across both phases (the M1–M38 tables, and the per-task counts in the
+commit messages) remains valid evidence. Those two failures caused the harness to
+**understate** coverage, sending effort at tests that were already correct. That
+is wasted work, not false confidence.
+
+Mode 3 is the one that could have manufactured a kill, and it is now closed: a
+kill must be **attributed to a named test**. A failing entry naming a `.test.ts`
+file means the module never loaded — every test in it is reported failing without
+any of them having evaluated anything — and the harness reports INCONCLUSIVE and
+demands a re-target. Validated adversarially with both a syntax error and an
+import-time throw; both report inconclusive, while a real behavioural mutation on
+the same file is still killed and attributed.
+
+"The suite went red" is not evidence about any particular assertion. A kill is a
+claim that a specific test detected a specific behaviour change, and the harness
+now only makes that claim when it is true.
 
 ## Banned: `git add -A`
 

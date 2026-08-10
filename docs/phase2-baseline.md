@@ -159,6 +159,7 @@ be wrong teaches you to stop trusting the column.
 | P2-2 (`943df6e`) | **304** | 287 + 17 new in `tests/degraded-alerting.test.ts` |
 | §1 isolation (`c89ca98`) | **308** | 304 + 4 new in `tests/health-isolation.test.ts` |
 | P2-4 backup (`252d784`) | **321** | 308 + 13 new in `tests/backup.test.ts`; confirmed by revert rehearsal returning exactly 308 |
+| §A/§B/§C (`a390e26`) | **332** | 321 + 5 NF-8 in `lib/linkedin/session.test.ts` + 3 in `tests/session-read-path.test.ts` + 3 C2 in `tests/backup.test.ts` |
 
 **The 288 → 287 correction.** The P2-2 working notes carried 287 as "288",
 which made the arithmetic land at 305 against a measured 304. The gap was
@@ -171,6 +172,13 @@ resolved by measurement, not by adjusting a number until it fit:
 
 The commit touched exactly one test file, and it was the new one. The
 off-by-one was in note-keeping, not in the suite.
+
+**A second miscount, caught by this table.** The `a390e26` commit message was
+written claiming 337 and the suite reported 332. The arithmetic above
+(321+5+3+3) resolves to 332; the message was corrected by amend before anything
+was pushed. Twice now the error has been in transcribing a count rather than in
+the suite — which is the argument for computing the row from its parts here
+rather than copying a number across from a terminal.
 
 **Per-commit counts before `613d04d` were not recorded at the time.** They are
 deliberately left blank rather than reconstructed: re-deriving them now would
