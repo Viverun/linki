@@ -65,4 +65,16 @@ USER node
 
 EXPOSE 3000
 
+# node -e with global fetch (node 22): the image has neither curl nor wget, and
+# adding one would change the base layer — the digest pin and the Chromium pin
+# above exist precisely because layer drift caused a live forced-logout incident.
+#
+# --start-period covers boot plus the first migration on a populated DB.
+# --retries=3 at --interval=30s means a supervisor acts only on ~90s of sustained
+# failure. /api/health returns 503 ONLY for a dead runner; a degraded one (a tick
+# failing repeatedly) returns 200 with a flag, because restarting mid-step is the
+# hazard the side-effect ledger exists to prevent.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 CMD ["npm", "start"]

@@ -92,6 +92,44 @@ invitation present. Covered by the existing `/data` gitignore rule.
 This is an ad-hoc snapshot for this work only. A real backup/restore procedure
 for `/data` remains an open gap.
 
+## Timeout budget (D15)
+
+Derived from the code's own timeouts. Two invariants depend on it, so changing
+any of these numbers invalidates both.
+
+| Phase | Source | Worst case |
+|---|---|---|
+| `gotoAuthenticated` | goto 30s + `settleAuthRedirect` 45s + 2.5s + settle 45s | **122.5 s** |
+| `assertConnectable` + `openInviteDialog` | click 10s + dialog 10s + Send wait 20s | **40 s** |
+| `verifyInvitationSent` | `gotoAuthenticated` again 122.5s + pending scrape ~60s | **182.5 s** |
+| **One connect step** | sum of the above | **≈ 345 s** |
+| `syncAcceptedConnections` | `MAX_PAGES=60` × (API + 0.9–1.6s gap) + nav 35s | **≈ 180 s** |
+| `randomDelay` between tracks | `PROFILE_DELAY_MIN/MAX` 8–20 s | **20 s** |
+
+### Invariant 1 — the 15-minute `trClaim` lease is the ceiling on a single step
+
+`CLAIM_LEASE_MINUTES = 15` (900 s). Worst case 345 s sits comfortably under it
+today. A step that could exceed the lease would let a second worker claim a track
+mid-execution, which is the one thing `trClaim` exists to prevent. **Anyone
+raising a Playwright timeout must check the new total against 900 s.** This is
+also commented beside the timeout constants themselves.
+
+### Invariant 2 — the 600 s liveness threshold is derived from this table
+
+`LIVENESS_THRESHOLD_MS` in `pages/api/health.ts` covers the worst gap between
+progress markers: one step (345 s) + `randomDelay` (20 s) ≈ 365 s, with ~64 %
+margin. Changing a timeout above invalidates the threshold; the health route
+cross-references back here.
+
+### Why markers are per-step and not per-tick
+
+`tick()` runs `for (const tr of toExecute) { await executeStep(...); await
+randomDelay(...) }` with **no cap on due tracks** (NF-5), so tick duration scales
+with workload — ~61 min at ten due tracks, unbounded in principle. A threshold
+above an unbounded quantity is not slow detection, it is no detection: it cannot
+distinguish a busy runner from a dead one. Per-step markers make staleness
+independent of tick length.
+
 ## Standing test rule — multi-site coverage
 
 Derived from two surviving mutants in Task 1 (M8, M16), both the same error: a

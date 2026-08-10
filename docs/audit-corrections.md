@@ -145,6 +145,29 @@ it.
 
 ---
 
+## NF-5 — `tick()` has no cap on due tracks
+
+`tick()` executes every due track sequentially with no batch limit, so a single
+tick's duration scales with workload: ~61 min at ten due tracks, unbounded in
+principle. Consequences: liveness cannot be measured by tick completion (hence
+per-step progress markers), and every tick-level activity queues behind a large
+tick.
+
+**Question raised for F7/N6, answered but deliberately NOT fixed in Phase 1:**
+is the daily-cap counter re-read per track inside the loop, or once before it?
+
+**Answered: read once, but compensated.** `connectsSentToday` /
+`messagesSentToday` are computed once at `runner.ts:1436-1452`, before the
+planning loop. However the planning loop maintains `connectsPlanned` /
+`messagesPlanned` and gates on `sentToday + planned >= limit`
+(`runner.ts:1642`), incrementing `planned` for every track it admits. So within
+a single tick the cap **is** correctly enforced despite the stale read.
+
+F7's severity is therefore **unchanged**: caps remain bypassable only by calling
+`executeStep` directly, not by ordinary operation under load.
+
+---
+
 ## F2 — rating rests on a recovery route that Task 3 removes
 
 The audit downgraded F2 (a sent-but-unrecorded invitation permanently failing its

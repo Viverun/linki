@@ -22,10 +22,22 @@ import { isAuthenticated } from "@/lib/auth";
 //                                   connection attempt.
 const PUBLIC_API_PREFIXES = ["/api/auth/", "/api/oauth/", "/api/mcp"];
 
+// EXACT path, never a prefix. A prefix would expose anything beginning with the
+// same characters (/api/health-secrets), and the check runs against the already-
+// normalised pathname so traversal (/api/healthz/../accounts) has resolved before
+// it is compared. Checked ahead of the prefix list purely for clarity; it is an
+// equality test and cannot widen those prefixes.
+//
+// Unauthenticated because a container healthcheck has no session. Safe because
+// the route is read-only, performs no COUNT over data, and returns no counts,
+// identifiers, env values, or error messages — only a state and an error class.
+const PUBLIC_API_EXACT = ["/api/health"];
+
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (!pathname.startsWith("/api/")) return NextResponse.next();
+  if (PUBLIC_API_EXACT.includes(pathname)) return NextResponse.next();
   if (PUBLIC_API_PREFIXES.some(p => pathname.startsWith(p))) return NextResponse.next();
 
   const authed = await isAuthenticated(req);

@@ -30,6 +30,18 @@ services:
       # Set to "false" to show the browser during automation (debug only)
       # HEADLESS=true
 
+    # NOTE: `restart: unless-stopped` does NOT act on health status — Docker
+    # restarts only on process exit. A failing healthcheck marks the container
+    # unhealthy and nothing else happens. Acting on it needs an external
+    # supervisor (an autoheal sidecar, or Swarm/Kubernetes). Until then this is
+    # observability, not recovery — see docs/audit-corrections.md, F8.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
     restart: unless-stopped
     # Caps Linki's CPU so a busy runner can't starve other containers on a
     # small box. Raise/remove this if you have cores to spare.

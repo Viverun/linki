@@ -274,6 +274,69 @@ function renderTemplate(body: string, target: Target): string {
     .trim();
 }
 
+// ─── runner liveness ─────────────────────────────────────────────────────────
+// Two independent signals, because one cannot express both failure modes.
+//
+//  * PROGRESS marker — written at every executeStep boundary, after the accepted-
+//    connections sync, and at loop-iteration start. Staleness here means the
+//    runner is DEAD. Per-STEP rather than per-tick on purpose: tick() executes
+//    every due track sequentially with no cap (NF-5), so tick duration scales
+//    with workload and a tick-completion timestamp can be legitimately stale for
+//    an hour. A threshold above an unbounded quantity is not slow detection, it
+//    is no detection.
+//
+//  * consecutive_tick_failures — a COUNTER, not a timestamp, because a tick that
+//    throws every iteration keeps the progress marker fresh (the loop is alive)
+//    while accomplishing nothing. That is NF-4, and no timestamp separates it
+//    from a large healthy tick.
+//
+// The liveness threshold lives in the health route and is derived from the
+// timeout budget in docs/phase1-baseline.md. Changing any Playwright timeout
+// invalidates it; that table cross-references both ways.
+const HEARTBEAT_KEYS = {
+  progressAt: "runner_progress_at",
+  progressPhase: "runner_progress_phase",
+  tickFailures: "runner_tick_failures",
+  lastErrorClass: "runner_last_error_class",
+} as const;
+
+function putSetting(db: ReturnType<typeof getDb>, key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).run(key, value);
+}
+
+/**
+ * Marks that the runner is still making progress. Never allowed to fail a tick:
+ * a bookkeeping write must not be able to stop the work it observes.
+ */
+export function recordProgress(db: ReturnType<typeof getDb>, phase: string): void {
+  try {
+    putSetting(db, HEARTBEAT_KEYS.progressAt, nowIso());
+    putSetting(db, HEARTBEAT_KEYS.progressPhase, phase);
+  } catch (err) {
+    console.warn("[runner] heartbeat write failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** Error CLASS only — never the message, which can carry profile URLs (I9). */
+export function recordTickOutcome(db: ReturnType<typeof getDb>, err: unknown): void {
+  try {
+    if (!err) {
+      putSetting(db, HEARTBEAT_KEYS.tickFailures, "0");
+      putSetting(db, HEARTBEAT_KEYS.lastErrorClass, "");
+      return;
+    }
+    const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(HEARTBEAT_KEYS.tickFailures) as { value: string } | undefined;
+    const next = (parseInt(row?.value ?? "0", 10) || 0) + 1;
+    putSetting(db, HEARTBEAT_KEYS.tickFailures, String(next));
+    putSetting(db, HEARTBEAT_KEYS.lastErrorClass, err instanceof Error ? err.constructor.name : typeof err);
+  } catch (e) {
+    console.warn("[runner] tick-outcome write failed:", e instanceof Error ? e.message : e);
+  }
+}
+
 // ─── side-effect ledger ──────────────────────────────────────────────────────
 // Irreversible LinkedIn actions (message, InMail) happen outside the database,
 // so the writes that follow one can never be atomic with it. Record the INTENT
@@ -401,6 +464,15 @@ function sideEffectBegin(
 }
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+/**
+ * Backoff sleep that does NOT hold the event loop open. The HTTP server keeps
+ * the process alive in production, so unref costs nothing there — but a runner
+ * stuck in recovery must never be the reason a process (or a test run) cannot
+ * exit. Same precedent as the unref'd interval in lib/update-check.ts.
+ */
+function sleepUnref(ms: number) {
+  return new Promise<void>(r => { const t = setTimeout(r, ms); (t as { unref?: () => void }).unref?.(); });
+}
 function randomDelay(minSec: number, maxSec: number) { return sleep((minSec + Math.random() * (maxSec - minSec)) * 1000); }
 function nowIso() { return new Date().toISOString(); }
 function addHours(h: number) { return new Date(Date.now() + h * 3600_000).toISOString(); }
@@ -1262,12 +1334,62 @@ export async function executeStep(
 
 // ─── global loop ─────────────────────────────────────────────────────────────
 
-const g = global as typeof global & { __linkiGlobalRunnerStarted?: boolean };
+const g = global as typeof global & { __linkiRunner?: { loop: Promise<void> | null; attempts: number } };
 
+/**
+ * Starts the global loop, and can revive it after a fatal failure.
+ *
+ * The previous boolean latched: it was set BEFORE the only unguarded call in
+ * globalLoop (getDb, which throws on a corrupt DB or a missing NEXTAUTH_SECRET)
+ * and never reset, so once the loop died nothing in the process could restart it
+ * — not this function, not POST /api/runs/[id]/start. Only a process restart.
+ * Holding the in-flight promise distinguishes "never started" from "not running"
+ * and makes recovery possible.
+ *
+ * Concurrency: the promise IS the mutex. A self-heal retry already in flight and
+ * a concurrent caller both observe the same non-null `loop`, so exactly one loop
+ * can exist however many callers race.
+ */
 export function ensureGlobalRunnerStarted(): void {
-  if (g.__linkiGlobalRunnerStarted) return;
-  g.__linkiGlobalRunnerStarted = true;
-  globalLoop().catch(err => console.error("[runner] Global loop crashed:", err));
+  const state = (g.__linkiRunner ??= { loop: null, attempts: 0 });
+  if (state.loop) return;
+  state.loop = runLoopWithRecovery().finally(() => { state.loop = null; });
+}
+
+/** Observable liveness for tests, without reaching into module internals. */
+export function runnerState(): { running: boolean; attempts: number } {
+  return { running: !!g.__linkiRunner?.loop, attempts: g.__linkiRunner?.attempts ?? 0 };
+}
+
+const RECOVERY_BACKOFF_MS = [30_000, 60_000, 120_000];
+const QUIET_AFTER_ATTEMPTS = 5;
+
+/**
+ * Wraps globalLoop so a fatal acquisition failure self-heals instead of ending
+ * the runner. Backoff is capped, and a deterministic fault (a missing
+ * NEXTAUTH_SECRET fails identically forever) must not spin loudly: past
+ * QUIET_AFTER_ATTEMPTS the log drops to one line per ten attempts and the cause
+ * is surfaced through /api/health's reason field instead of a scrolling wall.
+ */
+async function runLoopWithRecovery(): Promise<void> {
+  const state = (g.__linkiRunner ??= { loop: null, attempts: 0 });
+  for (;;) {
+    try {
+      await globalLoop();
+      state.attempts = 0;
+      return;
+    } catch (err) {
+      state.attempts++;
+      const wait = RECOVERY_BACKOFF_MS[Math.min(state.attempts - 1, RECOVERY_BACKOFF_MS.length - 1)];
+      if (state.attempts <= QUIET_AFTER_ATTEMPTS) {
+        console.error(`[runner] Global loop crashed (attempt ${state.attempts}), retrying in ${wait / 1000}s:`,
+          err instanceof Error ? err.message : err);
+      } else if (state.attempts % 10 === 0) {
+        console.error(`[runner] Global loop still failing after ${state.attempts} attempts: ${err instanceof Error ? err.constructor.name : typeof err}`);
+      }
+      await sleepUnref(wait);
+    }
+  }
 }
 
 async function globalLoop(): Promise<void> {
@@ -1275,9 +1397,12 @@ async function globalLoop(): Promise<void> {
   const db = getDb();
 
   while (true) {
+    recordProgress(db, "loop");
     try {
       await tick(db);
+      recordTickOutcome(db, null);
     } catch (err) {
+      recordTickOutcome(db, err);
       console.error("[runner] Tick error:", err instanceof Error ? err.message : err);
     }
     try {
@@ -1322,6 +1447,7 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
           }
         }
         console.log(`[runner] Accepted-connections sync complete — ${stamped} stamped`);
+        recordProgress(db, "sync-accepted");
       } catch (e) {
         console.warn("[runner] Accepted-connections sync error:", e instanceof Error ? e.message : e);
       }
@@ -1705,7 +1831,13 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
     if (!trClaim(db, tr.id)) continue;
 
     const target = db.prepare("SELECT * FROM targets WHERE id = ?").get(tr.target_id) as Target;
+    // Boundary markers only — deliberately NOT inside connect.ts/visit.ts/
+    // message.ts. The worst gap is one step (~345s) plus randomDelay (<=20s),
+    // which the 600s liveness threshold covers with margin; buying a few more
+    // minutes is not worth instrumenting the components the audit rated highest.
+    recordProgress(db, `step:${tr.track}:start`);
     await executeStep(db, tr.run_id, tr, target, steps, tr.account_id, limits, emailAccountId, emailLimits, getWorkflowPrompt(tr.workflow_id));
+    recordProgress(db, `step:${tr.track}:done`);
     await randomDelay(PROFILE_DELAY_MIN, PROFILE_DELAY_MAX);
   }
 }
