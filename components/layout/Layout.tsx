@@ -2,6 +2,7 @@ import { ReactNode, useCallback } from "react";
 import { useRouter } from "next/router";
 import Sidebar from "./Sidebar";
 import TourGate from "@/components/onboarding/TourGate";
+import RunnerHealthBanner from "./RunnerHealthBanner";
 
 const NO_LAYOUT_PATHS = ["/login"];
 
@@ -17,7 +18,13 @@ export default function Layout({ children }: { children: ReactNode }) {
     <div className="h-screen overflow-hidden bg-base-100 flex">
       <TourGate />
       <Sidebar onCollapse={handleCollapse} />
-      <main className="ml-13 flex-1 p-6 overflow-y-auto transition-[margin] duration-200">{children}</main>
+      {/* Below the NO_LAYOUT_PATHS early return above, so the banner never
+          mounts — and never polls — on /login. Structural, not a condition
+          inside the component that a later edit could quietly drop. */}
+      <div className="ml-13 flex-1 flex flex-col overflow-hidden transition-[margin] duration-200">
+        <RunnerHealthBanner />
+        <main className="flex-1 p-6 overflow-y-auto">{children}</main>
+      </div>
     </div>
   );
 }

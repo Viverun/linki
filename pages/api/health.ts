@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { DEGRADED_AFTER_FAILURES, classifyError } from "@/lib/health-contract";
 
 /**
  * Liveness endpoint. Unauthenticated by design (see proxy.ts), therefore:
@@ -47,12 +48,10 @@ const LIVENESS_THRESHOLD_MS = 600_000;
  */
 const HEALTH_SCHEMA = 1;
 
-/**
- * ~2.5 minutes of consecutive failure at the 30s tick cadence. A judgement call:
- * high enough to ride out a transient blip, low enough to surface NF-4 (a tick
- * that throws every iteration) quickly.
- */
-const DEGRADED_AFTER_FAILURES = 5;
+// DEGRADED_AFTER_FAILURES and classifyError come from lib/health-contract.ts,
+// a dependency-free leaf. They are deliberately NOT imported from runner.ts —
+// the endpoint that decides whether to restart must not depend on the subsystem
+// it judges. The reasoning is recorded in that file.
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "GET") return res.status(405).end();
@@ -66,7 +65,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     // identically after a restart — and each restart kills in-flight work.
     return res.status(503).json({
       ok: false, health_schema: HEALTH_SCHEMA, db: "unreachable", restart_will_help: false,
-      reason: err instanceof Error ? err.constructor.name : "unknown",
+      reason: classifyError(err),
     });
   }
 
@@ -130,7 +129,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     // problem and will recur.
     return res.status(503).json({
       ok: false, health_schema: HEALTH_SCHEMA, db: "ok", schema: "unknown", restart_will_help: false,
-      reason: err instanceof Error ? err.constructor.name : "unknown",
+      reason: classifyError(err),
     });
   }
 }

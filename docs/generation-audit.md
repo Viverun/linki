@@ -67,7 +67,7 @@ If a heredoc is genuinely unavoidable: quote the delimiter, then read the file
 back and diff it against intent. "The generator reported success" is not evidence
 that the file is correct.
 
-## The pattern across three failures
+## The pattern across four failures
 
 | # | Failure | Where the defect lived |
 |---|---|---|

@@ -99,6 +99,60 @@ driving one LinkedIn account, and duplicate outreach. Scaling the app — replic
 cluster mode, a second container on the same volume — without a cross-process lock
 is unsafe. See NF-7.
 
+## When something goes wrong, who finds out
+
+Before P2-2 the answer was *nobody*. A tick that threw on every iteration
+incremented `runner_tick_failures`, set `runner_last_error_class`, and reported
+itself accurately at `/api/health` — to anyone who asked. Nobody asked. That is
+NF-4 as actually lived: the instrumentation was correct and the outcome was
+identical to having none.
+
+Three channels now, in order of how likely they are to reach you:
+
+| Channel | Sees | Needs |
+|---|---|---|
+| In-app banner | Anyone with the UI open | nothing |
+| `ALERT_WEBHOOK_URL` | Wherever you point it | the env var |
+| `/api/health` | The watchdog, and you | you to look |
+
+**The banner** polls `/api/health` every 60s, pauses while the tab is hidden, and
+is dismissible for the session only. Dismissal is keyed by *problem*, not by
+banner: silencing a degraded notice does not silence a later dead one, and a
+different error class re-raises. It never mounts on `/login` — structurally,
+because `Layout` returns before it.
+
+**The webhook** fires on transition only: into degraded, into dead, and on
+recovery. Not once per tick — 2,880 messages a day is indistinguishable from
+none. Recovery is announced too, deliberately: an alerter that only ever reports
+bad news trains people to ignore it.
+
+The payload is a fixed five-key object and is asserted to be exactly that by
+test. It carries no target names, no message bodies, no account data, and no
+error *messages* — only an error class drawn from an allowlist in
+`lib/health-contract.ts`. Anything unrecognised becomes `unknown_error`. This is
+an allowlist rather than a sanitiser because `err.constructor.name` is unbounded
+in practice, and a webhook body is the easiest place for I9 to be violated by a
+future well-meaning "just add the message so we can debug it".
+
+If a webhook POST fails it is logged and swallowed. A notification must never be
+able to fail the tick it is reporting on — the tick may already have changed
+something on LinkedIn.
+
+### The degraded threshold lives in one place
+
+`DEGRADED_AFTER_FAILURES` is defined in `lib/health-contract.ts` and imported by
+both the runner and `/api/health`. Do not restate it. Two copies drift, and the
+drift is confusing in both directions: a banner reading degraded while no alert
+fired looks like a broken alerter, and the reverse looks like a broken banner.
+
+`lib/health-contract.ts` imports nothing and must stay that way. The first
+version of this change had `/api/health` import the constant from `runner.ts`,
+which drags playwright, apollo and nodemailer into the health endpoint's import
+graph — an import-time throw in any of them would turn health into a 500, the
+supervisor would read that as unhealthy, and the restart budget would burn down
+against something a restart cannot fix. **The endpoint that decides whether to
+restart must not depend on the subsystem it judges.**
+
 ## Banned: `git add -A`
 
 **With or without a path filter.** Six local-only paths live in

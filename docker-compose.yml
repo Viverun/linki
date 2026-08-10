@@ -29,6 +29,11 @@ services:
       #
       # Set to "false" to show the browser during automation (debug only)
       # HEADLESS=true
+      #
+      # Optional. Webhook that receives runner degraded/dead/recovered alerts.
+      # Transition-only, fixed 5-key payload, no identifying detail. Unset = the
+      # in-app banner is the only channel. See .env.example.
+      # ALERT_WEBHOOK_URL=
 
     # `restart: unless-stopped` acts only on process EXIT, not on health status.
     # A failing healthcheck marks the container unhealthy and nothing else

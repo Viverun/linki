@@ -1,4 +1,9 @@
 import { getDb } from "@/lib/db";
+import { DEGRADED_AFTER_FAILURES, classifyError, UNKNOWN_ERROR_CLASS } from "@/lib/health-contract";
+
+// Re-exported so callers that already depend on the runner need not learn about
+// a second module; lib/health-contract.ts remains the single definition.
+export { classifyError, UNKNOWN_ERROR_CLASS };
 import { randomUUID, createHash } from "crypto";
 import { setInterval as nodeSetInterval } from "node:timers";
 import { getSessionPage, saveSessionState, getSessionContext } from "@/lib/linkedin/session";
@@ -308,6 +313,62 @@ function putSetting(db: ReturnType<typeof getDb>, key: string, value: string): v
   ).run(key, value);
 }
 
+export type RunnerAlertState = "healthy" | "degraded" | "dead";
+
+const ALERT_KEYS = { lastState: "alert_last_state" } as const;
+
+
+
+/**
+ * Announces a runner state change to an operator.
+ *
+ * Fires on TRANSITION, never per tick: a tick failing every 30s would otherwise
+ * produce 2,880 notifications a day, which is indistinguishable from no
+ * notification. The last announced state is persisted, because "transition" is
+ * unknowable across a restart otherwise.
+ *
+ * Wrapped end to end. A webhook is the least reliable thing the runner touches,
+ * and it runs immediately after work that may have already changed LinkedIn — it
+ * must never be able to fail a tick, exactly like the heartbeat.
+ */
+export async function notifyRunnerState(
+  db: ReturnType<typeof getDb>,
+  detail: { state: RunnerAlertState; failures: number; errorClass?: string }
+): Promise<void> {
+  try {
+    const previous = (db.prepare("SELECT value FROM app_settings WHERE key = ?").get(ALERT_KEYS.lastState) as { value: string } | undefined)?.value;
+
+    // Always record the state — this is what makes "transition" meaningful across
+    // a restart, and it is written even when no webhook is configured so that
+    // turning one on later does not immediately re-announce a stale state.
+    putSetting(db, ALERT_KEYS.lastState, detail.state);
+
+    if (previous === detail.state) return;                   // not a transition
+    // First observation of a healthy runner is a boot, not a recovery. Without
+    // this every process start announces itself.
+    if (previous === undefined && detail.state === "healthy") return;
+
+    const url = process.env.ALERT_WEBHOOK_URL;
+    if (!url) return;
+
+    // Recovery IS announced. An operator woken at 3am by a degraded alert needs
+    // to know it cleared without logging in to check; an alerter that only ever
+    // reports bad news trains people to ignore it.
+    // EXACT payload. Never a message body, target name, vanity, workflow name, or
+    // anything from `accounts`. New fields are how those eventually leak.
+    const body = {
+      service: "linki",
+      state: detail.state,
+      consecutive_tick_failures: detail.failures,
+      error_class: detail.errorClass ?? UNKNOWN_ERROR_CLASS,
+      timestamp: nowIso(),
+    };
+    await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  } catch (err) {
+    console.warn("[runner] alert notification failed:", err instanceof Error ? err.message : err);
+  }
+}
+
 /**
  * Marks that the runner is still making progress. Never allowed to fail a tick:
  * a bookkeeping write must not be able to stop the work it observes.
@@ -322,17 +383,36 @@ export function recordProgress(db: ReturnType<typeof getDb>, phase: string): voi
 }
 
 /** Error CLASS only — never the message, which can carry profile URLs (I9). */
+/**
+ * Fires a notification without making a synchronous bookkeeping function async.
+ *
+ * `notifyRunnerState` persists the state before its first `await`, so the
+ * transition record is written synchronously here; only the HTTP POST is
+ * deferred. It cannot reject — it is wrapped end to end — but `.catch` is kept
+ * so a future edit that removes that wrapper cannot produce an unhandled
+ * rejection that takes the process down.
+ */
+function announce(db: ReturnType<typeof getDb>, detail: { state: RunnerAlertState; failures: number; errorClass?: string }): void {
+  void notifyRunnerState(db, detail).catch(() => { /* never surfaces */ });
+}
+
 export function recordTickOutcome(db: ReturnType<typeof getDb>, err: unknown): void {
   try {
     if (!err) {
       putSetting(db, HEARTBEAT_KEYS.tickFailures, "0");
       putSetting(db, HEARTBEAT_KEYS.lastErrorClass, "");
+      announce(db, { state: "healthy", failures: 0 });
       return;
     }
     const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(HEARTBEAT_KEYS.tickFailures) as { value: string } | undefined;
     const next = (parseInt(row?.value ?? "0", 10) || 0) + 1;
+    const errorClass = classifyError(err);
     putSetting(db, HEARTBEAT_KEYS.tickFailures, String(next));
-    putSetting(db, HEARTBEAT_KEYS.lastErrorClass, err instanceof Error ? err.constructor.name : typeof err);
+    putSetting(db, HEARTBEAT_KEYS.lastErrorClass, errorClass);
+    // Announced HERE rather than at the loop's call site: the counter and the
+    // announcement are one fact, and a second caller of recordTickOutcome would
+    // otherwise increment silently. Same multi-site lesson as M8/M16.
+    if (next >= DEGRADED_AFTER_FAILURES) announce(db, { state: "degraded", failures: next, errorClass });
   } catch (e) {
     console.warn("[runner] tick-outcome write failed:", e instanceof Error ? e.message : e);
   }
