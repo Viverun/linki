@@ -160,7 +160,8 @@ be wrong teaches you to stop trusting the column.
 | §1 isolation (`c89ca98`) | **308** | 304 + 4 new in `tests/health-isolation.test.ts` |
 | P2-4 backup (`252d784`) | **321** | 308 + 13 new in `tests/backup.test.ts`; confirmed by revert rehearsal returning exactly 308 |
 | §A/§B/§C (`8bc6aaa`) | **332** | 321 + 5 NF-8 in `lib/linkedin/session.test.ts` + 3 in `tests/session-read-path.test.ts` + 3 C2 in `tests/backup.test.ts` |
-| N7 + F4 (this commit) | **339** | 332 + 3 N7 in `lib/linkedin/connect.test.ts` + 4 in `tests/signup-closed.test.ts` |
+| N7 + F4 (`130cff4`) | **339** | 332 + 3 N7 in `lib/linkedin/connect.test.ts` + 4 in `tests/signup-closed.test.ts` |
+| N7b (this commit) | **347** | 339 + 7 in `tests/null-vanity.test.ts` + 1 ordering test in `lib/linkedin/connect.test.ts` |
 
 **The 288 → 287 correction.** The P2-2 working notes carried 287 as "288",
 which made the arithmetic land at 305 against a measured 304. The gap was

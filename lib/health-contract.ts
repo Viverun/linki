@@ -58,6 +58,7 @@ const PERMITTED_ERROR_CLASSES = new Set([
   "InviteNotSentError", "SessionExpiredError", "NotConnectedError",
   "MessagingUrnUnresolvedError", "UnresolvedSideEffectError",
   "AuthenticationNotEstablishedError", "UnencryptedSessionError",
+  "UnresolvableProfileUrlError",
 ]);
 
 export const UNKNOWN_ERROR_CLASS = "unknown_error";

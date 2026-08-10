@@ -8,7 +8,7 @@ import { randomUUID, createHash } from "crypto";
 import { setInterval as nodeSetInterval } from "node:timers";
 import { getSessionPage, saveSessionState, getSessionContext } from "@/lib/linkedin/session";
 import { visitProfile, type VisitResult } from "@/lib/linkedin/visit";
-import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError } from "@/lib/linkedin/connect";
+import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError, vanityNameOf } from "@/lib/linkedin/connect";
 import { sendMessage, NotConnectedError, MessagingUrnUnresolvedError } from "@/lib/linkedin/message";
 import { shouldSyncAccepted, syncAcceptedConnections } from "@/lib/linkedin/sync-accepted";
 import { sendEmail } from "@/lib/email/sender";
@@ -651,8 +651,41 @@ function enforceSchedule(
 
 // ─── URL resolution ──────────────────────────────────────────────────────────
 
-async function resolveLinkedinUrl(db: ReturnType<typeof getDb>, target: Target, accountId: string): Promise<string> {
-  if (target.linkedin_url?.includes("/in/")) return target.linkedin_url;
+/**
+ * N7b: a profile URL that yields no vanity must never enter the system.
+ *
+ * Every downstream consumer treats the vanity as the thing that identifies WHO
+ * this is: the invitation CTA is bound by `vanityName`, the sent-invitations
+ * scrape is keyed by it, and the accepted-connections reconciliation matches on
+ * it. When it is null each of those has to decide what absence means, and the
+ * wrong answer ranges from doing nothing, to inviting a stranger (N7), to wiping
+ * a real connection (the unmark pass in sync-accepted.ts).
+ *
+ * Rejecting once, here, means no downstream consumer has to be individually
+ * correct. N7's symmetric refusal in connect.ts stays as defence in depth: two
+ * independent guards, the same pattern as the side-effect ledger's two layers.
+ */
+export class UnresolvableProfileUrlError extends Error {
+  constructor(targetLabel: string) {
+    // A label the operator can act on. Never the URL itself — it is user-supplied
+    // and this message reaches logs.
+    super(`${targetLabel} has a LinkedIn URL with no resolvable profile name — refusing to act on it`);
+    this.name = "UnresolvableProfileUrlError";
+  }
+}
+
+export async function resolveLinkedinUrl(db: ReturnType<typeof getDb>, target: Target, accountId: string): Promise<string> {
+  // `includes("/in/")` was a SUBSTRING test, not a shape test. Verified by
+  // execution: "https://www.linkedin.com/in/", "https://example.com/in/",
+  // "linkedin.com/in/?trk=x" and ".../in//" all satisfy it and all yield a null
+  // vanity. POST /api/targets validates only that the field is truthy, so an
+  // operator pasting a truncated URL reaches this.
+  if (target.linkedin_url?.includes("/in/")) {
+    if (vanityNameOf(target.linkedin_url) === null) {
+      throw new UnresolvableProfileUrlError(target.full_name ?? target.id);
+    }
+    return target.linkedin_url;
+  }
   const salesNavUrl = target.sales_nav_url ?? target.linkedin_url;
   if (!salesNavUrl) throw new Error(`${target.full_name ?? target.id} has no Sales Nav URL to resolve from`);
   const leadMatch = salesNavUrl.match(/\/sales\/lead\/(.+)/);
@@ -676,6 +709,12 @@ async function resolveLinkedinUrl(db: ReturnType<typeof getDb>, target: Target, 
   const flagshipUrl = typeof p?.flagshipProfileUrl === "string" ? p.flagshipProfileUrl : null;
   if (!flagshipUrl) throw new Error(`Could not resolve LinkedIn URL for ${target.full_name ?? target.id}`);
   const linkedinUrl = flagshipUrl.endsWith("/") ? flagshipUrl : flagshipUrl + "/";
+  // The SECOND exit, and the one audit Unknown #1 is about: this URL comes from
+  // LinkedIn's own payload, and whether it can lack a vanity is unresolved.
+  // Checking it here makes the answer not matter — the guard holds either way.
+  if (vanityNameOf(linkedinUrl) === null) {
+    throw new UnresolvableProfileUrlError(target.full_name ?? target.id);
+  }
 
   type RawPosition = { title?: unknown; companyName?: unknown; current?: unknown; startedOn?: unknown; endedOn?: unknown; description?: unknown };
   const rawPositions = Array.isArray(p?.positions) ? (p.positions as RawPosition[]) : [];

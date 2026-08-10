@@ -1,4 +1,5 @@
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import type { Page } from "playwright";
 import {
@@ -428,3 +429,39 @@ test("N7: a resolvable vanity still connects normally", async () => {
   await sendConnectionRequest(fake as unknown as Page, PROFILE);
   assert.equal(fake.ctx.sendClicked, true, "a normal invitation is unaffected");
 });
+
+test("N7b/§3.4: verifyInvitationSent's vanity comparison is never reached with a null vanity", () => {
+  // Signal 2 of verifyInvitationSent compares a vanity against the
+  // sent-invitations scrape, and `vanity ? ... : 0` means a null vanity would
+  // read as "not offered / not pending" — an absence inference of exactly the
+  // kind N7b is about.
+  //
+  // It is UNREACHABLE, and the reason is ordering rather than a check of its
+  // own: sendConnectionRequest calls openInviteDialog before
+  // verifyInvitationSent, and openInviteDialog now throws on a null vanity. So
+  // control never arrives. Asserted here as an ORDERING property, because that
+  // is the thing a future edit could silently break — moving verification
+  // earlier, or catching InviteUiError, would make signal 2 live again.
+  const src = codeOnlyConnect();
+  const openIdx = src.indexOf("await openInviteDialog(");
+  const verifyIdx = src.indexOf("await verifyInvitationSent(");
+  assert.ok(openIdx > 0 && verifyIdx > 0, "both calls must exist");
+  assert.ok(openIdx < verifyIdx,
+    "openInviteDialog must run BEFORE verifyInvitationSent — that ordering is what makes " +
+    "signal 2 unreachable with a null vanity");
+
+  // And the refusal must not be caught between them.
+  const between = src.slice(openIdx, verifyIdx);
+  assert.ok(!/catch\s*\(/.test(between),
+    "nothing may swallow the refusal between opening the invite UI and verifying it");
+});
+
+function codeOnlyConnect(): string {
+  // Comments and strings stripped — the §2 rule. This assertion is about call
+  // ORDER in code, and connect.ts's prose mentions both function names.
+  const raw = readFileSync("lib/linkedin/connect.ts", "utf8");
+  return raw
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1 ")
+    .replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, (m) => m[0] + m[0]);
+}

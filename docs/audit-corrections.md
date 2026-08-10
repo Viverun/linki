@@ -363,6 +363,99 @@ an unnecessary guard, under-rating sends a stranger an invitation.
 The rule this yields: an unverified reachability claim is not evidence of low
 severity. Either look, or rate it as if it is reachable.
 
+## N7b — the null-vanity CLASS, audited consumer by consumer
+
+N7 closed the invitation path. The class stayed open: every consumer that treats
+a vanity as present-or-absent has to decide what absence *means*, and the answers
+were inconsistent.
+
+### The consumer audit
+
+| # | Site | Behaviour with a null vanity | Fails |
+|---|---|---|---|
+| 1 | `runner.ts` `resolveLinkedinUrl` (stored URL) | gated on `includes("/in/")` — a **substring** test — and returned the URL unvalidated | **open** → now guarded |
+| 2 | `runner.ts` `resolveLinkedinUrl` (`flagshipProfileUrl`) | built and returned with no shape check at all | **open** → now guarded |
+| 3 | `connect.ts` `openInviteDialog` case 1 | unscoped selector; could pick a bystander's CTA | **open** → closed by N7 |
+| 4 | `connect.ts` `openInviteDialog` case 2 | already threw `InviteUiError` | closed |
+| 5 | `connect.ts` `verifyInvitationSent` signal 2 | `vanity ? … : 0` would read as "not pending" | **unreachable** — see below |
+| 6 | `sync-accepted.ts` add pass (`:119`) | `if (!c.vanity) continue` | closed |
+| 7 | `sync-accepted.ts` **unmark pass** (`:151`) | `!v \|\| !seen.has(v)` — un-marked the contact | **open, destructive** → now guarded |
+| 8 | `pages/api/accounts/[id]/sync-accepted.ts:39` | `if (!match) continue` | **already closed** |
+
+### #7 is the real one, and it is the mirror image of N7
+
+`if (!v || !seenVanities.has(v))` reads as "no vanity, OR absent from the
+authoritative list", treating those as the same thing. They are opposites:
+
+- absence from the list is **evidence** the connection is gone;
+- an unparseable URL is the **absence of evidence** — the contact could not be
+  identified, so nothing was learned about them.
+
+The selection is `linkedin_url LIKE '%/in/%'`, another substring test, so a row
+like `https://www.linkedin.com/in/` **is** selected, fails to parse, and has its
+`degree` and `connected_at` set to NULL on every verified-complete pass. A real,
+accepted connection erased on a schedule, taking the record of when it was made
+with it.
+
+Where N7 acted on a stranger because it could not tell who the target was, #7
+destroys data about the target for exactly the same reason. Same root cause,
+opposite direction, and only one of the two was in the audit.
+
+Now `shouldUnmarkPhantom` — extracted so the decision is testable without a
+browser — and it fails closed: no vanity, no inference. A genuinely absent
+contact is still un-marked, which is the control that stops the fix quietly
+becoming "never un-mark anything" and reinstating the phantom-degree=1 problem
+the pass exists to correct.
+
+### #8 — the prediction that did not hold, recorded as such
+
+The directive expected `pages/api/accounts/[id]/sync-accepted.ts:39` to mark a
+target accepted on a null vanity, and to overwrite `connected_at` without
+`COALESCE`. Neither holds:
+
+- it does **not** call `vanityNameOf`; it inlines the same regex and guards with
+  `if (!match) continue;`, so a null-vanity target is skipped;
+- the `connected_at` overwrite is prevented by the selection itself, whose
+  `WHERE` includes `AND connected_at IS NULL` — a row that already has a value is
+  never a candidate.
+
+No change was made there. Adding a `COALESCE` that cannot fire, or a guard that
+duplicates one three lines above, would be motion rather than protection. The
+correct instance was #7, in the runner's own implementation rather than the API
+endpoint.
+
+### #5 — unreachable, by ordering rather than by a check
+
+`verifyInvitationSent`'s signal 2 compares a vanity against the sent-invitations
+scrape, and `vanity ? … : 0` would read a null vanity as "not pending". Control
+never arrives: `sendConnectionRequest` calls `openInviteDialog` first, which now
+refuses. That is a property of **call order**, not of the function, so it is
+asserted as one — a future edit that moves verification earlier, or catches
+`InviteUiError` between the two, would make signal 2 live again. Both of those
+edits are covered by mutation.
+
+### Two independent guards, deliberately
+
+`resolveLinkedinUrl` rejects at the source so no downstream consumer has to be
+individually correct; `connect.ts` keeps N7's symmetric refusal. That duplication
+is the same pattern as the side-effect ledger's two layers: the outer guard is
+the one that should fire, and the inner one is what stands if a future caller
+reaches `sendConnectionRequest` by another route.
+
+Guard #2 also settles audit **Unknown #1** operationally without resolving it.
+Whether LinkedIn can emit a `flagshipProfileUrl` lacking a vanity is still
+unknown — and now does not matter, because that value is shape-checked before it
+is used.
+
+### Still open, deliberately not changed
+
+`POST /api/targets` validates only that `linkedin_url` is truthy, and is the
+production path by which a null vanity actually arrives. It is **not** fixed
+here: rejecting URLs the endpoint previously accepted is an API contract change,
+and it belongs to a decision about input validation rather than to null-vanity
+handling. The CSV path is already guarded (`normalizeLinkedinUrl`). Recorded for
+Phase 3.
+
 ## Standing correction to how findings are rated
 
 Two of the audit's findings fell to measurement. Ratings derived from reading

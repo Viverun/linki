@@ -56,6 +56,31 @@ interface ApiConnection {
   createdAt: number; // epoch ms
 }
 
+/**
+ * N7b: decides whether a degree=1 contact is a phantom that should be un-marked.
+ *
+ * This was `if (!v || !seenVanities.has(v))` — which reads "no vanity, OR not in
+ * the authoritative list" and treats those as the same thing. They are opposites.
+ * Absence from the list is EVIDENCE the connection is gone. An unparseable URL is
+ * the ABSENCE of evidence: the contact could not be identified, so nothing was
+ * learned about them.
+ *
+ * Conflating them is destructive rather than inert. The selection is
+ * `linkedin_url LIKE '%/in/%'` — a substring test — so a row like
+ * "https://www.linkedin.com/in/" IS selected, fails to parse, and has its
+ * `degree` and `connected_at` wiped on every verified-complete pass: a real,
+ * accepted connection erased on a schedule, taking the record of when it was made
+ * with it.
+ *
+ * Fails closed: no vanity, no inference.
+ */
+export function shouldUnmarkPhantom(linkedinUrl: string, seenVanities: Set<string>): boolean {
+  const mm = linkedinUrl.match(/\/in\/([^/?#]+)/);
+  const v = mm ? decodeURIComponent(mm[1]).toLowerCase() : null;
+  if (v === null) return false;
+  return !seenVanities.has(v);
+}
+
 export async function syncAcceptedConnections(accountId: string): Promise<number> {
   const db = getDb();
   const page = await getSessionPage(accountId);
@@ -148,9 +173,7 @@ export async function syncAcceptedConnections(accountId: string): Promise<number
       const unmark = db.prepare("UPDATE targets SET degree = NULL, connected_at = NULL WHERE id = ?");
       const tx = db.transaction((rows: typeof deg1) => {
         for (const t of rows) {
-          const mm = t.linkedin_url.match(/\/in\/([^/?#]+)/);
-          const v = mm ? decodeURIComponent(mm[1]).toLowerCase() : null;
-          if (!v || !seenVanities.has(v)) {
+          if (shouldUnmarkPhantom(t.linkedin_url, seenVanities)) {
             unmark.run(t.id);
             unmarked++;
           }
