@@ -37,6 +37,17 @@ import { getDb } from "@/lib/db";
 const LIVENESS_THRESHOLD_MS = 600_000;
 
 /**
+ * Payload contract version, consumed by scripts/health-predicate.js.
+ *
+ * Bump this whenever a field the predicate reads changes name or meaning. The
+ * predicate warns loudly on an unexpected version rather than silently deciding
+ * not to act — a safety mechanism that has quietly stopped protecting anything
+ * is the worst failure mode available, and a renamed field looks exactly like a
+ * healthy "no action needed".
+ */
+const HEALTH_SCHEMA = 1;
+
+/**
  * ~2.5 minutes of consecutive failure at the 30s tick cadence. A judgement call:
  * high enough to ride out a transient blip, low enough to surface NF-4 (a tick
  * that throws every iteration) quickly.
@@ -54,7 +65,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     // A bad NEXTAUTH_SECRET, wrong permissions, or a corrupt file all repeat
     // identically after a restart — and each restart kills in-flight work.
     return res.status(503).json({
-      ok: false, db: "unreachable", restart_will_help: false,
+      ok: false, health_schema: HEALTH_SCHEMA, db: "unreachable", restart_will_help: false,
       reason: err instanceof Error ? err.constructor.name : "unknown",
     });
   }
@@ -69,7 +80,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     if (ledger.c !== 1) {
       // A swallowed migration repeats on every boot. Restarting just loops.
       return res.status(503).json({
-        ok: false, db: "ok", schema: "incomplete", restart_will_help: false,
+        ok: false, health_schema: HEALTH_SCHEMA, db: "ok", schema: "incomplete", restart_will_help: false,
         reason: "step_side_effects_missing",
       });
     }
@@ -90,7 +101,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       // gets first refusal; the supervisor is the backstop for a process that
       // cannot help itself.
       return res.status(503).json({
-        ok: false, db: "ok", schema: "ok", restart_will_help: true,
+        ok: false, health_schema: HEALTH_SCHEMA, db: "ok", schema: "ok", restart_will_help: true,
         runner: {
           state: "dead", last_progress_at: progressAt, seconds_since_progress: secondsSince,
           revivals: parseInt(get("runner_revivals") ?? "0", 10) || 0,
@@ -100,7 +111,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
     const degraded = failures >= DEGRADED_AFTER_FAILURES;
     return res.status(200).json({
-      ok: true, db: "ok", schema: "ok", restart_will_help: false,
+      ok: true, health_schema: HEALTH_SCHEMA, db: "ok", schema: "ok", restart_will_help: false,
       runner: {
         state: degraded ? "degraded" : "healthy",
         last_progress_at: progressAt,
@@ -118,7 +129,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     // An unexpected query failure against a reachable DB is not a liveness
     // problem and will recur.
     return res.status(503).json({
-      ok: false, db: "ok", schema: "unknown", restart_will_help: false,
+      ok: false, health_schema: HEALTH_SCHEMA, db: "ok", schema: "unknown", restart_will_help: false,
       reason: err instanceof Error ? err.constructor.name : "unknown",
     });
   }

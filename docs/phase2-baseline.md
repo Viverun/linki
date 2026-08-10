@@ -15,7 +15,7 @@ legitimately and constantly. It is replaced by the tripwires below.
 | Gate | Baseline |
 |---|---|
 | HEAD | `4af831c` |
-| `git status --porcelain` | 6 untracked local-only files, 0 modified |
+| `git status --porcelain` | **0 untracked** — the six local-only paths moved to `.git/info/exclude` |
 | `npx tsc --noEmit` | 0 errors |
 | `npm test` | **264** = 238 tracked + 26 untracked (`demo-harness`) |
 | `npm run build` | exit 0 |
@@ -119,3 +119,25 @@ No cluster mode, no PM2, no child spawning in application code, no
 **This is now load-bearing.** The P2-1 watchdog actively re-establishes loops, so
 running two processes against one `/data` volume produces two runners on one
 LinkedIn account. See NF-7.
+
+## Working-tree tripwire — identity, not count
+
+"Exactly 6 untracked" drifts silently: one artifact replaced by another still
+counts six. The tripwire is now these **specific** paths, each of which must
+exist on disk and be reported ignored by `git check-ignore`:
+
+```
+diag.ts
+invite-diag.ts
+whoami.ts
+lib/linkedin/runner.ts.bak
+scripts/demo-connect-message.ts
+tests/demo-harness.test.ts
+```
+
+They live in `.git/info/exclude`, not `.gitignore`, so QA-artifact filenames do
+not appear in a public repository — and because an ignored file cannot be staged
+by `git add -A` without `-f`, which turns a habit into a control.
+
+`scripts/preflight.sh` enforces this, plus `tsc`, `npm test`, and the eslint
+baseline, and must pass before every commit.

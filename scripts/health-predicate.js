@@ -21,14 +21,51 @@
  */
 const url = process.argv[2] || "http://127.0.0.1:3000/api/health";
 
+const EXPECTED_SCHEMA = 1;
+
+/**
+ * FAIL-SAFE MUST NOT BE FAIL-SILENT.
+ *
+ * "No action" is the correct response to a payload we do not understand — and it
+ * is also exactly what a renamed field looks like. A supervisor that has quietly
+ * stopped protecting anything is the worst outcome available here, so every
+ * not-understood branch shouts on stderr instead of exiting 0 in silence.
+ */
+function warn(msg) {
+  console.error(`[health-predicate] ${msg}`);
+}
+
 fetch(url)
   .then((r) => r.json())
   .then((b) => {
-    const act = !!(b && b.runner && b.runner.state === "dead" && b.restart_will_help === true);
+    if (!b || typeof b !== "object") {
+      warn("payload is not an object — SUPERVISOR INACTIVE, nothing will be restarted");
+      process.exit(0);
+    }
+    if (b.health_schema !== EXPECTED_SCHEMA) {
+      warn(
+        `unexpected health_schema=${JSON.stringify(b.health_schema)} (expected ${EXPECTED_SCHEMA}) — ` +
+        "SUPERVISOR INACTIVE. The image may predate this predicate, or /api/health's contract changed " +
+        "without bumping HEALTH_SCHEMA. Nothing will be restarted until this matches."
+      );
+      process.exit(0);
+    }
+    if (typeof b.restart_will_help !== "boolean") {
+      warn(
+        "predicate field `restart_will_help` absent — SUPERVISOR INACTIVE, image may predate P2-1. " +
+        "Nothing will be restarted."
+      );
+      process.exit(0);
+    }
+    const act = b.runner && b.runner.state === "dead" && b.restart_will_help === true;
     if (process.env.HEALTH_PREDICATE_VERBOSE === "1") {
-      const state = (b && b.runner && b.runner.state) || (b && b.schema) || "unknown";
-      console.log(`state=${state} restart_will_help=${b && b.restart_will_help} act=${act}`);
+      const state = (b.runner && b.runner.state) || b.schema || "unknown";
+      console.log(`state=${state} restart_will_help=${b.restart_will_help} act=${!!act}`);
     }
     process.exit(act ? 1 : 0);
   })
-  .catch(() => process.exit(1));
+  .catch((e) => {
+    // The server is not answering at all. That IS restart-fixable.
+    warn(`health endpoint unreachable (${e && e.message}) — treating as dead`);
+    process.exit(1);
+  });
