@@ -182,12 +182,15 @@ test("P2-1: revivals are surfaced so repeated automatic recoveries are not silen
   assert.equal(r.body.runner.revivals, 4, "visible even while currently healthy");
 });
 
-test("P2-1: the shipped probe command matches the predicate under test", async () => {
-  // Guards against the Dockerfile and the tests drifting apart.
+test("P2-1: both probes delegate to the shared predicate rather than inlining it", async () => {
+  // The predicate now lives in scripts/health-predicate.js so the Docker probe
+  // and the host watchdog cannot drift. Its BEHAVIOUR is covered by
+  // tests/health-predicate.test.ts, which executes it as a real process; this
+  // only asserts the delegation.
   const { readFile } = await import("node:fs/promises");
   for (const f of ["Dockerfile", "docker-compose.yml"]) {
     const src = await readFile(f, "utf8");
-    assert.match(src, /state===?'dead'/, `${f}: probe checks for the dead state`);
-    assert.match(src, /restart_will_help===?true/, `${f}: probe gates on restart_will_help`);
+    assert.match(src, /health-predicate\.js/, `${f}: calls the shared predicate`);
+    assert.doesNotMatch(src, /restart_will_help===?true/, `${f}: no inline copy to drift`);
   }
 });

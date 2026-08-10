@@ -1415,6 +1415,13 @@ const gw = global as typeof global & { __linkiWatchdog?: NodeJS.Timeout };
  * Registered at boot next to the runner, on a timer INDEPENDENT of the loop so
  * it survives the loop's death. unref'd, following lib/update-check.ts: a
  * watchdog must never be the reason a process cannot exit.
+ *
+ * PRECONDITION — SINGLE PROCESS. The loop guard is a per-process global. This
+ * watchdog actively re-establishes loops, so a second Node process (cluster
+ * mode, PM2, replicas, or a second container on the same /data volume) yields
+ * two loops and two Chromium stacks driving one LinkedIn account. Verified today
+ * as one `next-server` process; see NF-7 in docs/audit-corrections.md and the
+ * precondition section of docs/operations.md before scaling anything.
  */
 export function startRunnerWatchdog(): void {
   if (gw.__linkiWatchdog) return;

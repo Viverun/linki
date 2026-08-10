@@ -145,6 +145,27 @@ it.
 
 ---
 
+## NF-7 — the watchdog makes the per-process guard load-bearing
+
+The runner's single-loop guard (`g.__linkiRunner`) is a **per-process** global.
+Before Phase 2 that was a latent limitation: a second process meant a second loop
+only if something started one. The P2-1 watchdog *actively re-establishes* loops
+on a timer, so two processes now produce two loops **by default** — two Chromium
+stacks on one LinkedIn account, duplicate outreach, and the deployment matrix's
+"container duplication" row arriving by accident rather than by mistake.
+
+Verified today: exactly one Node process (`next-server`, PID 20 under
+`sh -c next start` under `npm start`), no cluster mode, no PM2, no child spawning,
+no `replicas`/`scale` in compose. Recorded as a precondition in
+`docs/operations.md` and beside the watchdog registration.
+
+**Phase 3 candidate:** a cross-process lease — an `app_settings` row holding
+owner + expiry, refreshed by the live loop and only claimable when stale, or an
+advisory lock on the database. Not built now; the precondition is documented
+instead.
+
+---
+
 ## NF-6 — the loop reset has exactly one in-process caller, and it is operator-driven
 
 M26 showed the `.finally` reset in `ensureGlobalRunnerStarted` is unreachable

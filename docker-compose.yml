@@ -30,45 +30,22 @@ services:
       # Set to "false" to show the browser during automation (debug only)
       # HEADLESS=true
 
-    # NOTE: `restart: unless-stopped` does NOT act on health status — Docker
-    # restarts only on process exit. A failing healthcheck marks the container
-    # unhealthy and nothing else happens. Acting on it needs an external
-    # supervisor (an autoheal sidecar, or Swarm/Kubernetes). Until then this is
-    # observability, not recovery — see docs/audit-corrections.md, F8.
+    # `restart: unless-stopped` acts only on process EXIT, not on health status.
+    # A failing healthcheck marks the container unhealthy and nothing else
+    # happens here by design: acting on it is scripts/watchdog.sh on the host,
+    # deliberately NOT a socket-mounted sidecar (socket access is root-equivalent
+    # on the host regardless of :ro). See docs/operations.md.
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>r.json().then(b=>process.exit(b.runner&&b.runner.state==='dead'&&b.restart_will_help===true?1:0))).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "scripts/health-predicate.js"]
       interval: 30s
       timeout: 5s
       start_period: 60s
       retries: 3
 
     restart: unless-stopped
-    labels:
-      # Consumed by the autoheal sidecar below. Opt-in per container.
-      - "autoheal=true"
     # Caps Linki's CPU so a busy runner can't starve other containers on a
     # small box. Raise/remove this if you have cores to spare.
     deploy:
       resources:
         limits:
           cpus: "1.5"
-
-  # Restarts ONLY containers Docker marks unhealthy, and the probe above is
-  # deliberately narrow: it fails only for a dead runner that a restart can fix.
-  # With --retries=3 --interval=30s, ~90s of sustained restart-fixable death must
-  # elapse first, on top of the 600s progress-marker threshold — so a restart
-  # cannot land on a runner that is merely slow.
-  #
-  # No application dependency is added; this is a separate image with no access
-  # to the app beyond the Docker socket, mounted read-only.
-  autoheal:
-    image: willfarrell/autoheal:1.2.0
-    restart: unless-stopped
-    environment:
-      - AUTOHEAL_CONTAINER_LABEL=autoheal
-      - AUTOHEAL_INTERVAL=30
-      - AUTOHEAL_START_PERIOD=120
-      # Give the app time to shut down cleanly rather than being killed mid-write.
-      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=30
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro

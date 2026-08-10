@@ -19,6 +19,8 @@ scripts/*
 !scripts/retest-connect.ts
 !scripts/test-setup.mjs
 !scripts/test-resolve-hooks.mjs
+# The container HEALTHCHECK runs this; it is the shared restart predicate.
+!scripts/health-predicate.js
 
 # Local scratch diagnostics. Superseded by scripts/retest-connect.ts, and they
 # import via absolute /app/... paths that break `next build`'s typecheck.

@@ -65,15 +65,16 @@ USER node
 
 EXPOSE 3000
 
-# node -e with global fetch (node 22): the image has neither curl nor wget, and
-# adding one would change the base layer — the digest pin and the Chromium pin
-# above exist precisely because layer drift caused a live forced-logout incident.
+# Runs the SHARED predicate (scripts/health-predicate.js), which the host-side
+# scripts/watchdog.sh also calls — one definition, two callers, so they cannot
+# drift. node with global fetch because the image has neither curl nor wget, and
+# adding one would change the base layer that the digest and Chromium pins above
+# exist to protect.
 #
 # --start-period covers boot plus the first migration on a populated DB.
-# --retries=3 at --interval=30s means a supervisor acts only on ~90s of sustained
-# failure. /api/health returns 503 ONLY for a dead runner; a degraded one (a tick
-# failing repeatedly) returns 200 with a flag, because restarting mid-step is the
-# hazard the side-effect ledger exists to prevent.
+# --retries=3 at --interval=30s means ~90s of sustained failure precedes any
+# action, on top of the 600s progress-marker threshold.
+#
 # Exits non-zero ONLY for a dead runner that a restart can actually fix. Three of
 # the four 503 reasons (unreachable DB, incomplete schema, unexpected query
 # failure) repeat identically after a restart, so acting on the raw status would
@@ -81,6 +82,6 @@ EXPOSE 3000
 # still returns 503 for those so a human sees them; the probe just does not act.
 # A failed fetch is treated as dead — the server is not answering at all.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>r.json().then(b=>process.exit(b.runner&&b.runner.state==='dead'&&b.restart_will_help===true?1:0))).catch(()=>process.exit(1))"
+  CMD node scripts/health-predicate.js
 
 CMD ["npm", "start"]

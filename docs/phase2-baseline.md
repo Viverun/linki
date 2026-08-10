@@ -102,3 +102,20 @@ that matters most:** you would recover targets, workflows and history, and be
 locked out of every LinkedIn account, requiring manual re-authentication of each.
 P2-4 must treat the secret as part of the backup set, stored separately from the
 DB copy.
+
+## Single-process precondition (P2-1)
+
+Verified inside the running container, not inferred from config:
+
+```
+PID 1   npm start
+PID 19  sh -c next start
+PID 20  next-server (v16.1.6)     <- the only Node runtime
+```
+
+No cluster mode, no PM2, no child spawning in application code, no
+`replicas`/`scale` in `docker-compose.yml`.
+
+**This is now load-bearing.** The P2-1 watchdog actively re-establishes loops, so
+running two processes against one `/data` volume produces two runners on one
+LinkedIn account. See NF-7.
