@@ -237,6 +237,32 @@ a SURVIVED, assert both ends —
 - the mutated file differs from its backup, and
 - the run emitted a test summary at all.
 
+### Every fix gets an over-reach control
+
+A normal mutation proves the fix **does something**: break the guard, watch a
+test die. That says nothing about whether the guard does **too much**, and an
+over-aggressive guard is a real bug wearing a safety jacket — one that reads as
+caution in review and as an outage in production.
+
+So every fix also gets at least one **over-reach control**: a mutation that makes
+the guard maximally strict, plus a test that dies under it.
+
+| Fix | Over-reach mutation | Test that must die |
+|---|---|---|
+| N7 null-vanity refusal | refuse **all** profiles | a resolvable vanity still connects |
+| N7b unmark guard | **never** un-mark anything | a genuinely absent contact is still un-marked |
+| NF-9 host allowlist | narrow to `www.linkedin.com` only | `uk.linkedin.com` and the bare apex still resolve |
+| NF-9 host allowlist | refuse **every** URL | every legitimate LinkedIn URL still resolves |
+| F4 closed registration | refuse the **first** signup too | a fresh instance can still be claimed |
+
+The NF-9 row is the instructive one. Narrowing to `www.linkedin.com` looks
+*safer* — fewer hosts accepted — and would have broken enrichment for the
+regional profile URLs LinkedIn itself hands out. Only the control catches that,
+because every hostile-host test still passes under it.
+
+A fix with no over-reach control is half-tested: you have shown it refuses what
+it should, and not that it accepts what it must.
+
 ### Three ways the harness has misreported — and the bound on the damage
 
 `scripts/mutate.sh` is the harness. Mutation testing is this project's primary

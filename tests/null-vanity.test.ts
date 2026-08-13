@@ -39,6 +39,20 @@ const NULL_VANITY_URLS = [
   "https://www.linkedin.com/in//",
 ];
 
+/**
+ * The subset that is null-vanity AND ON LINKEDIN.
+ *
+ * NF-9 added a host check that runs BEFORE the vanity check, so the other two
+ * shapes above are now refused as untrusted hosts instead — a stricter refusal,
+ * for a more serious reason. The original guarantee ("every one of these four is
+ * refused") is preserved below and unchanged; this subset exists so the
+ * null-vanity error can still be asserted precisely, on a host that is allowed.
+ */
+const NULL_VANITY_ON_LINKEDIN = [
+  "https://www.linkedin.com/in/",
+  "https://www.linkedin.com/in//",
+];
+
 // ─── §3.1 systemic guard at the source ───────────────────────────────────────
 
 test("N7b: the old gate was a substring test, and these four satisfy it", () => {
@@ -51,13 +65,28 @@ test("N7b: the old gate was a substring test, and these four satisfy it", () => 
   assert.equal(vanityNameOf("https://www.linkedin.com/in/real-person/"), "real-person");
 });
 
-test("N7b: resolveLinkedinUrl REFUSES a stored URL with no resolvable vanity", async () => {
+test("N7b: resolveLinkedinUrl REFUSES every stored URL with no resolvable vanity", async () => {
+  // The original guarantee, unchanged: all four are refused. Which error depends
+  // on WHY — NF-9's host check runs first and is the more serious finding — so
+  // this asserts refusal, and the test below pins the null-vanity error itself.
   for (const url of NULL_VANITY_URLS) {
     await assert.rejects(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => runner.resolveLinkedinUrl(getDb(), { id: "t1", full_name: "Someone", linkedin_url: url } as any, "acct-1"),
-      (err: unknown) => err instanceof Error && err.name === "UnresolvableProfileUrlError",
+      (err: unknown) => err instanceof Error &&
+        (err.name === "UnresolvableProfileUrlError" || err.name === "UntrustedProfileHostError"),
       `${url} must be refused at the source`
+    );
+  }
+});
+
+test("N7b: a null vanity ON LINKEDIN raises the null-vanity error specifically", async () => {
+  for (const url of NULL_VANITY_ON_LINKEDIN) {
+    await assert.rejects(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      () => runner.resolveLinkedinUrl(getDb(), { id: "t1", full_name: "Someone", linkedin_url: url } as any, "acct-1"),
+      (err: unknown) => err instanceof Error && err.name === "UnresolvableProfileUrlError",
+      `${url} is on an allowed host, so the refusal must be about the vanity`
     );
   }
 });
@@ -73,15 +102,17 @@ test("N7b: a valid URL still resolves untouched", async () => {
 
 test("N7b/I9: the refusal names the target, never the URL", async () => {
   // The URL is user-supplied and this message reaches logs.
+  // On an ALLOWED host, so this exercises the null-vanity error rather than
+  // NF-9's host error (which deliberately does name the host — see that entry).
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await runner.resolveLinkedinUrl(getDb(), { id: "t3", full_name: "Someone", linkedin_url: "https://example.com/in/?token=SECRET123" } as any, "a");
+    await runner.resolveLinkedinUrl(getDb(), { id: "t3", full_name: "Someone", linkedin_url: "https://www.linkedin.com/in/?token=SECRET123" } as any, "a");
     assert.fail("should have thrown");
   } catch (err) {
     const msg = (err as Error).message;
     assert.match(msg, /Someone/);
-    assert.ok(!msg.includes("SECRET123"), "must not echo the URL");
-    assert.ok(!msg.includes("example.com"), "must not echo the URL");
+    assert.ok(!msg.includes("SECRET123"), "a query parameter may carry a token — never echo the URL");
+    assert.ok(!msg.includes("linkedin.com/in/?"), "must not echo the URL");
   }
 });
 

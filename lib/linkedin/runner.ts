@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import { DEGRADED_AFTER_FAILURES, classifyError, UNKNOWN_ERROR_CLASS } from "@/lib/health-contract";
+import { isAllowedLinkedinUrl } from "@/lib/linkedin-url";
 
 // Re-exported so callers that already depend on the runner need not learn about
 // a second module; lib/health-contract.ts remains the single definition.
@@ -665,6 +666,29 @@ function enforceSchedule(
  * correct. N7's symmetric refusal in connect.ts stays as defence in depth: two
  * independent guards, the same pattern as the side-effect ledger's two layers.
  */
+/**
+ * NF-9: the URL is well-formed and yields a vanity, but is not on LinkedIn.
+ *
+ * Separate from UnresolvableProfileUrlError on purpose. "I cannot tell who this
+ * is" and "this is not LinkedIn" call for different operator responses — fix the
+ * profile link, versus work out how a foreign URL got into the contact list —
+ * and collapsing them into one error would hide the second, which is the more
+ * alarming of the two.
+ */
+export class UntrustedProfileHostError extends Error {
+  constructor(targetLabel: string, host: string) {
+    // The HOST is included: it is the one piece an operator needs to act, it is
+    // not a secret, and it is bounded (a hostname, not a full URL with query
+    // parameters that may carry tokens).
+    super(`${targetLabel} has a LinkedIn URL pointing at "${host}", which is not linkedin.com — refusing to navigate`);
+    this.name = "UntrustedProfileHostError";
+  }
+}
+
+function hostOf(raw: string): string {
+  try { return new URL(raw).hostname || "(unparseable)"; } catch { return "(unparseable)"; }
+}
+
 export class UnresolvableProfileUrlError extends Error {
   constructor(targetLabel: string) {
     // A label the operator can act on. Never the URL itself — it is user-supplied
@@ -681,6 +705,14 @@ export async function resolveLinkedinUrl(db: ReturnType<typeof getDb>, target: T
   // vanity. POST /api/targets validates only that the field is truthy, so an
   // operator pasting a truncated URL reaches this.
   if (target.linkedin_url?.includes("/in/")) {
+    // HOST FIRST. A foreign host with a parseable vanity — example.com/in/bob —
+    // cleared both the substring gate and the null check, and the consequence is
+    // worse than either: it points the authenticated browser at attacker-chosen
+    // content. Checked before the vanity so the more serious refusal is the one
+    // reported.
+    if (!isAllowedLinkedinUrl(target.linkedin_url)) {
+      throw new UntrustedProfileHostError(target.full_name ?? target.id, hostOf(target.linkedin_url));
+    }
     if (vanityNameOf(target.linkedin_url) === null) {
       throw new UnresolvableProfileUrlError(target.full_name ?? target.id);
     }
@@ -712,6 +744,9 @@ export async function resolveLinkedinUrl(db: ReturnType<typeof getDb>, target: T
   // The SECOND exit, and the one audit Unknown #1 is about: this URL comes from
   // LinkedIn's own payload, and whether it can lack a vanity is unresolved.
   // Checking it here makes the answer not matter — the guard holds either way.
+  if (!isAllowedLinkedinUrl(linkedinUrl)) {
+    throw new UntrustedProfileHostError(target.full_name ?? target.id, hostOf(linkedinUrl));
+  }
   if (vanityNameOf(linkedinUrl) === null) {
     throw new UnresolvableProfileUrlError(target.full_name ?? target.id);
   }

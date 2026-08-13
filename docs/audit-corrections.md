@@ -456,6 +456,122 @@ and it belongs to a decision about input validation rather than to null-vanity
 handling. The CSV path is already guarded (`normalizeLinkedinUrl`). Recorded for
 Phase 3.
 
+## NF-9 — the gate validated a substring, not a host
+
+N7b closed the case where a URL yields no vanity. It left open the worse one: a
+URL that yields a perfectly good vanity on **somebody else's domain**.
+
+```
+https://example.com/in/bob            gate=true  vanity="bob"
+https://linkedin.com.evil.tld/in/bob  gate=true  vanity="bob"
+https://evil.tld/?x=.../in/bob        gate=true  vanity="bob"
+```
+
+All three cleared the `includes("/in/")` gate **and** the null-vanity guard,
+because a vanity was parsed. Verified by execution, not by reading.
+
+### Why this outranks the null case
+
+A null vanity wastes a step, or invites a bystander — *on LinkedIn*. A foreign
+host points the **authenticated browser** at attacker-chosen content. Cookies are
+domain-scoped so the session itself does not leak, but the page loads in the same
+browser as a live LinkedIn session, and the automation then interacts with
+whatever it finds believing it is on a profile.
+
+That is why the tests assert **zero navigation** on refusal rather than only that
+an error was thrown. A throw after `page.goto` is not a defence; the hostile page
+is already loaded.
+
+### Where host validation did and did not exist
+
+| Site | Before |
+|---|---|
+| `vanityNameOf` (connect.ts:90) | none — a regex on `/in/` |
+| `normalizeLinkedinUrl` (csv-import.ts:57) | `includes("linkedin.com/in/")` — refuses `example.com`, accepts `evil.tld/?x=linkedin.com/in/bob`. CSV only |
+| `gotoAuthenticated` (connect.ts:113) | none — `page.goto(url)` runs first, unconditionally |
+| `resolveLinkedinUrl` | none |
+| `isLoggedInAppUrl` (session.ts:514) | **a correct check** — but post-navigation, answering "did we land on the app?" |
+
+The correct expression already existed, one module away, doing a different job
+too late to help.
+
+### The fix
+
+`lib/linkedin-url.ts` — a dependency-free leaf — with a suffix-anchored host
+test, applied at **both** exits of `resolveLinkedinUrl`: the stored URL, and the
+`flagshipProfileUrl` LinkedIn hands back. The second exit matters because that
+value is not under the runner's control; a mutation removing its check survived
+the whole first round of tests, which had only ever reached exit 1.
+
+`linkedin.com` and any subdomain are accepted. Deliberately **not** narrowed to
+`www.linkedin.com`: regional forms like `uk.linkedin.com` are real, and an
+over-tight allowlist breaks enrichment for legitimate profiles. That is enforced
+by an over-reach control, not by intention.
+
+### Defence in depth, not input validation — and the debt
+
+This guard sits where the URL is about to steer a browser. It is **not** input
+validation, and it does not make the system's inputs trustworthy.
+
+`POST /api/targets` still validates only that `linkedin_url` is truthy, and
+remains the production path by which a bad URL arrives. Fixing it is an API
+contract change — it rejects values the endpoint previously accepted — and is
+**still owed**, recorded for Phase 3. The CSV path is guarded, though by a
+substring test that a query-parameter payload can defeat; folding it onto the
+same predicate belongs with that work.
+
+## F5 — PARTIALLY CORRECTED. The mechanism was real; the location was not.
+
+The audit cited `pages/api/accounts/[id]/sync-accepted.ts:39` and attributed a
+missing `COALESCE` on `connected_at` to it.
+
+**That site is correct as written**, and nothing was changed there:
+
+- it does not call `vanityNameOf`; it inlines the regex and guards with
+  `if (!match) continue;`, so a null-vanity target is skipped rather than
+  inferred about;
+- the `connected_at` overwrite cannot occur, because the selection's `WHERE`
+  already includes `AND connected_at IS NULL` — a row with a value is never a
+  candidate;
+- and the runner's own `markAccepted` (`lib/linkedin/sync-accepted.ts:93`)
+  already reads `connected_at = COALESCE(connected_at, ?)`.
+
+Adding a `COALESCE` that cannot fire, or a guard three lines below one that
+already exists, would have been motion rather than protection.
+
+**The mechanism the audit described is real, at a different location.** It lives
+in the runner's implementation, `lib/linkedin/sync-accepted.ts:151` — the unmark
+pass — and is now fixed under N7b. See that entry for the detail; in short,
+`!v || !seenVanities.has(v)` conflated "cannot identify this contact" with
+"this contact is gone", and wiped `degree` and `connected_at` on rows it could
+not parse.
+
+### What survives of F5
+
+The API endpoint's *"not in the pending list any more -> accepted (or expired,
+but treat as accepted)"* inference is a **separate claim from the COALESCE one,
+and it still stands on its own terms**: a withdrawn or expired invitation leaves
+the pending list exactly as an accepted one does, so that endpoint will record a
+connection that was never made — untouched here, and still owed a fix.
+
+### The tally, and what these five share
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | F3 — "SQLite has no `busy_timeout`" | **RETRACTED** — the constructor already defaults it to 5000 |
+| 2 | "Transaction held open across network work" | **RETRACTED** |
+| 3 | F8 — the loop's outer `.catch()` | **RECHARACTERISED** — reachable only via `getDb()`, and it latched |
+| 4 | N7 — unscoped invite fallback | **SEVERITY RAISED**, P2 -> P0 |
+| 5 | F5 — missing `COALESCE` | **MIS-LOCATED** — right mechanism, wrong file |
+
+Two retractions, one recharacterisation, one increase, one mis-location.
+
+The common thread: **every audit claim carries a mechanism AND a location, and
+both have to be executed.** Reading the mechanism and finding it plausible is not
+verification — F3's mechanism was plausible and false; F5's was true but pointed
+at a file that had already handled it. A claim is only confirmed when the
+specific line named has been made to misbehave.
+
 ## Standing correction to how findings are rated
 
 Two of the audit's findings fell to measurement. Ratings derived from reading
