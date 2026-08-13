@@ -40,11 +40,75 @@
 export type CommentStyle = "c" | "hash";
 
 /**
+ * Scans C-like source and removes comments WITHOUT being fooled by strings.
+ *
+ * The regex version — `src.replace(/\/\*[\s\S]*?\*\//g, " ")` — silently
+ * corrupted any file containing a `/*` sequence inside a string literal. The
+ * live example is `lib/linkedin/session.ts:399`:
+ *
+ *     await page.waitForURL("**\/feed/**", { timeout: 180_000 });
+ *
+ * The `/*` inside that string opens a phantom block comment, and everything up
+ * to the next real `*\/` — hundreds of lines — is deleted. Quote balance goes
+ * with it, so `stripStrings` then mispairs across the rest of the file.
+ *
+ * The failure is SILENT in the dangerous direction. A positive assertion
+ * (`assert.match`) fails loudly when its target is eaten. A negative one
+ * (`assert.doesNotMatch`, `assert.ok(!...)`) passes vacuously against a region
+ * that no longer exists — which is exactly the shape of assertion these helpers
+ * were introduced to make trustworthy.
+ *
+ * So this walks the source instead. Strings, template literals and comments are
+ * tracked as states. Regex literals are not fully parsed — distinguishing them
+ * from division needs a real tokenizer — but a `/` immediately followed by `*`
+ * cannot occur inside one without an escape, so the practical hazard is closed.
+ */
+function stripCComments(src: string): string {
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+
+    // ── inside a string or template: copy verbatim, honouring escapes ──
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      out += c; i++;
+      while (i < src.length) {
+        if (src[i] === "\\") { out += src[i] + (src[i + 1] ?? ""); i += 2; continue; }
+        out += src[i];
+        if (src[i] === quote) { i++; break; }
+        i++;
+      }
+      continue;
+    }
+
+    if (c === "/" && next === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      out += " ";
+      continue;
+    }
+
+    if (c === "/" && next === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i += 2;
+      out += " ";
+      continue;
+    }
+
+    out += c; i++;
+  }
+  return out;
+}
+
+/**
  * Removes comments, replacing each with a space so tokens on either side cannot
  * be accidentally fused into a new one.
  *
- * The C-like `//` pattern requires the preceding character not to be `:` so that
- * `https://…` inside code is not mistaken for a line comment.
+ * The C-like case walks the source (see `stripCComments`) rather than pattern-
+ * matching, so a `//` inside a string — a URL, a glob — is left alone without
+ * needing the old `[^:]` lookbehind hack.
  */
 export function stripComments(src: string, style: CommentStyle = "c"): string {
   if (style === "hash") {
@@ -52,9 +116,7 @@ export function stripComments(src: string, style: CommentStyle = "c"): string {
     // shell parameter expansions, not comments.
     return src.replace(/(^|\s)#.*$/gm, "$1 ");
   }
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1 ");
+  return stripCComments(src);
 }
 
 /**

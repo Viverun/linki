@@ -67,7 +67,7 @@ If a heredoc is genuinely unavoidable: quote the delimiter, then read the file
 back and diff it against intent. "The generator reported success" is not evidence
 that the file is correct.
 
-## The pattern across five failures
+## The pattern across six failures
 
 | # | Failure | Where the defect lived |
 |---|---|---|
@@ -76,6 +76,7 @@ that the file is correct.
 | 3 | An unquoted heredoc corrupted three docs | the file-writing mechanism |
 | 4 | Ran preflight, saw FAIL, committed anyway | the gate's invocation |
 | 5 | The mutation harness reported findings that were not real | **the review loop itself** |
+| 6 | `stripComments` deleted live code, silently | **the tool that makes source assertions trustworthy** |
 
 **#5 differs in kind.** The first four corrupted an *artifact* — a staged file, a
 commit, three docs, a gate's verdict — and each was visible by inspecting the
@@ -92,6 +93,44 @@ reporting failure — a changed untracked count, a re-read of the file, a re-run
 mutation, a re-read of output already printed. Tooling that reports its own
 success is not a control.
 
+### #6 in detail — the helper that made source assertions trustworthy was corrupting them
+
+`stripComments` used `src.replace(/\/\*[\s\S]*?\*\//g, " ")`. That treats a
+`/*` **inside a string literal** as a comment opener. The live example is
+`lib/linkedin/session.ts:399`:
+
+```
+await page.waitForURL("**/feed/**", { timeout: 180_000 });
+```
+
+The `/*` in that glob opened a phantom comment, and everything up to the next
+real `*/` — 350+ characters — was deleted, taking the closing quote with it, so
+`stripStrings` then mispaired across the remainder of the file.
+
+The direction of failure is the problem. A positive assertion (`assert.match`)
+fails loudly when its target is eaten. A **negative** one (`assert.doesNotMatch`,
+`assert.ok(!…)`) passes vacuously against a region that no longer exists — and
+negative assertions are precisely what these helpers were introduced to make
+trustworthy. Five test files depend on them.
+
+It was found because a "guard the guard" test — *both known sites must still hold
+the expression this tripwire assumes* — failed. Without that test the new
+tripwire would have shipped green and watched nothing.
+
+All five mutations depending on `codeOnly` were re-run after the fix (A1, A3, A4,
+the §3.4 ordering property, and backup's baked-`$(date)` check). All five still
+killed, so nothing had been passing vacuously in practice — but that was luck,
+not design: each happened to be anchored by a positive assertion in the same test.
+
+**A third false-survivor mode, found the same day:** a mutation that *applies*
+but writes something other than what was intended. Bash single-quoting plus
+Python string escaping turned an injected `\.` into `\\.`, so the mutation
+landed, the harness confirmed the file changed, the test correctly did not match
+it, and the result read as SURVIVED. The harness proves a file changed; it cannot
+prove it changed into what you meant. When a mutation survives, read the mutated
+region before believing it — and prefer injections built with `chr(92)` over
+nested escapes.
+
 ## Structural resolutions
 
 Each failure got a fix that makes it inexpressible rather than remembered:
@@ -103,6 +142,7 @@ Each failure got a fix that makes it inexpressible rather than remembered:
 | 3 | Files are written with the file-write tool; no shell sits between content and disk |
 | 4 | `scripts/hooks/pre-commit` invokes preflight via `core.hooksPath`, so `git commit` refuses. Verified by staging a deliberate failure and confirming HEAD did not move |
 | 5 | `scripts/mutate.sh` proves the mutation landed, proves the run happened, and attributes each kill to a NAMED test — a file-level failure is reported INCONCLUSIVE, never as a kill. Validated with a syntax error and an import-time throw |
+| 6 | `stripComments` walks the source instead of pattern-matching it, so a `/*` inside a string cannot open a comment. `tests/support/source-text.test.ts` pins the behaviour, and every mutation depending on `codeOnly` was re-run to confirm none had been passing vacuously |
 
 Failure #4 is the instructive one: it was *already documented* as "chain it with
 `&&`", and documentation did not prevent it happening. A rule that depends on

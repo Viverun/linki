@@ -572,6 +572,39 @@ verification — F3's mechanism was plausible and false; F5's was true but point
 at a file that had already handled it. A claim is only confirmed when the
 specific line named has been made to misbehave.
 
+## NF-10 — two definitions of "is this host LinkedIn?", tolerated and tripwired
+
+`lib/linkedin-url.ts` is canonical (NF-9). A second, byte-identical expression
+lives in `lib/linkedin/session.ts:514` inside `isLoggedInAppUrl`.
+
+**Decision: keep the duplicate, record it, and guard against a third.**
+
+Delegating is not a one-line import swap. `isLoggedInAppUrl` needs the host
+decision *and* the pathname, so it cannot call the leaf and return — the URL
+parse and the try/catch both move, which is a body rewrite of a Ground Rule 5
+component for a refactor. That is the edit the rule exists to prevent.
+
+The two also differ in job:
+
+| | Question | When |
+|---|---|---|
+| `isAllowedLinkedinUrl` | may the runner navigate here? | **before** navigation, a trust gate |
+| `isLoggedInAppUrl` | did the browser land on the app? | **after** navigation, a classification |
+
+And the drift direction is benign. If the leaf gains a host `isLoggedInAppUrl`
+lacks, the runner navigates and then decides it is not on the app — an
+unnecessary re-auth, not a wrong action. The reverse cannot occur, because the
+runner never reaches a host the leaf refuses.
+
+What is guarded is a **third** copy. `tests/host-expression-drift.test.ts` walks
+every non-test `.ts` file and fails if a host-matching expression appears outside
+the two enumerated sites, with a second test asserting both known sites still
+hold one — so the tripwire cannot start passing vacuously because a file was
+refactored out from under it, and a third asserting the two expressions still
+agree on the NF-9 host table.
+
+Consolidation is Phase 3.
+
 ## Standing correction to how findings are rated
 
 Two of the audit's findings fell to measurement. Ratings derived from reading
