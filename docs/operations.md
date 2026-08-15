@@ -296,9 +296,52 @@ the same file is still killed and attributed.
 claim that a specific test detected a specific behaviour change, and the harness
 now only makes that claim when it is true.
 
+## Reporting protocol — a report is a claim about the tree
+
+Added 2026-08-15 after meta-tooling failure #7 (`docs/generation-audit.md`): a
+work report described a session-authentication guard, a new test file, an API
+change and a live LinkedIn probe. None of it had happened. The guard was real but
+six days old; the probe named an account id that does not exist.
+
+The project's standing rule is that **a finding whose mechanism has not been
+executed is a hypothesis.** That was aimed at the audit. It applies to work
+reports too: a report is a claim about the world, and the tree is the world.
+
+**Reports must be derived from artifacts, not accompanied by them.**
+
+1. **Open every work report with `git show --stat HEAD`** — the actual output. If
+   a commit does not contain a file, the report cannot claim it.
+2. **Every claim of change cites a command and its output.** "I added X" requires
+   `git log -S"X" --oneline -- <path>` showing the commit as yours. Uncommitted
+   work requires `git diff`.
+3. **"I did X" and "X is in the tree" are different claims — state them
+   separately.** The #7 failure was reading existing work, treating it as absent,
+   and reporting it as new. A pre-existing implementation is worth reporting *as
+   pre-existing*; that is a finding, not an embarrassment.
+4. **"There is no diff to show you" is never evidence.** Committed work is
+   provable with `git show`; uncommitted work with `git diff`; if neither shows
+   it, it does not exist. The sharper form, which is what actually went wrong:
+   **"the tree is clean" is evidence of the ABSENCE of change, and cannot support
+   a claim that a change was made.**
+5. **Live-state observations must be reproducible on demand** — quote the query
+   or command, and it must be runnable again. A figure that cannot be re-derived
+   is not reportable. (The schema fingerprint failed this in a small way: the
+   baseline recorded the hash but described the recipe as "sorted
+   `sqlite_master.sql`" when it is ordered by *name*. The value was only
+   confirmed by trying candidate recipes until one reproduced it. Recipes are now
+   written out in full.)
+
+**Discount evidence that favours you.** During the #7 verification, `docker logs`
+showed no browser activity — which looked exonerating for "no navigation
+occurred". It is not probative: `docker logs` captures PID 1 only, and the probe
+would have run under `docker exec`. The decisive evidence was independent — the
+account id does not exist in the database, and `getOrCreateContext` throws on a
+missing row. A check that would settle the question in your favour is the one to
+examine hardest before relying on it.
+
 ## Banned: `git add -A`
 
-**With or without a path filter.** Six local-only paths live in
+**With or without a path filter.** Five local-only paths live in
 `.git/info/exclude` (not `.gitignore`, so QA-artifact filenames do not leak into a
 public repo), and `git add -A` cannot stage an ignored file without `-f`. That is
 the control. The habit is not.
@@ -309,7 +352,10 @@ The scar: `git add -A -- lib pages scripts docs ... tests` in Phase 2 swept in
 self-containment — `demo-harness` imports `demo-connect-message`, and the
 published tree is asserted to be free of both. Caught only because the untracked
 count changed from 6 to 3. The count itself was a weak tripwire; it is now an
-identity check over the six specific paths, in `scripts/preflight.sh`.
+identity check over the five specific paths, in `scripts/preflight.sh`. (This
+paragraph said "six" until 2026-08-15 — the sixth was `lib/linkedin/runner.ts.bak`,
+retired in `ec1424c`. `preflight.sh` had already caught the same drift in its own
+comment. Prose is not a check.)
 
 ## `scripts/preflight.sh` — run before every commit
 
@@ -331,7 +377,7 @@ say why in the commit message.
 Run preflight *after* staging — run before, it correctly flags the very files you
 are about to commit as untracked, which trains you to ignore it.
 
-Checks: the six local-only paths exist and are ignored (identity, not count); no
+Checks: the five local-only paths exist and are ignored (identity, not count); no
 unexpected untracked files; `tsc --noEmit`; `npm test`; eslint still at the
 baseline 40 problems. Exit 0 means safe to commit.
 

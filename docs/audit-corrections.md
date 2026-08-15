@@ -629,3 +629,150 @@ snapshot of the `raise-faster` target.
 The target row itself was **not** deleted, and remains the live evidence:
 `connection_requested_at = 2026-08-09T05:27:59.968Z`, `degree = NULL`, with the
 invitation still pending on LinkedIn.
+
+---
+
+## W — retroactive artifact sweep (2026-08-15)
+
+Triggered by meta-tooling failure #7 (`docs/generation-audit.md`): a work report
+claimed changes the tree does not contain. The record was therefore re-verified
+against the tree rather than against prior reports. **The record held.** Four
+corrections and two new coverage gaps came out of it, all below.
+
+### The test-count table reconciles end to end
+
+`docs/phase2-baseline.md`'s table was recomputed from `git show` of every
+commit's test files, and every recorded row matches:
+
+| Point | Recorded | Derived from git |
+|---|---|---|
+| Phase 1 baseline `85934ab` | 151 published / 177 local | 140 + 11 = **151**, +26 = **177** |
+| Phase 2 baseline `4af831c` | 264 = 238 + 26 | 227 + 11 = **238**, +26 = **264** |
+| HEAD `ca35aaf` | 367 | 330 + 11 = **341**, +26 = **367** |
+
+The `+11` is the part no `grep -c '^test('` can see: **three parameterised
+`test()` calls declared inside `for` loops**, which a column-anchored count reads
+as zero and the runtime expands to eleven —
+`tests/runner-claim.test.ts:78` (4 states), `runner-connect-idempotence.test.ts:223`
+(4 error types), `slice-c-connection-state.test.ts:429` (3 headlines). All three
+existed at both baselines with the same arities, which is why every row moves
+together. Anyone re-deriving these numbers with a static grep will land 11 short
+on every row; that is the explanation, recorded once.
+
+### Correction 1 — "0 untracked test files" was wrong, and preflight was right
+
+A report stated "32 tracked test files, 0 untracked". The command behind it was
+`git ls-files --others --exclude-standard`, and **`--exclude-standard` suppresses
+ignored files** — which is exactly what a local-only path is. The correct figures:
+33 test files on disk, 32 tracked, 1 local-only (`tests/demo-harness.test.ts`,
+ignored via `.git/info/exclude:17`, 26 tests). `git ls-files --others` without the
+flag, or `git check-ignore -v`, is the check that answers this question.
+
+`scripts/preflight.sh`'s identity check was correct throughout. The reported
+figure was the wrong one — and it is an instance of the protocol rule that a live
+observation must be reproducible: the number was quoted without the command that
+produced it, so the flag error travelled with it invisibly.
+
+### Correction 2 — the schema fingerprint recipe was under-specified
+
+`phase2-baseline.md` records the fingerprint as "sha256 of sorted
+`sqlite_master.sql`". Sorting by `sql` does **not** reproduce the recorded hash;
+sorting by `name` does. The recorded value
+`9436e671…509c` is confirmed **unchanged** on the live DB under the correct
+recipe, now written out in full in that file. A tripwire whose recipe cannot be
+re-derived is not a tripwire.
+
+### Correction 3 — `operations.md` said "six local-only paths", enforced is five
+
+Three places in `docs/operations.md` said six. `.git/info/exclude` holds five and
+`scripts/preflight.sh`'s `LOCAL_ONLY` enforces five; the sixth was
+`lib/linkedin/runner.ts.bak`, retired in `ec1424c`. `preflight.sh` had already
+caught and annotated the identical drift in its own comment. Corrected.
+
+### Correction 4 — the M1–M38 mutation tables are not in the tree
+
+`operations.md` refers to "the M1–M38 tables". No such table is committed. What
+exists is `docs/generation-audit.md`'s six-row re-run table (M2, M3, M11, M5, M17,
+M22) and prose in commit messages. **The mutation snippets were never recorded at
+all**, so re-running a recorded mutation means reconstructing it from its
+one-line description. The reconstruction is stated with each result below so the
+next person can disagree with it.
+
+### Mutation re-run — 8 of 8 recorded outcomes reproduced
+
+Bounded sample, prioritising the mutations that stand between a duplicate message
+and a real person. Attributed kills only.
+
+| Mutation | Reconstruction | Result |
+|---|---|---|
+| M2 in-flight refusal | `if (prior?.status === "in_flight")` → `if (false && …)` | ✅ KILLED by "3 an in_flight ledger row refuses to send and fails closed" |
+| M3 Layer-2 fingerprint | `conflictingFingerprint` returns `undefined` unconditionally | ✅ KILLED by "13 position shift: same body under a renumbered step_ref is refused" |
+| M11 post-click → abandoned | `if (isPreSendFailure(err))` → `if (true)` | ✅ KILLED by "19 an unrecognised error fails CLOSED — in_flight, not abandoned" |
+| M13 upsert → plain INSERT | strip `ON CONFLICT…` from the `step_side_effects` insert | ✅ KILLED by "18 a throw BEFORE the send click abandons the intent so retry can proceed" |
+| M5 retry in-flight block | `if (ledger?.status === "in_flight")` → `if (false && …)` | ✅ KILLED by "8 a failed track whose message is in_flight is NOT re-armed" |
+| resend one-shot | resend branch skipped for `confirmed` rows (the original bug) | ✅ KILLED by "R1 resend twice in a row yields two sends, not a wedge" |
+| mark_delivered zero-send | `advance.run(…)` → `rearm.run(…)` in the mark_delivered branch | ✅ KILLED by "1b mark_delivered confirms the ledger, stamps the target and advances — with zero sends" |
+| NF-9 host anchor | `LINKEDIN_HOST.test(hostname)` → `hostname.includes("linkedin.com")` | ✅ KILLED by "NF-9: the allowlist accepts linkedin.com and its subdomains, and nothing else" |
+
+Kill *counts* differ from the recorded table (M2 killed 3 here, 7 there) because
+each run targets one test file rather than the suite. `generation-audit.md`
+already notes the counts drift as files grow; the durable claim is the attributed
+kill, not the tally.
+
+### NF-11 — the health predicate's `restart_will_help` conjunct is untested
+
+`scripts/health-predicate.js:60` is
+`const act = b.runner && b.runner.state === "dead" && b.restart_will_help === true;`.
+Dropping `&& b.restart_will_help === true` **SURVIVES** the whole of
+`tests/health-predicate.test.ts`.
+
+The reason is a gap in the case matrix, not a weak assertion. The three
+restart-proof 503s carry no `runner` object at all, so `act` is falsy through the
+first conjunct whatever the second says. `does NOT act on degraded or healthy`
+uses states `degraded` and `healthy`. **No test pairs `state: "dead"` with
+`restart_will_help: false`** — which is precisely the combination the conjunct
+exists for: a dead runner that a restart will not fix. Today the watchdog would
+restart it in a loop, and every restart kills in-flight LinkedIn work.
+
+### NF-12 — no test proves a stale marker revives the loop
+
+`WATCHDOG_STALE_MS` (`lib/linkedin/runner.ts:1525`) can be widened 1000× to
+`600_000_000` and `tests/runner-watchdog.test.ts` stays green.
+
+Every stale-marker test asserts the watchdog does **not** fire: "9m55s is still
+alive" (just inside), "NEVER fires while work is progressing" (fresh), "the
+running guard wins over staleness" (loop already up). The one test that asserts a
+revive uses an **absent** marker, and the absent-marker branch does not consult
+the threshold. So the constant that decides when a dead runner gets revived has
+no test pinning its effect — the watchdog could be silently disabled by a units
+error and the suite would not notice.
+
+Both gaps are recorded, not fixed: each needs a test, and neither is in the
+current work order.
+
+### W4 — claims that cannot be verified from artifacts
+
+Live observations leave no artifact. Mapping where the evidence base is thin,
+honestly, rather than implying it is uniform:
+
+| Claim | Surviving artifact | Re-runnable? | Anything depends on it? |
+|---|---|---|---|
+| Phase 1 mid-workflow restart recovery | none — the run rows were the artifact and were deleted by authorisation; `prodqa-rf-provenance-20260810T100615Z.json` holds the exported rows | no, not without a live workflow | no downstream claim rests on it |
+| "the restart performs no LinkedIn navigation" | none of the run itself, but the **structural argument is re-checkable and was re-checked**: `runner.ts:1652` `if (activeRuns.length === 0) return;` precedes every LinkedIn call (`shouldSyncAccepted` at `:1664`); live DB has 0 running runs and `list_imports` = 0 | **yes — re-verified 2026-08-15** | yes: the restart safety case, and it holds |
+| RTO boot measurement (2.94 s, ≈3 s end to end) | `docs/backup-restore.md` prose; the two drill snapshots `linki-auto-20260810T1503*.db` exist and verify `integrity_check: ok` | the drill is re-runnable; **the number is not re-derivable** from anything stored | no gate depends on the figure; it is informational |
+| Live predicate demonstrations | `tests/health-predicate.test.ts` reproduces the logic against a local server | yes, as a test — **not** as a demonstration against the live container | the tested behaviour is covered; NF-11 is the hole in it |
+
+The pattern: where a live observation matters, the durable evidence is the
+**structural argument** behind it, and that is re-checkable. The bare
+measurements (RTO) are not, and nothing is allowed to depend on them.
+
+### Artifacts confirmed present
+
+All named artifacts exist and are internally consistent. `pre-prodqa-delete-*.db`
+holds 9 `run_profile_tracks`; both post-deletion `linki-auto-*.db` snapshots hold
+8 — the authorised single-track deletion, visible in the artifacts themselves.
+All five backups pass `integrity_check`. All six `docs/*.md` exist. The live DB
+matches every Phase 2 baseline figure: schema fingerprint, 28 tables, integrity
+ok, `foreign_key_check` 0, `step_side_effects` 0, all key counts, 7 completed / 1
+paused runs, 5 completed / 2 failed / 1 in_progress tracks, and all four
+invitation rows unchanged.

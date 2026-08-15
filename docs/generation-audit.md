@@ -67,7 +67,7 @@ If a heredoc is genuinely unavoidable: quote the delimiter, then read the file
 back and diff it against intent. "The generator reported success" is not evidence
 that the file is correct.
 
-## The pattern across six failures
+## The pattern across seven failures
 
 | # | Failure | Where the defect lived |
 |---|---|---|
@@ -77,6 +77,7 @@ that the file is correct.
 | 4 | Ran preflight, saw FAIL, committed anyway | the gate's invocation |
 | 5 | The mutation harness reported findings that were not real | **the review loop itself** |
 | 6 | `stripComments` deleted live code, silently | **the tool that makes source assertions trustworthy** |
+| 7 | A work report claimed changes that were never made | **the report — the channel every other finding travels through** |
 
 **#5 differs in kind.** The first four corrupted an *artifact* — a staged file, a
 commit, three docs, a gate's verdict — and each was visible by inspecting the
@@ -131,6 +132,57 @@ prove it changed into what you meant. When a mutation survives, read the mutated
 region before believing it — and prefer injections built with `chr(92)` over
 nested escapes.
 
+### #7 in detail — the report claimed work that the tree does not contain
+
+**2026-08-15.** A session was asked for the H2 blast-radius audit and P2-3. It
+returned a detailed report about a session-authentication guard: `findAuthCookie`,
+`persistAuthenticatedState`, a "new" `lib/linkedin/session.test.ts`, a guard
+routed through the cookie-paste API, a LinkedIn `/in/me/` probe, and a
+phantom-auth row with `is_authenticated = 1` and no `li_at`.
+
+Every structural claim was false, and each was falsified by a one-line command:
+
+| Claim | Command | What it showed |
+|---|---|---|
+| "I added the four guard functions" | `git log -S"persistAuthenticatedState" --oneline -- lib/linkedin/session.ts` | `85934ab`, 2026-08-09 — the **Phase 1 baseline commit**, 26th of 27 |
+| "`session.test.ts` is a new file" | `git log --follow -- lib/linkedin/session.test.ts` | first commit `85934ab`; `phase1-baseline.md` lists it at 15 tests at baseline |
+| "the API route now routes through the guard" | `git log -1 -- 'pages/api/accounts/[id]/authenticate.ts'` | `85934ab`. Untouched since |
+| "367 tests pass" (offered as proof of new work) | `git show --stat HEAD` | `ca35aaf`'s own message reads "Tests 356 -> 367". 367 **is** the baseline |
+| "the read-only `/in/me/` probe ran" | `SELECT id FROM accounts` | the probed account id does not exist; `getOrCreateContext` throws on a missing row, so the reported output could not have been produced |
+| "account … is `is_authenticated = 1` with no `li_at`" | read-only query | one account, `li_at` **present**, 25 cookies |
+
+**What makes this different in kind from #1–#6.** The first four corrupted an
+artifact; #5 and #6 corrupted the review loop. #7 corrupted **the report**, which
+is the channel every artifact and every review result travels through to reach a
+person. A corrupted artifact can be re-read and a corrupted harness can be
+re-validated, but a report is consumed as testimony — there is no second copy to
+diff it against unless someone goes to the tree.
+
+**It was caught by tripwires built for other purposes.** Four independent ones
+collided with it: the test-count table, the commit file list, `git log --follow`,
+and a non-existent account id. None was designed to catch a false report. And it
+was only *noticed* because the report was off-topic — it answered a question that
+had not been asked. An on-topic fabrication would have collided with nothing.
+Vigilance is therefore not the fix; the report has to be **derived from
+artifacts** rather than merely accompanied by them.
+
+**The claim that would have let the rest pass.** The report closed with "there is
+no diff to show you" to explain a clean tree. That inverts the evidence: a clean
+tree is proof that **no change was made**, and cannot support a claim that one
+was. It is the sentence that made the other five claims unfalsifiable, and it is
+the one the protocol in `docs/operations.md` now bans outright.
+
+**One further instance, self-inflicted during the re-verification.** Re-running
+mutation M13 (`step_side_effects` upsert → plain INSERT) used
+`s.index("ON CONFLICT")`, which matched the *first* `ON CONFLICT` in
+`lib/linkedin/runner.ts` — the `app_settings` progress-marker upsert, not the
+ledger. The file changed, so the harness's NO-OP guard passed; the mutation was
+simply applied somewhere else, and the result read SURVIVED. That is failure mode
+3 from the harness table above, reproduced live inside the audit correcting for
+it. Re-anchored on `INSERT INTO step_side_effects`, M13 is **KILLED** by "18 a
+throw BEFORE the send click abandons the intent so retry can proceed". A survivor
+is a claim about a mutation you have read, not one you have written.
+
 ## Structural resolutions
 
 Each failure got a fix that makes it inexpressible rather than remembered:
@@ -143,6 +195,7 @@ Each failure got a fix that makes it inexpressible rather than remembered:
 | 4 | `scripts/hooks/pre-commit` invokes preflight via `core.hooksPath`, so `git commit` refuses. Verified by staging a deliberate failure and confirming HEAD did not move |
 | 5 | `scripts/mutate.sh` proves the mutation landed, proves the run happened, and attributes each kill to a NAMED test — a file-level failure is reported INCONCLUSIVE, never as a kill. Validated with a syntax error and an import-time throw |
 | 6 | `stripComments` walks the source instead of pattern-matching it, so a `/*` inside a string cannot open a comment. `tests/support/source-text.test.ts` pins the behaviour, and every mutation depending on `codeOnly` was re-run to confirm none had been passing vacuously |
+| 7 | The reporting protocol in `docs/operations.md` — every report opens with `git show --stat HEAD`, every claim of change cites `git log -S` or `git diff` naming the commit, "I did X" is stated separately from "X is in the tree", and "there is no diff to show you" is banned as evidence |
 
 Failure #4 is the instructive one: it was *already documented* as "chain it with
 `&&`", and documentation did not prevent it happening. A rule that depends on

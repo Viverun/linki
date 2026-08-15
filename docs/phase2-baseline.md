@@ -25,13 +25,26 @@ legitimately and constantly. It is replaced by the tripwires below.
 
 | Tripwire | Baseline |
 |---|---|
-| **Schema fingerprint** (sha256 of sorted `sqlite_master.sql`) | `9436e671d7feec5768cc2f3f2da5ba50c48d6846c08efcf7aba84b4d4871509c` |
+| **Schema fingerprint** — recipe below, not "sorted" loosely | `9436e671d7feec5768cc2f3f2da5ba50c48d6846c08efcf7aba84b4d4871509c` |
 | `integrity_check` / `foreign_key_check` | ok / 0 |
 | Tables | 28 |
 | `step_side_effects` rows | **0** (matters for P2-3's scheme switch) |
 | Key counts | accounts 1 · targets 5 · lists 4 · list_targets 6 · workflows 5 · workflow_steps 7 · **runs 8** · **run_profiles 8** · **run_profile_tracks 8** · **logs 38** · app_settings 9+ · users 1 — see the authorised-deletion log below |
 | Runs | 7 completed, **1 paused**, 0 running |
 | Tracks | 5 completed, 2 failed, **1 in_progress** |
+
+**The fingerprint recipe, written out because "sorted" was ambiguous** (added
+2026-08-15). Ordering by `sql` does not reproduce the recorded hash; ordering by
+`name` does. A tripwire you cannot re-derive is not a tripwire:
+
+```js
+const sql = db.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+              .all().map(r => r.sql);
+crypto.createHash("sha256").update(sql.join("\n")).digest("hex");
+```
+
+Re-verified against the live DB on 2026-08-15: **unchanged**, along with every
+other row in this table and all four invitation rows below.
 | WAL / main | 2,830,472 B / 335,872 B |
 
 **Live invitation rows — must not change:**
@@ -164,6 +177,23 @@ be wrong teaches you to stop trusting the column.
 | N7b (`99b83d5`) | **347** | 339 + 7 in `tests/null-vanity.test.ts` + 1 ordering test in `lib/linkedin/connect.test.ts` |
 | NF-9 + §2/§3 docs (`80a1335`) | **356** | 347 + 8 in `tests/host-allowlist.test.ts` + 1 split out in `tests/null-vanity.test.ts` |
 | NF-10 + source-text fix (this commit) | **367** | 356 + 3 in `tests/host-expression-drift.test.ts` + 8 in `tests/support/source-text.test.ts` |
+
+**Re-derived end to end from git on 2026-08-15** (W sweep, see
+`docs/audit-corrections.md`). Every recorded row above matches a recomputation
+from `git show` of each commit's test files. One thing that recomputation needs,
+which is invisible to `grep -c '^test('`: **three `test()` calls are declared
+inside `for` loops** and expand to eleven at runtime —
+`tests/runner-claim.test.ts:78` (4), `runner-connect-idempotence.test.ts:223` (4),
+`slice-c-connection-state.test.ts:429` (3). All three predate both baselines, so
+the `+11` is constant on every row: 140+11=151 published at `85934ab`,
+227+11=238 tracked at `4af831c`, 330+11=341 tracked at `ca35aaf`. Add 26 for
+`demo-harness` to get the local figure. A static grep lands 11 short every time.
+
+**Counting untracked test files:** use `git ls-files --others` or
+`git check-ignore -v`, **not** `git ls-files --others --exclude-standard` — the
+`--exclude-standard` flag suppresses ignored files, which is exactly what the
+five local-only paths are. A report using it concluded "0 untracked" on
+2026-08-15; the true figure is 1 (`tests/demo-harness.test.ts`, 26 tests).
 
 **The 288 → 287 correction.** The P2-2 working notes carried 287 as "288",
 which made the arithmetic land at 305 against a measured 304. The gap was
