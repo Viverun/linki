@@ -236,6 +236,41 @@ false positives in its own checker first — a bare scanner cannot resolve
 regex-vs-division, and `getChildren()` surfaces JSDoc as nodes — both fixed by
 delegating the checker to the parser as well.
 
+### Correcting #8's own enumeration — the "no vacuous assertions" conclusion
+
+X2 concluded that **no assertion had been passing vacuously**. That conclusion was
+derived from `stripComments` analysis and was written *before* the third defect —
+`stripStrings` mispairing quotes in JSX — was known. A headline finding should not
+rest on an analysis that predates a mechanism which could have produced the
+opposite result, so it was re-asked for the three files that defect touched.
+
+**Who actually read them.** `RunnerHealthBanner.tsx` is read by
+`tests/degraded-alerting.test.ts:194`, but through `stripComments` only —
+`stripStrings` was never in that path, before or after. `Sidebar.tsx` appears only
+in a prose comment. `FilterBar.tsx` is read by nothing.
+
+**But `tests/host-expression-drift.test.ts` walks `.tsx` too** (its filter is
+`/\.(ts|tsx)$/`) and applies full `codeOnly` — so the NF-10 tripwire's NEGATIVE
+assertion *was* reading `stripStrings`-corrupted text for all three files. That is
+precisely the vacuous-pass shape: a host expression hiding inside a blanked region
+could not have been detected.
+
+**Measured, not reasoned:** none of the three files contains `linkedin.com`
+anywhere in its raw source, and the host pattern matches neither the old nor the
+new output. What the old `stripStrings` destroyed was 1, 28 and 18 lines
+respectively, all of them `className={\`${...}\`}` JSX template literals.
+
+**So the conclusion stands, and the reasoning behind it did not.** The assertion
+was *at risk* and not in fact vacuous. Recorded this way deliberately: "we checked
+and it was fine" and "we checked the thing that could have made it not fine" are
+different statements, and only the second is worth anything later.
+
+One structural gap noted rather than fixed: the NF-10 tripwire's guard-the-guard
+test anchors only the two KNOWN `.ts` sites, so the `.tsx` files it walks had no
+positive anchor of their own. A negative assertion over a walked corpus cannot
+easily carry a per-file anchor — which is why the integrity of the INPUT is now
+guaranteed upstream instead, by `tests/source-text-corpus.test.ts`.
+
 ## Structural resolutions
 
 Each failure got a fix that makes it inexpressible rather than remembered:

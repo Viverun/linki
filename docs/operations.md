@@ -489,3 +489,45 @@ not a test.
 **And do not re-implement the stripper.** Three private copies existed and none
 received the fix applied to the shared one; two were corrupting live code.
 `tests/source-text-drift.test.ts` fails on a fourth.
+
+## `PREFLIGHT_EXPECT_RED` — how to commit a reproduction
+
+Added 2026-08-16 (Z2). This resolves a structural conflict between two rules the
+project already had, not a one-off.
+
+**The conflict.** The evidence rule is that a finding must be reproduced by a test
+that FAILS against unmodified code, *for the reason the finding claims*, and that
+reproduction gets committed. But the pre-commit hook forbids a red suite,
+`--no-verify` is banned, and marking the test `todo` is a silent park. Every
+reproduce-first commit hits this. It needed a mechanism, not a judgement call each
+time.
+
+```sh
+PREFLIGHT_EXPECT_RED="exact test name" git commit ...
+PREFLIGHT_EXPECT_RED="name one::name two" git commit ...    # several, :: separated
+```
+
+Preflight passes **only if every named test fails and every other test passes.**
+
+**Note the direction, because it is the point:** if a named test **passes**,
+preflight **FAILS**. A reproduction that does not reproduce is a finding — usually
+that the defect is not what you think, or that the test does not exercise it — and
+this is where it surfaces, rather than being quietly deleted three commits later
+when someone notices it was always green.
+
+**Echo the value into the commit message.** An env var is invisible afterwards;
+the permanent record has to say which test was red and why. The next commit — the
+one that fixes it — runs **without** the flag and must be green.
+
+Adversarially validated when built, all four paths: an undeclared red test fails
+the gate; a declared red test passes it; a declared test that is GREEN fails the
+gate and is named; and with several declared, one passing is enough to fail.
+
+**`todo` is not an acceptable alternative and never was.** The worked example is
+this project's own: `NF-1`'s reproduction was marked
+`{ todo: "fixed by PUT ... in the next commit" }` to get X3.2 committed. It was
+honest, visible, documented and flipped one commit later — and it was still the
+wrong move, because nothing in the tooling would have complained if that next
+commit never came. `PREFLIGHT_EXPECT_RED` makes the same intent enforceable:
+the expectation is checked on every run instead of resting on a promise in a
+comment. Use it. Do not use `todo`, and do not use `skip`.

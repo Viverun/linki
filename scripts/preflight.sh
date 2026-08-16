@@ -51,12 +51,18 @@ if [ -f .git/info/exclude ]; then
   while IFS= read -r line; do
     case "${line}" in ''|'#'*) continue ;; esac
     entry="${line#/}"
-    # Narrow exemption: .claude/ is Claude Code's own session state, which the
-    # harness re-adds here every session. It is NOT a Linki QA artifact, so it is
-    # outside what this check protects — the five paths whose FILENAMES must not
-    # reach a public repo. It is covered by .gitignore instead (see the note
-    # there). Scoped to the .claude/ prefix so nothing else gets a free pass.
-    case "${entry}" in .claude/*) continue ;; esac
+    # Exemption by EXACT PATH, enumerated. Claude Code's harness re-adds its own
+    # session-state file here every session; that file is not a Linki QA artifact,
+    # so it is outside what this check protects (the five paths whose FILENAMES
+    # must not reach a public repo) and .gitignore covers it instead.
+    #
+    # Deliberately NOT `.claude/*`. A prefix exemption means anything later
+    # dropped into that directory is silently excluded from the invariant — the
+    # erosion shape this tripwire exists to prevent. Adding a second harness file
+    # must be a visible edit here, not something that inherits a pass.
+    case "${entry}" in
+      .claude/RESUME.md) continue ;;
+    esac
     declared=0
     for f in "${LOCAL_ONLY[@]}"; do [ "${f}" = "${entry}" ] && declared=1; done
     [ "${declared}" -eq 1 ] || undeclared="${undeclared} ${entry}"
@@ -73,12 +79,70 @@ extra=$(git status --porcelain | grep '^??' || true)
 step "tsc --noEmit"
 if npx tsc --noEmit >/tmp/preflight-tsc.log 2>&1; then ok; else bad "$(grep -c 'error TS' /tmp/preflight-tsc.log) errors"; fi
 
+# ── PREFLIGHT_EXPECT_RED — the reproduce-first escape hatch, as a CONTROL ────
+#
+# The project's evidence rule is that a finding must be reproduced by a test that
+# FAILS against unmodified code, and the reproduction is committed. The pre-commit
+# hook forbids a red suite; --no-verify is banned (D-12); and marking the test
+# `todo` is a silent park that stop-condition 3 rightly names. Every
+# reproduction-first commit hits this, so it needs a mechanism rather than a
+# judgement call each time.
+#
+#   PREFLIGHT_EXPECT_RED="exact test name"                    # one
+#   PREFLIGHT_EXPECT_RED="name one::name two"                 # several, :: separated
+#
+# Passes ONLY if every named test FAILS and every other test passes. Note the
+# direction: if a named test PASSES, preflight FAILS. A reproduction that does not
+# reproduce is a finding — usually that the defect is not what you think, or that
+# the test does not exercise it — and this is where it surfaces instead of being
+# quietly deleted later.
+#
+# The value must be echoed into the commit message, so the expectation lives in
+# the permanent record rather than in an env var nobody can see afterwards. The
+# next commit — the one that fixes it — runs WITHOUT the flag and must be green.
 step "npm test"
-if npm test >/tmp/preflight-test.log 2>&1; then
-  ok
+npm test >/tmp/preflight-test.log 2>&1 && TEST_RC=0 || TEST_RC=$?
+
+if [ -z "${PREFLIGHT_EXPECT_RED:-}" ]; then
+  if [ "${TEST_RC}" -eq 0 ]; then
+    ok
+  else
+    bad "$(grep -E '^. (pass|fail)' /tmp/preflight-test.log | tr '\n' ' ')"
+    grep -E '^✖' /tmp/preflight-test.log | sort -u | head -5 | sed 's/^/    /'
+  fi
 else
-  bad "$(grep -E '^. (pass|fail)' /tmp/preflight-test.log | tr '\n' ' ')"
-  grep -E '^✖' /tmp/preflight-test.log | sort -u | head -5 | sed 's/^/    /'
+  # The set of tests node reported as failing, names only.
+  failing=$(grep -E '^✖ ' /tmp/preflight-test.log | sed 's/^✖ //' | sed 's/ ([0-9.]*ms)$//' \
+            | grep -vxF 'failing tests:' | sort -u)
+  expect_problems=""
+  expected_count=0
+  # `::` separated so a test name may contain anything but that sequence.
+  rest="${PREFLIGHT_EXPECT_RED}"
+  while [ -n "${rest}" ]; do
+    case "${rest}" in
+      *"::"*) name="${rest%%::*}"; rest="${rest#*::}" ;;
+      *)      name="${rest}";      rest="" ;;
+    esac
+    [ -z "${name}" ] && continue
+    expected_count=$((expected_count + 1))
+    if ! grep -qxF "${name}" <<<"${failing}"; then
+      expect_problems="${expect_problems}
+    EXPECTED RED but it PASSED: ${name}"
+    fi
+  done
+  # Anything red that was not declared is a genuine break.
+  undeclared=$(while IFS= read -r f; do
+      [ -z "${f}" ] && continue
+      case "::${PREFLIGHT_EXPECT_RED}::" in *"::${f}::"*) ;; *) echo "${f}" ;; esac
+    done <<<"${failing}")
+  if [ -n "${expect_problems}" ] || [ -n "${undeclared}" ]; then
+    bad "PREFLIGHT_EXPECT_RED not satisfied"
+    [ -n "${expect_problems}" ] && printf '%s\n' "${expect_problems}"
+    [ -n "${undeclared}" ] && while IFS= read -r u; do [ -n "${u}" ] && printf '    UNDECLARED failure: %s\n' "${u}"; done <<<"${undeclared}"
+  else
+    ok
+    printf '    (%s declared-red test(s) failed as expected; echo PREFLIGHT_EXPECT_RED into the commit message)\n' "${expected_count}"
+  fi
 fi
 
 # NOT an equality check. An equality check punishes improvement: the first person
