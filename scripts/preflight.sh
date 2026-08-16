@@ -51,6 +51,12 @@ if [ -f .git/info/exclude ]; then
   while IFS= read -r line; do
     case "${line}" in ''|'#'*) continue ;; esac
     entry="${line#/}"
+    # Narrow exemption: .claude/ is Claude Code's own session state, which the
+    # harness re-adds here every session. It is NOT a Linki QA artifact, so it is
+    # outside what this check protects — the five paths whose FILENAMES must not
+    # reach a public repo. It is covered by .gitignore instead (see the note
+    # there). Scoped to the .claude/ prefix so nothing else gets a free pass.
+    case "${entry}" in .claude/*) continue ;; esac
     declared=0
     for f in "${LOCAL_ONLY[@]}"; do [ "${f}" = "${entry}" ] && declared=1; done
     [ "${declared}" -eq 1 ] || undeclared="${undeclared} ${entry}"

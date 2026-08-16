@@ -137,8 +137,15 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       "INSERT INTO run_profiles (id, run_id, target_id, email_account_id) VALUES (?, ?, ?, ?)"
     );
     const insertTrack = db.prepare(
-      "INSERT INTO run_profile_tracks (id, run_profile_id, track, state, current_step) VALUES (?, ?, ?, 'pending', 0)"
+      "INSERT INTO run_profile_tracks (id, run_profile_id, track, state, current_step, current_step_id) VALUES (?, ?, ?, 'pending', 0, ?)"
     );
+    // P2-3: pin each new track to the id of its FIRST step, so identity is
+    // established at enrolment rather than inferred from index 0 later.
+    const firstStepIdFor = (track: string): string | null =>
+      (db.prepare(
+        "SELECT id FROM workflow_steps WHERE workflow_id = ? AND track = ? ORDER BY step_order LIMIT 1"
+      ).get(workflow_id, track) as { id: string } | undefined)?.id ?? null;
+
     const insertMany = db.transaction((ts: { target_id: string }[]) => {
       for (const t of ts) {
         const assignedEmailAccountId = emailAssignment.get(t.target_id) ?? null;
@@ -147,7 +154,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         for (const track of workflowTracks) {
           // Skip email track if no email account is configured on this run
           if (track === "email" && !assignedEmailAccountId) continue;
-          insertTrack.run(randomUUID(), rpId, track);
+          insertTrack.run(randomUUID(), rpId, track, firstStepIdFor(track));
         }
       }
     });

@@ -266,6 +266,64 @@ function dropDeprecatedRunProfileColumns(db: Database.Database) {
   } catch { /* ignore — may already be done */ }
 }
 
+/**
+ * P2-3 backfill: give every existing track the id of the step it is sitting on.
+ *
+ * Idempotent by construction — it only ever touches rows where
+ * `current_step_id IS NULL`, so a second run is a no-op and a track whose id has
+ * since been set by the runner is never overwritten.
+ *
+ * Resolution follows the same ordering the runner uses (`track`, then
+ * `step_order`), because `current_step` has always been an index into exactly
+ * that list. Out-of-range indexes are left NULL and logged: that is the N3 state
+ * itself — a track pointing past the end of its workflow — and inventing an id
+ * for it would paper over the very condition this column exists to expose.
+ *
+ * Terminal tracks (completed/skipped) may legitimately end NULL: `trAdvance`
+ * sets `current_step` to one PAST the last step when it completes. Failed tracks
+ * must resolve where resolvable, because Retry re-arms them.
+ */
+function backfillCurrentStepId(db: Database.Database) {
+  try {
+    const pending = db.prepare(
+      `SELECT rt.id, rt.track, rt.current_step, rt.state, r.workflow_id
+         FROM run_profile_tracks rt
+         JOIN run_profiles rp ON rp.id = rt.run_profile_id
+         JOIN runs r          ON r.id  = rp.run_id
+        WHERE rt.current_step_id IS NULL`
+    ).all() as { id: string; track: string; current_step: number; state: string; workflow_id: string }[];
+    if (pending.length === 0) return;
+
+    const stepsFor = db.prepare(
+      "SELECT id FROM workflow_steps WHERE workflow_id = ? AND track = ? ORDER BY step_order"
+    );
+    const setId = db.prepare("UPDATE run_profile_tracks SET current_step_id = ? WHERE id = ?");
+    const unresolved: string[] = [];
+
+    db.transaction(() => {
+      for (const t of pending) {
+        const steps = stepsFor.all(t.workflow_id, t.track) as { id: string }[];
+        const step = steps[t.current_step];
+        if (step) setId.run(step.id, t.id);
+        else if (t.state !== "completed" && t.state !== "skipped") unresolved.push(`${t.id}(${t.state}@${t.current_step}/${steps.length})`);
+      }
+    })();
+
+    if (unresolved.length > 0) {
+      console.warn(
+        `[db] P2-3 backfill: ${unresolved.length} non-terminal track(s) point past the end of ` +
+        `their workflow and were left with current_step_id = NULL — ${unresolved.join(", ")}. ` +
+        `That is the N3 condition; the runner now logs and advances rather than executing ` +
+        `whatever occupies the index.`
+      );
+    }
+  } catch (err) {
+    // Never let a backfill stop the process from booting; the column is additive
+    // and the runner resolves defensively when it is NULL.
+    console.warn("[db] P2-3 backfill skipped:", err instanceof Error ? err.message : err);
+  }
+}
+
 function runMigrations(db: Database.Database) {
   // Add columns introduced after initial schema — safe to run on existing DBs
   const migrations = [
@@ -560,10 +618,21 @@ function runMigrations(db: Database.Database) {
     // this enrolment under a DIFFERENT step_ref? Catches the position-shift case,
     // where re-saving a campaign renumbers an already-delivered message.
     "CREATE INDEX IF NOT EXISTS ix_step_side_effects_fingerprint ON step_side_effects(run_profile_id, target_id, body_fingerprint)",
+    // P2-3. Stable step identity. `current_step` is an INDEX into an ordered
+    // list that the UI rebuilds from scratch on every save, so it names a
+    // different step whenever the campaign is edited — the N3 class. This column
+    // pins the track to the step it is actually on. Deliberately NOT a foreign
+    // key: a deleted step must leave a dangling id we can DETECT and log (D-8),
+    // whereas ON DELETE SET NULL would erase the evidence and ON DELETE CASCADE
+    // would delete the track.
+    "ALTER TABLE run_profile_tracks ADD COLUMN current_step_id TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_rpt_current_step_id ON run_profile_tracks(current_step_id)",
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch { /* column already exists */ }
   }
+
+  backfillCurrentStepId(db);
 
   // Parallel tracks: assign email steps to email track, re-number step_order, backfill run_profile_tracks
   runParallelTracksMigration(db);

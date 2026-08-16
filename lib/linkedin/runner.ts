@@ -224,6 +224,8 @@ interface TrackRun {
   track: "linkedin" | "email";
   state: string;
   current_step: number;
+  /** P2-3: the step this track is actually on. Authoritative; current_step is a hint. */
+  current_step_id: string | null;
   next_step_at: string | null;
   error_message: string | null;
   last_email_subject: string | null;
@@ -563,18 +565,58 @@ function hoursSince(isoStr: string) { return (Date.now() - new Date(isoStr).getT
 // ─── TrackRun verb layer ─────────────────────────────────────────────────────
 // These are the only functions that write to run_profile_tracks rows.
 
+/**
+ * P2-3. Which step is this track actually on?
+ *
+ * `current_step` is an INDEX into a list the UI rebuilds from scratch on every
+ * save, so it names a different step whenever the campaign is edited. The id is
+ * therefore AUTHORITATIVE and the index is a display hint (D-2). Resolution
+ * never falls back to the index when an id is present — a stale index is exactly
+ * how an already-connected target gets a message sent to it (N3).
+ *
+ * `deleted` is returned rather than silently advancing, because "the step you
+ * were on no longer exists" and "you finished" are different outcomes that had
+ * been collapsed into one silent `completed`.
+ */
+export type StepResolution =
+  | { kind: "resolved"; step: WorkflowStep; index: number }
+  | { kind: "deleted" }
+  | { kind: "done" };
+
+export function resolveStep(tr: TrackRun, steps: WorkflowStep[]): StepResolution {
+  if (tr.current_step_id) {
+    const index = steps.findIndex(s => s.id === tr.current_step_id);
+    if (index === -1) return { kind: "deleted" };
+    if (index !== tr.current_step) {
+      // Not an error: the list was reordered under a correctly-pinned track. Worth
+      // saying out loud, because before P2-3 this is precisely where the wrong
+      // step would have run.
+      console.warn(
+        `[runner] track ${tr.id}: current_step index ${tr.current_step} disagrees with ` +
+        `current_step_id (now at index ${index}) — resolving by id, as designed`
+      );
+    }
+    return { kind: "resolved", step: steps[index], index };
+  }
+  // No id: a legacy row the backfill could not resolve, or one past the end.
+  if (tr.current_step >= steps.length) return { kind: "done" };
+  return { kind: "resolved", step: steps[tr.current_step], index: tr.current_step };
+}
+
 function trAdvance(db: ReturnType<typeof getDb>, tr: TrackRun, steps: WorkflowStep[]) {
-  const nextIndex = tr.current_step + 1;
+  // Advance from where the track ACTUALLY is, not from the stale index (P2-3).
+  const here = resolveStep(tr, steps);
+  const nextIndex = (here.kind === "resolved" ? here.index : tr.current_step) + 1;
   if (nextIndex >= steps.length) {
     db.prepare(
-      "UPDATE run_profile_tracks SET state = 'completed', current_step = ?, last_step_at = datetime('now'), next_step_at = NULL WHERE id = ?"
+      "UPDATE run_profile_tracks SET state = 'completed', current_step = ?, current_step_id = NULL, last_step_at = datetime('now'), next_step_at = NULL WHERE id = ?"
     ).run(nextIndex, tr.id);
   } else {
     const nextStep = steps[nextIndex];
     const nextAt = nextStep.delay_seconds > 0 ? new Date(Date.now() + nextStep.delay_seconds * 1000).toISOString() : null;
     db.prepare(
-      "UPDATE run_profile_tracks SET current_step = ?, last_step_at = datetime('now'), next_step_at = ? WHERE id = ?"
-    ).run(nextIndex, nextAt, tr.id);
+      "UPDATE run_profile_tracks SET current_step = ?, current_step_id = ?, last_step_at = datetime('now'), next_step_at = ? WHERE id = ?"
+    ).run(nextIndex, nextStep.id, nextAt, tr.id);
   }
 }
 
@@ -922,9 +964,24 @@ export async function executeStep(
   emailAccountLimits?: EmailAccountLimits | null,
   campaignPrompt?: string | null
 ): Promise<void> {
-  const stepIndex = tr.current_step;
-  if (stepIndex >= steps.length) {
-    db.prepare("UPDATE run_profile_tracks SET state = 'completed', last_step_at = datetime('now') WHERE id = ?").run(tr.id);
+  const resolution = resolveStep(tr, steps);
+  if (resolution.kind === "done") {
+    db.prepare("UPDATE run_profile_tracks SET state = 'completed', current_step_id = NULL, last_step_at = datetime('now') WHERE id = ?").run(tr.id);
+    return;
+  }
+  if (resolution.kind === "deleted") {
+    // D-8. The step this track was pinned to has been deleted from the workflow.
+    // Its position is unknowable, so we must NOT execute whatever now occupies
+    // that index — that is the N3 defect with extra steps. Say so and stop the
+    // track; an operator who deletes a step mid-run needs to see that, and a
+    // silent `completed` is what let it pass unnoticed before.
+    const gone = tr.current_step_id;
+    db.prepare(
+      "UPDATE run_profile_tracks SET state = 'completed', current_step_id = NULL, error_message = ?, last_step_at = datetime('now'), next_step_at = NULL WHERE id = ?"
+    ).run(`step ${gone} was deleted from the workflow while this track was on it`, tr.id);
+    log(db, runId, target.id, "warn",
+      `${target.full_name ?? target.linkedin_url}: the step this track was on (${gone}) no longer exists — ` +
+      `stopping this track rather than running whatever took its place`);
     return;
   }
 
@@ -939,7 +996,7 @@ export async function executeStep(
     return;
   }
 
-  const step = steps[stepIndex];
+  const step = resolution.step;
   const name = target.full_name ?? target.linkedin_url;
 
   try {
@@ -1847,7 +1904,7 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
   const runIds = stillActive.map(r => r.run_id);
   const placeholders = runIds.map(() => "?").join(",");
   const dueTrackRuns = db.prepare(
-    `SELECT rt.id, rt.run_profile_id, rt.track, rt.state, rt.current_step, rt.next_step_at,
+    `SELECT rt.id, rt.run_profile_id, rt.track, rt.state, rt.current_step, rt.current_step_id, rt.next_step_at,
             rt.error_message, rt.last_email_subject, rt.last_email_body, rt.last_linkedin_message,
             rt.pending_reply_context,
             rp.run_id, rp.target_id, rp.email_account_id,
@@ -1969,9 +2026,12 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
 
   for (const tr of dueTrackRuns) {
     const steps = getSteps(tr.workflow_id, tr.track);
-    const stepIndex = tr.current_step;
-    if (stepIndex >= steps.length) { toExecute.push(tr); continue; }
-    const step = steps[stepIndex];
+    // P2-3: judge due-ness against the step the track is actually on. Resolving
+    // by index here while executeStep resolves by id would plan one step and run
+    // another — the two must agree.
+    const claimRes = resolveStep(tr, steps);
+    if (claimRes.kind !== "resolved") { toExecute.push(tr); continue; }
+    const step = claimRes.step;
     const limits = accountLimitsMap.get(tr.account_id)!;
 
     if (step.step_type === "connect") {

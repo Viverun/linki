@@ -88,13 +88,13 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   const placeholders = target_ids.map(() => "?").join(",");
   const candidates = db.prepare(
-    `SELECT rt.id, rt.run_profile_id, rt.track, rt.current_step, rp.target_id, r.workflow_id
+    `SELECT rt.id, rt.run_profile_id, rt.track, rt.current_step, rt.current_step_id, rp.target_id, r.workflow_id
      FROM run_profile_tracks rt
      JOIN run_profiles rp ON rp.id = rt.run_profile_id
      JOIN runs r ON r.id = rp.run_id
      WHERE rp.run_id = ? AND rp.target_id IN (${placeholders}) AND rt.state = 'failed'`
   ).all(runId, ...target_ids) as Array<{
-    id: string; run_profile_id: string; track: string; current_step: number; target_id: string; workflow_id: string;
+    id: string; run_profile_id: string; track: string; current_step: number; current_step_id: string | null; target_id: string; workflow_id: string;
   }>;
 
   const stepsFor = (workflowId: string, track: string) =>
@@ -105,16 +105,26 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const rearm = db.prepare(
     `UPDATE run_profile_tracks SET state = 'in_progress', error_message = NULL, next_step_at = NULL WHERE id = ?`
   );
+  // P2-3 census. Both callers of `advance` (the confirmed branch and
+  // mark_delivered) move a track PAST a step, so both must move the pinned id
+  // with the index — an advance that updates only the index re-creates exactly
+  // the drift current_step_id exists to remove.
   const advance = db.prepare(
-    `UPDATE run_profile_tracks SET state = 'in_progress', error_message = NULL, next_step_at = NULL, current_step = ? WHERE id = ?`
+    `UPDATE run_profile_tracks SET state = 'in_progress', error_message = NULL, next_step_at = NULL, current_step = ?, current_step_id = ? WHERE id = ?`
   );
+  /** The id of the step at `index`, or NULL when the track has run off the end. */
+  const stepIdAt = (workflowId: string, track: string, index: number): string | null =>
+    stepsFor(workflowId, track)[index]?.id ?? null;
 
   const outcomes: TrackOutcome[] = [];
 
   db.transaction(() => {
     for (const c of candidates) {
       const steps = stepsFor(c.workflow_id, c.track);
-      const step = steps[c.current_step];
+      // P2-3: by id where the track has one. Retry decides whether a step already
+      // ran; resolving that against a reordered list is how a delivered message
+      // gets re-sent.
+      const step = (c.current_step_id && steps.find(x => x.id === c.current_step_id)) || steps[c.current_step];
 
       // Only message/inmail steps have an irreversible-action ledger. Anything
       // else (connect, visit, delay, email) re-arms exactly as before.
@@ -161,7 +171,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
       if (ledger?.status === "confirmed") {
         // Already delivered. Re-arming in place would re-send, so move past it.
-        advance.run(c.current_step + 1, c.id);
+        advance.run(c.current_step + 1, stepIdAt(c.workflow_id, c.track, c.current_step + 1), c.id);
         outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "advanced", reason: `${action} already delivered at ${ledger.step_ref} — advanced past it` });
         continue;
       }
@@ -183,7 +193,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
           ).run(new Date().toISOString(), OPERATOR_ASSERTION, c.run_profile_id, c.track, ledger.step_ref);
           db.prepare("UPDATE targets SET message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?")
             .run(new Date().toISOString(), c.target_id);
-          advance.run(c.current_step + 1, c.id);
+          advance.run(c.current_step + 1, stepIdAt(c.workflow_id, c.track, c.current_step + 1), c.id);
           console.warn(`[retry] run=${runId} track=${c.id} operator MARKED a possibly-delivered message as delivered (no send performed)`);
           outcomes.push({
             track_id: c.id, target_id: c.target_id, outcome: "marked_delivered",
