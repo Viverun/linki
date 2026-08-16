@@ -945,3 +945,62 @@ None read a deleted or unbalanced region:
 
 This is a better outcome than the audit expected, and it is luck rather than
 design in two of the three cases. The tests below are the design.
+
+---
+
+## Y — scanner swap and the corpus invariant (2026-08-16)
+
+H2 enumerated what the old stripper destroyed and found that its replacement had
+the same class of defect (meta-tooling failure #8). A third hand-rolled attempt
+was not the answer.
+
+**Both hand-rolled matchers are deleted.** `stripComments` and `stripStrings` now
+delegate to `ts.createSourceFile` — already a dependency, already run by `tsc` on
+every gate. Comments are read off the parsed tree as trivia; string contents are
+blanked by walking `StringLiteral`, `NoSubstitutionTemplateLiteral` and the
+template head/middle/tail spans. Regex-vs-division, JSX, template substitutions
+and escapes are all handled by construction rather than by cases.
+
+The shell path stays a one-line regex, deliberately: shell has no block-comment
+form, so the entire risk class that motivated the parser does not exist there,
+and a second parser would add more risk than it removes.
+
+**The corpus invariant** (`tests/source-text-corpus.test.ts`) is what settles it.
+For each of the **166 tracked JS/TS source files**, the token stream of `src` and
+of `stripComments(src)` must be identical, and `codeOnly` may change string
+CONTENTS but never token count or kind. A property, not a list of known triggers.
+
+It failed twice on its own checker before it passed, both times for the reason
+under audit:
+
+1. A bare `ts.createScanner` cannot resolve regex-vs-division or JSX without
+   parser context, so one `/` desynchronised the stream and 15 files looked
+   corrupted. All false. Verified by hand on `lib/health-contract.ts`, whose
+   output was perfectly correct.
+2. `getChildren()` surfaces JSDoc as real nodes, so every documented file
+   "diverged" — correctly, since JSDoc *is* a comment.
+
+Both fixed by delegating the checker to the parser too. The third run found a
+**real** defect the enumeration had missed: `stripStrings`, untouched by either
+previous fix, mispaired quotes in JSX and blanked live code in
+`RunnerHealthBanner.tsx`, `Sidebar.tsx` and `FilterBar.tsx`. A property test found
+in one run what two rounds of enumeration had not.
+
+### NF-11 — closed as a LIVE DEFECT, not a coverage gap
+
+Recorded again here because the distinction matters for the closure report: the
+predicate declined to restart a dead runner with `stderr: ''`. After deploy the
+supervisor would have protected nothing, silently, and the exit code (0) is
+identical to a healthy instance. Fixed, with both sides of the conjunct pinned.
+
+### NF-12 — closed (coverage only)
+
+Behaviour was correct; nothing would have noticed if it stopped being. Both
+thresholds now pinned on both sides with absolute values.
+
+### Consumer count — 9, not 8
+
+`host-expression-drift`, `db-init-atomicity`, `backup`, `health-isolation`,
+`health-predicate`, `connect.test.ts`, `source-text.ts`, `source-text.test.ts`,
+plus `degraded-alerting.test.ts`, which the drift tripwire found and the original
+list did not contain.

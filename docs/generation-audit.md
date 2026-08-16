@@ -67,7 +67,7 @@ If a heredoc is genuinely unavoidable: quote the delimiter, then read the file
 back and diff it against intent. "The generator reported success" is not evidence
 that the file is correct.
 
-## The pattern across seven failures
+## The pattern across eight failures
 
 | # | Failure | Where the defect lived |
 |---|---|---|
@@ -78,6 +78,7 @@ that the file is correct.
 | 5 | The mutation harness reported findings that were not real | **the review loop itself** |
 | 6 | `stripComments` deleted live code, silently | **the tool that makes source assertions trustworthy** |
 | 7 | A work report claimed changes that were never made | **the report — the channel every other finding travels through** |
+| 8 | The fix for #6 carried the same class of bug it fixed | **the remediation itself** |
 
 **#5 differs in kind.** The first four corrupted an *artifact* — a staged file, a
 commit, three docs, a gate's verdict — and each was visible by inspecting the
@@ -183,6 +184,58 @@ it. Re-anchored on `INSERT INTO step_side_effects`, M13 is **KILLED** by "18 a
 throw BEFORE the send click abandons the intent so retry can proceed". A survivor
 is a claim about a mutation you have read, not one you have written.
 
+### #8 in detail — the fix carried the defect it fixed
+
+**2026-08-16.** `ca35aaf` replaced the regex comment-stripper with a hand-written
+walker because the regex treated `/*` inside a STRING as a comment opener. The
+walker inverted the same mistake: it treated a **quote inside a REGEX** as a
+string opener. `.replace(/"/g, "")` in `lib/linkedin/scraper.ts:162` and
+`profile-scrape.ts:177` made it emit `/` as an ordinary character, meet `"`, and
+open a phantom string — after which real comments survived as "string contents"
+in four files.
+
+The tally, which is the point:
+
+| Implementation | Files corrupted | Trigger |
+|---|---|---|
+| original regex | 3 | `/*` inside a string; `//` inside a regex |
+| the walker that fixed it | 4 | a quote inside a regex |
+| `stripStrings` (untouched by either) | 3 `.tsx` | quote mispairing in JSX |
+
+**Why this is distinct from #6.** #6 was the original corruption. #8 is that the
+*remediation* reproduced the class, passed `tsc`, passed 367 tests, passed
+preflight, passed a five-mutation re-run — and was found only by an enumeration
+commissioned for a different reason (proving what the OLD helper had destroyed).
+Every gate the project has was green over a live defect in the tool those gates
+depend on.
+
+**The private-copy finding.** Three files carried their own copy of the old
+regex, none of which received the `ca35aaf` fix: `connect.test.ts:459` (actively
+truncating `connect.ts`'s `HARD_WALL_RE`), `health-isolation.test.ts:36`, and
+`degraded-alerting.test.ts:200` (the worst — no `[^:]` guard at all). A shared
+helper is not shared until the copies are gone. `tests/source-text-drift.test.ts`
+is now what enforces that, and it found the third copy immediately.
+
+**The structural conclusion, and it generalises past this file:**
+
+> Where a correct implementation already exists in the dependency tree, use it.
+
+`typescript` was already a dependency and `tsc` already ran on every gate, so the
+correct tokenizer — one that models regex literals, template substitutions, JSX
+and escapes by construction — was in the repo the whole time. Both hand-rolled
+versions are now deleted; `stripComments` and `stripStrings` are built on
+`ts.createSourceFile`. **Five of the eight meta-tooling failures live in
+hand-rolled lexers, parsers and matchers** (#3 heredoc, #5 harness, #6, #8, and
+`stripStrings`). That is not bad luck; it is a category.
+
+The replacement is proved by property rather than by example:
+`tests/source-text-corpus.test.ts` asserts that stripping comments does not
+change the TOKEN STREAM of any of the **166 tracked source files**. That catches
+all three known trigger shapes and any fourth nobody has thought of. It found two
+false positives in its own checker first — a bare scanner cannot resolve
+regex-vs-division, and `getChildren()` surfaces JSDoc as nodes — both fixed by
+delegating the checker to the parser as well.
+
 ## Structural resolutions
 
 Each failure got a fix that makes it inexpressible rather than remembered:
@@ -195,6 +248,7 @@ Each failure got a fix that makes it inexpressible rather than remembered:
 | 4 | `scripts/hooks/pre-commit` invokes preflight via `core.hooksPath`, so `git commit` refuses. Verified by staging a deliberate failure and confirming HEAD did not move |
 | 5 | `scripts/mutate.sh` proves the mutation landed, proves the run happened, and attributes each kill to a NAMED test — a file-level failure is reported INCONCLUSIVE, never as a kill. Validated with a syntax error and an import-time throw |
 | 6 | `stripComments` walks the source instead of pattern-matching it, so a `/*` inside a string cannot open a comment. `tests/support/source-text.test.ts` pins the behaviour, and every mutation depending on `codeOnly` was re-run to confirm none had been passing vacuously |
+| 8 | Both hand-rolled matchers deleted; `stripComments`/`stripStrings` delegate to `ts.createSourceFile`. `tests/source-text-corpus.test.ts` proves on all 166 tracked source files that stripping comments does not change the token stream, and `tests/source-text-drift.test.ts` fails on any new private copy |
 | 7 | The reporting protocol in `docs/operations.md` — every report opens with `git show --stat HEAD`, every claim of change cites `git log -S` or `git diff` naming the commit, "I did X" is stated separately from "X is in the tree", and "there is no diff to show you" is banned as evidence |
 
 Failure #4 is the instructive one: it was *already documented* as "chain it with
