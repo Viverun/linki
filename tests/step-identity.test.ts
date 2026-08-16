@@ -167,7 +167,7 @@ const stepIdsOf = (wf: string) =>
 // untouched, node still EXECUTES it, and the run reports it — so the defect stays
 // visible instead of being quietly parked. Removing the todo is a one-line diff in
 // the commit that fixes it.
-test("NF-1 repro: saving a workflow through the current path changes every step id", { todo: "fixed by PUT /api/workflows/[id]/steps in the next commit" }, () => {
+test("NF-1: saving a workflow preserves every step id", () => {
   // The UI's save is delete-all-then-re-POST (pages/workflows/[id].tsx:774-812),
   // and POST mints a fresh randomUUID per step. So identity is destroyed on every
   // save — which is what forces every downstream reference to be positional.
@@ -175,10 +175,17 @@ test("NF-1 repro: saving a workflow through the current path changes every step 
   const before = stepIdsOf(s.ids.wf);
   assert.equal(before.length, 2, "anchor: the fixture really has two steps");
 
-  // Replicate the save exactly as the client performs it.
-  for (const id of before) callApi(stepByIdHandler as never, "DELETE", { id: s.ids.wf, stepId: id });
-  callApi(stepsHandler as never, "POST", { id: s.ids.wf }, { step_type: "connect", track: "linkedin" });
-  callApi(stepsHandler as never, "POST", { id: s.ids.wf }, { step_type: "message", track: "linkedin", message_body: "hi" });
+  // The fixture's run is 'running', which the new route refuses (409) — proved
+  // separately below. Pause it, which D-4 permits.
+  getDb().prepare("UPDATE runs SET status = 'paused' WHERE id = ?").run(s.ids.run);
+
+  // The save the client now performs: one PUT with the full ordered list, each
+  // surviving step carrying its id back.
+  const r = callApi(stepsHandler as never, "PUT", { id: s.ids.wf }, [
+    { id: before[0], step_type: "connect", track: "linkedin" },
+    { id: before[1], step_type: "message", track: "linkedin", message_body: "hi" },
+  ]);
+  assert.equal(r.status, 200, "anchor: the save succeeded");
 
   const after2 = stepIdsOf(s.ids.wf);
   assert.equal(after2.length, 2, "anchor: still two steps after the save");
@@ -322,4 +329,111 @@ test("census: both enrolment INSERTs pin the first step", () => {
     assert.match(src, /INSERT INTO run_profile_tracks/, `anchor: ${rel} still inserts tracks`);
     assert.match(src, /firstStepIdFor/, `${rel} must pin the first step id at enrolment`);
   }
+});
+
+// ═══ X3.1 — the non-destructive save ═════════════════════════════════════════
+
+test("X3.1: PUT refuses while a run is RUNNING, and permits it while paused (D-4)", () => {
+  const s = scenario([{ type: "connect" }]);
+  const body = [{ id: s.stepIds[0], step_type: "connect", track: "linkedin" }];
+
+  const blocked = callApi(stepsHandler as never, "PUT", { id: s.ids.wf }, body);
+  assert.equal(blocked.status, 409, "a live run must not have its steps edited underneath it");
+  assert.match((blocked.body as { error: string }).error, /running/i, "and it must say why");
+
+  getDb().prepare("UPDATE runs SET status = 'paused' WHERE id = ?").run(s.ids.run);
+  const allowed = callApi(stepsHandler as never, "PUT", { id: s.ids.wf }, body);
+  assert.equal(allowed.status, 200, "paused is editable — id-based resolution makes drift detectable, not forbidden");
+});
+
+test("X3.1: the diff inserts, updates and deletes rather than replacing", () => {
+  const s = scenario([{ type: "connect" }, { type: "message", body: "one" }]);
+  getDb().prepare("UPDATE runs SET status = 'paused' WHERE id = ?").run(s.ids.run);
+
+  // keep step 0 (reordered second), drop step 1, add a new one
+  const r = callApi(stepsHandler as never, "PUT", { id: s.ids.wf }, [
+    { step_type: "message", track: "linkedin", message_body: "brand new" },
+    { id: s.stepIds[0], step_type: "connect", track: "linkedin" },
+  ]);
+  assert.equal(r.status, 200, "anchor: the save succeeded");
+  const rows = getDb().prepare("SELECT id, step_type, step_order FROM workflow_steps WHERE workflow_id = ? ORDER BY step_order").all(s.ids.wf) as
+    { id: string; step_type: string; step_order: number }[];
+  assert.equal(rows.length, 2, "one kept, one added, one deleted");
+  assert.equal(rows[0].step_type, "message", "the new step took position 1");
+  assert.equal(rows[1].id, s.stepIds[0], "and the KEPT step kept its id");
+  assert.equal(rows[1].step_order, 2, "renumbered from array position");
+  assert.equal(rows.some(x => x.id === s.stepIds[1]), false, "the removed step is gone");
+});
+
+test("X3.1: validation rejects the bad-body classes, with the failing field", () => {
+  const s = scenario([{ type: "connect" }]);
+  getDb().prepare("UPDATE runs SET status = 'paused' WHERE id = ?").run(s.ids.run);
+  const put = (body: unknown) => callApi(stepsHandler as never, "PUT", { id: s.ids.wf }, body);
+
+  assert.equal(put({ nope: 1 }).status, 400, "non-array body");
+  // The `!x?.length` class: a STRING has a length and passed the old guard shape.
+  assert.equal(put("abcd").status, 400, "a string is not a list of steps");
+  assert.equal(put([1, 2]).status, 400, "non-object elements");
+  assert.equal(put([{ step_type: "teleport" }]).status, 400, "unknown step_type");
+  const r = put([{ step_type: "connect" }, { step_type: "teleport" }]);
+  assert.equal(r.status, 400);
+  assert.ok((r.body as { field?: string }).field, "the failing field is named");
+});
+
+test("X3.1: a step id belonging to ANOTHER workflow is refused", () => {
+  const mine = scenario([{ type: "connect" }]);
+  const theirs = scenario([{ type: "connect" }]);
+  getDb().prepare("UPDATE runs SET status = 'paused' WHERE id = ?").run(mine.ids.run);
+
+  const r = callApi(stepsHandler as never, "PUT", { id: mine.ids.wf },
+    [{ id: theirs.stepIds[0], step_type: "connect", track: "linkedin" }]);
+  assert.equal(r.status, 400, "adopting another workflow's step would silently move it");
+  assert.match((r.body as { error: string }).error, /different workflow/i);
+  // and nothing was mutated
+  const still = getDb().prepare("SELECT workflow_id FROM workflow_steps WHERE id = ?").get(theirs.stepIds[0]) as { workflow_id: string };
+  assert.equal(still.workflow_id, theirs.ids.wf, "their step is untouched");
+});
+
+test("X3.1: a saved workflow keeps a paused track pointing at the SAME step", () => {
+  // The property the whole unit exists for: identity survives an edit, so the
+  // track resolves to its own step afterwards rather than to whatever is at its
+  // old index.
+  const s = scenario([{ type: "connect" }, { type: "message", body: "hi" }], { currentStep: 1, connected: true });
+  getDb().prepare("UPDATE runs SET status = 'paused' WHERE id = ?").run(s.ids.run);
+  const pinnedBefore = (getDb().prepare("SELECT current_step_id FROM run_profile_tracks WHERE id = ?").get(s.ids.track) as { current_step_id: string }).current_step_id;
+
+  // reorder: message first, connect second — the N3b shape, through the real save
+  callApi(stepsHandler as never, "PUT", { id: s.ids.wf }, [
+    { id: s.stepIds[1], step_type: "message", track: "linkedin", message_body: "hi" },
+    { id: s.stepIds[0], step_type: "connect", track: "linkedin" },
+  ]);
+  const pinnedAfter = (getDb().prepare("SELECT current_step_id FROM run_profile_tracks WHERE id = ?").get(s.ids.track) as { current_step_id: string }).current_step_id;
+  assert.equal(pinnedAfter, pinnedBefore, "the track still points at the step it was on");
+  assert.equal(pinnedAfter, s.stepIds[1], "which is the message step, now at position 1");
+});
+
+test("D-1: the legacy per-step routes keep their contract but gain the same guards", () => {
+  // Appendix A D-1: do not delete these — removing a route is a contract change.
+  // They must not, however, be an unguarded way around PUT's protections.
+  const mine = scenario([{ type: "connect" }, { type: "message", body: "hi" }]);
+  const theirs = scenario([{ type: "connect" }]);
+
+  // 1. refused while a run is RUNNING
+  const live = callApi(stepByIdHandler as never, "DELETE", { id: mine.ids.wf, stepId: mine.stepIds[0] });
+  assert.equal(live.status, 409, "a live run must not have a step deleted underneath it");
+
+  // 2. refused when the step belongs to another workflow, even once paused
+  getDb().prepare("UPDATE runs SET status = 'paused' WHERE id = ?").run(mine.ids.run);
+  const foreign = callApi(stepByIdHandler as never, "DELETE", { id: mine.ids.wf, stepId: theirs.stepIds[0] });
+  assert.equal(foreign.status, 400, "deleting another workflow's step by id must be refused");
+  assert.equal(
+    (getDb().prepare("SELECT COUNT(*) n FROM workflow_steps WHERE id = ?").get(theirs.stepIds[0]) as { n: number }).n,
+    1, "and their step still exists");
+
+  // 3. still works for its own step on a paused run — the contract is intact
+  const ok = callApi(stepByIdHandler as never, "DELETE", { id: mine.ids.wf, stepId: mine.stepIds[1] });
+  assert.equal(ok.status, 200, "the route still does its job");
+  assert.equal(
+    (getDb().prepare("SELECT COUNT(*) n FROM workflow_steps WHERE id = ?").get(mine.stepIds[1]) as { n: number }).n,
+    0, "the step is gone");
 });

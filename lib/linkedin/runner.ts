@@ -448,8 +448,26 @@ export interface SideEffectRow {
   attempt_count: number;
 }
 
-/** Scheme-prefixed step identity. See the migration comment in lib/db.ts. */
-export function stepRefOf(step: { message_position: number | null }): string {
+/**
+ * Scheme-prefixed step identity. See the migration comment in lib/db.ts.
+ *
+ * X3.3: now `stepid:<uuid>`. The `pos:` scheme keyed the ledger by an INDEX into
+ * a list the UI rebuilt on every save, so re-saving a campaign renumbered an
+ * already-delivered message and Layer 1 stopped recognising it — the
+ * position-shift hole Layer 2's fingerprint lookup existed to cover. Keying by
+ * the step's own id closes it structurally: the key cannot move because the step
+ * cannot be renumbered.
+ *
+ * Writes the new scheme only. `legacyStepRefOf` is still READ (see
+ * `sideEffectFor`) so any row written before this change is still found — there
+ * are zero such rows today (D-7), which is why no data migration exists.
+ */
+export function stepRefOf(step: { id: string }): string {
+  return `stepid:${step.id}`;
+}
+
+/** The pre-X3.3 scheme. Read-only — never written again. */
+export function legacyStepRefOf(step: { message_position: number | null }): string {
   return `pos:${step.message_position ?? 1}`;
 }
 
@@ -464,12 +482,18 @@ export function bodyFingerprint(text: string): string {
 
 function sideEffectFor(
   db: ReturnType<typeof getDb>,
-  runProfileId: string, track: string, stepRef: string, action: SideEffectAction
+  runProfileId: string, track: string, stepRef: string, action: SideEffectAction,
+  legacyRef?: string
 ): SideEffectRow | undefined {
-  return db.prepare(
+  const q = db.prepare(
     `SELECT id, status, step_ref, body_fingerprint, attempt_count FROM step_side_effects
      WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
-  ).get(runProfileId, track, stepRef, action) as SideEffectRow | undefined;
+  );
+  const hit = q.get(runProfileId, track, stepRef, action) as SideEffectRow | undefined;
+  if (hit || !legacyRef) return hit;
+  // X3.3: fall back to the pre-switch `pos:` key so a row written by an older
+  // build is still recognised as "already sent" rather than re-sent.
+  return q.get(runProfileId, track, legacyRef, action) as SideEffectRow | undefined;
 }
 
 /**
@@ -1158,8 +1182,9 @@ export async function executeStep(
       // campaign re-save. Both refuse rather than guess: a message has no
       // LinkedIn-side "already sent" signal to check, unlike an invitation.
       const stepRef = stepRefOf(step);
+      const legacyRef = legacyStepRefOf(step);
       const fingerprint = bodyFingerprint(messageText);
-      const prior = sideEffectFor(db, tr.run_profile_id, tr.track, stepRef, "message");
+      const prior = sideEffectFor(db, tr.run_profile_id, tr.track, stepRef, "message", legacyRef);
 
       if (prior?.status === "confirmed") {
         // Convergent: a previous attempt delivered this and only the bookkeeping

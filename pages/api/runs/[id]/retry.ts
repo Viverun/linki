@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
-import { stepRefOf } from "@/lib/linkedin/runner";
+import { stepRefOf, legacyStepRefOf } from "@/lib/linkedin/runner";
 
 /**
  * Re-arms failed track-runs so the runner picks them up again.
@@ -148,7 +148,13 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const ledger = db.prepare(
         `SELECT status, step_ref FROM step_side_effects
          WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
-      ).get(c.run_profile_id, c.track, stepRefOf(step), action) as { status: string; step_ref: string } | undefined;
+      ).get(c.run_profile_id, c.track, stepRefOf(step), action) as { status: string; step_ref: string } | undefined
+        // X3.3: read the legacy `pos:` key too, so a row written before the
+        // scheme switch still blocks a re-send instead of being invisible.
+        ?? db.prepare(
+          `SELECT status, step_ref FROM step_side_effects
+           WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
+        ).get(c.run_profile_id, c.track, legacyStepRefOf(step), action) as { status: string; step_ref: string } | undefined;
 
       // The operator override comes FIRST, because it means "send again
       // regardless of what the ledger says". Handled below the confirmed/

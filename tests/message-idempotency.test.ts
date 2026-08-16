@@ -57,7 +57,7 @@ mockModule("@/lib/linkedin/session", {
   },
 });
 
-const { executeStep, stepRefOf, bodyFingerprint, UnresolvedSideEffectError } = await import("@/lib/linkedin/runner");
+const { executeStep, stepRefOf, legacyStepRefOf, bodyFingerprint, UnresolvedSideEffectError } = await import("@/lib/linkedin/runner");
 const { getDb } = await import("@/lib/db");
 
 after(() => {
@@ -157,7 +157,8 @@ test("1 saveSessionState throwing after a successful send records delivery, not 
 
   assert.equal(sends.length, 1, "exactly one send");
   assert.ok(targetOf(s.ids.target).message_sent_at, "message_sent_at must be stamped");
-  assert.deepEqual(ledgerRows(s.ids.profile).map(r => [r.step_ref, r.status]), [["pos:1", "confirmed"]]);
+  assert.deepEqual(ledgerRows(s.ids.profile).map(r => [r.step_ref, r.status]),
+    [[stepRefOf(s.stepRows[0] as { id: string }), "confirmed"]], "X3.3: keyed by step id");
   assert.notEqual(trackOf(s.ids.track).state, "failed", "a session-cache failure must not fail a delivered step");
   assert.equal(trackOf(s.ids.track).current_step, 1, "track advances past the delivered message");
 });
@@ -193,7 +194,7 @@ test("2 a DB failure while stamping message_sent_at does not fail the step eithe
 test("3 an in_flight ledger row refuses to send and fails closed", async () => {
   reset();
   const s = scenario();
-  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", bodyFingerprint(RENDERED));
+  seedLedger(s.ids.profile, s.ids.target, stepRefOf(s.stepRows[0] as { id: string }), "in_flight", bodyFingerprint(RENDERED));
 
   await run(s);
 
@@ -205,7 +206,7 @@ test("3 an in_flight ledger row refuses to send and fails closed", async () => {
 test("4 a confirmed ledger row skips the send and advances the track", async () => {
   reset();
   const s = scenario();
-  seedLedger(s.ids.profile, s.ids.target, "pos:1", "confirmed", bodyFingerprint(RENDERED));
+  seedLedger(s.ids.profile, s.ids.target, stepRefOf(s.stepRows[0] as { id: string }), "confirmed", bodyFingerprint(RENDERED));
 
   await run(s);
 
@@ -223,7 +224,7 @@ test("5 a legitimate follow-up still sends when an EARLIER message is confirmed"
     [{ messagePosition: 1, body: "First touch." }, { messagePosition: 2, body: "Second touch, different text." }],
     { currentStep: 1 }
   );
-  seedLedger(s.ids.profile, s.ids.target, "pos:1", "confirmed", bodyFingerprint("First touch."));
+  seedLedger(s.ids.profile, s.ids.target, stepRefOf(s.stepRows[0] as { id: string }), "confirmed", bodyFingerprint("First touch."));
 
   await run(s);
 
@@ -250,7 +251,7 @@ test("7 process death between send and stamp yields zero second sends on re-entr
   const s = scenario();
   // Simulate the crash: intent committed, message delivered, process dies before
   // the confirm. That is exactly an orphaned in_flight row.
-  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", bodyFingerprint(RENDERED));
+  seedLedger(s.ids.profile, s.ids.target, stepRefOf(s.stepRows[0] as { id: string }), "in_flight", bodyFingerprint(RENDERED));
 
   await run(s);
 
@@ -303,9 +304,17 @@ test("fingerprint normalises whitespace but preserves case and punctuation", () 
   assert.notEqual(bodyFingerprint("Hi Ada"), bodyFingerprint("Hi Ada!"));
 });
 
-test("stepRefOf uses the scheme prefix and defaults to position 1", () => {
-  assert.equal(stepRefOf({ message_position: 2 }), "pos:2");
-  assert.equal(stepRefOf({ message_position: null }), "pos:1");
+test("X3.3: stepRefOf keys the ledger by STEP ID, not by position", () => {
+  // The scheme switch. `pos:` keyed the ledger by an index into a list the UI
+  // rebuilt on every save, so re-saving renumbered an already-delivered message
+  // and Layer 1 stopped recognising it. An id cannot be renumbered.
+  assert.equal(stepRefOf({ id: "abc-123" }), "stepid:abc-123");
+  assert.doesNotMatch(stepRefOf({ id: "abc-123" }), /^pos:/, "the position scheme is never written again");
+});
+
+test("X3.3: the legacy pos: scheme is still READABLE, so old rows still block", () => {
+  assert.equal(legacyStepRefOf({ message_position: 2 }), "pos:2");
+  assert.equal(legacyStepRefOf({ message_position: null }), "pos:1");
 });
 
 // ─── 16: the handler chain is provably undisturbed ───────────────────────────
@@ -329,7 +338,7 @@ test("16 the four pre-existing error types still route to their original branche
 
   // The InMail branch matches on SUBSTRING, so our messages must not contain it.
   const s = scenario();
-  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", null);
+  seedLedger(s.ids.profile, s.ids.target, stepRefOf(s.stepRows[0] as { id: string }), "in_flight", null);
   await run(s);
   assert.doesNotMatch(trackOf(s.ids.track).error_message ?? "", /No InMail credits left/);
 });
@@ -435,7 +444,7 @@ test("R1 resend on a blocked in-flight message performs EXACTLY ONE send", async
   reset();
   const s = scenario();
   // The state an operator actually faces: a possibly-delivered message, blocked.
-  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", bodyFingerprint(RENDERED));
+  seedLedger(s.ids.profile, s.ids.target, stepRefOf(s.stepRows[0] as { id: string }), "in_flight", bodyFingerprint(RENDERED));
   getDb().prepare("UPDATE run_profile_tracks SET state = 'failed' WHERE id = ?").run(s.ids.track);
 
   const r = callRetry(s.ids.run, { target_ids: [s.ids.target], resolve: "resend" });
@@ -458,7 +467,7 @@ test("R1 resend on a blocked in-flight message performs EXACTLY ONE send", async
 test("R1 resend twice in a row yields two sends, not a wedge", async () => {
   reset();
   const s = scenario();
-  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", bodyFingerprint(RENDERED));
+  seedLedger(s.ids.profile, s.ids.target, stepRefOf(s.stepRows[0] as { id: string }), "in_flight", bodyFingerprint(RENDERED));
   getDb().prepare("UPDATE run_profile_tracks SET state = 'failed', current_step = 0 WHERE id = ?").run(s.ids.track);
 
   const runOnce = async () => {
@@ -481,7 +490,7 @@ test("R1 resend twice in a row yields two sends, not a wedge", async () => {
 test("R1 the forced resend is recorded on the ledger row, not just logged", async () => {
   reset();
   const s = scenario();
-  seedLedger(s.ids.profile, s.ids.target, "pos:1", "in_flight", bodyFingerprint(RENDERED));
+  seedLedger(s.ids.profile, s.ids.target, stepRefOf(s.stepRows[0] as { id: string }), "in_flight", bodyFingerprint(RENDERED));
   getDb().prepare("UPDATE run_profile_tracks SET state = 'failed' WHERE id = ?").run(s.ids.track);
 
   callRetry(s.ids.run, { target_ids: [s.ids.target], resolve: "resend" });
@@ -489,4 +498,18 @@ test("R1 the forced resend is recorded on the ledger row, not just logged", asyn
   const led = ledgerRow(s.ids.profile);
   assert.equal(led.status, "abandoned", "the row is explicitly transitioned so re-entry is a genuine first attempt");
   assert.match(led.error_message ?? "", /operator/i, "and the override is attributable in the record");
+});
+
+test("X3.3: a LEGACY pos: ledger row still blocks a re-send", async () => {
+  // Read-both, proved. There are zero pos: rows in production (D-7), so no data
+  // migration exists — but a row written by an older build must still be seen,
+  // or the switch would make a delivered message invisible and re-sendable.
+  reset();
+  const s = scenario();
+  seedLedger(s.ids.profile, s.ids.target, "pos:1", "confirmed", bodyFingerprint(RENDERED));
+
+  await run(s);
+
+  assert.equal(sends.length, 0, "a confirmed legacy row must still suppress the send");
+  assert.equal(targetOf(s.ids.target).message_sent_at !== null, true, "and the bookkeeping still converges");
 });

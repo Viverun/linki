@@ -1004,3 +1004,50 @@ thresholds now pinned on both sides with absolute values.
 `health-predicate`, `connect.test.ts`, `source-text.ts`, `source-text.test.ts`,
 plus `degraded-alerting.test.ts`, which the drift tripwire found and the original
 list did not contain.
+
+---
+
+## P2-3 complete — F1 CLOSED, NF-1/N3/NF-3 retired (2026-08-16)
+
+X3.2 pinned tracks to `current_step_id`; X3.1 made the save non-destructive; X3.3
+switched the ledger key. Together these retire the position-based identity the
+whole N3/NF-1 class rests on.
+
+### F1 — CLOSED, structurally
+
+F1 (duplicate message) was mitigated in two layers: Layer 1 keyed the ledger by
+`pos:<message_position>`, and **Layer 2 existed precisely because Layer 1's key
+could move** — re-saving a campaign renumbered an already-delivered message, so
+the position key no longer matched and the message could be sent again.
+
+The ledger is now keyed by `stepid:<uuid>`. The key cannot move, because the step
+cannot be renumbered and its id survives a save. The position-shift hole is closed
+**structurally rather than by detection**, so the remaining
+non-deterministic-body gap can no longer produce a duplicate: two different
+renderings of the same step now collide on the same ledger row and the
+`in_flight`/`confirmed` gate refuses, where before they could land under two
+different `pos:` keys.
+
+Layer 2 (the body fingerprint) is **kept**. It is no longer load-bearing for the
+position-shift case, but it still catches the same body arriving at a genuinely
+different step, which is a different situation and remains a product decision
+rather than a defect.
+
+### NF-3 — RETIRED
+
+NF-3 was the observation that step identity was positional and that anything
+depending on it inherited the drift. There is no longer a position-based identity
+to depend on: tracks resolve by `current_step_id`, the ledger keys by
+`stepid:`, and a save preserves ids. The finding has no remaining referent.
+
+### What is deliberately NOT claimed
+
+`pos:` rows are still **read** (`legacyStepRefOf`, and the fallback in
+`sideEffectFor` and `retry.ts`), so a row written by an older build still blocks a
+re-send. There are zero such rows in production (D-7), which is why no data
+migration exists — and why the legacy path is proved by a test rather than by a
+migration record.
+
+`rearm` deliberately does **not** move the pinned id: it re-runs the same step.
+The tempting "keep them in sync everywhere" change would be wrong there, so it
+has its own test.

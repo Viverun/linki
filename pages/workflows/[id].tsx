@@ -311,6 +311,14 @@ export const getServerSideProps: GetServerSideProps = async ({ params, query }) 
 type WizardPage = "prospects" | "prompt" | "linkedin-steps" | "email-steps" | "account" | "summary";
 
 interface WizardStep {
+  /**
+   * P2-3 / NF-1. The db id of the step this was hydrated from, carried so the
+   * save can send it back and the row survives instead of being deleted and
+   * re-created with a fresh uuid. Undefined for a step the user just added.
+   */
+  id?: string;
+  /** Likewise for the separate `delay` row this step's delayDaysBefore came from. */
+  delayStepId?: string;
   track: Track;
   type: "visit" | "connect" | "message" | "sales_inmail" | "email";
   delayDaysBefore: number; // delay before this step (0 for first step within its track)
@@ -334,13 +342,17 @@ function buildWizardSteps(steps: Step[]): WizardStep[] {
   const result: WizardStep[] = [];
   // Track pending delays per track independently
   const pendingDelay: Record<string, number> = { linkedin: 0, email: 0 };
+  const pendingDelayId: Record<string, string | undefined> = { linkedin: undefined, email: undefined };
   for (const s of steps) {
     const track: Track = s.track ?? (s.step_type === "email" ? "email" : "linkedin");
     if (s.step_type === "delay") {
       pendingDelay[track] = Math.round(s.delay_seconds / 86400);
+      pendingDelayId[track] = s.id;
     } else {
       const raw = s as unknown as Record<string, unknown>;
       result.push({
+        id: s.id,
+        delayStepId: pendingDelayId[track],
         track,
         type: s.step_type as "visit" | "connect" | "message" | "sales_inmail" | "email",
         delayDaysBefore: pendingDelay[track] ?? 0,
@@ -359,6 +371,7 @@ function buildWizardSteps(steps: Step[]): WizardStep[] {
         aiLanguage: (raw.ai_language as string) ?? "English",
       });
       pendingDelay[track] = 0;
+      pendingDelayId[track] = undefined;
     }
   }
   return result;
@@ -771,67 +784,67 @@ function Wizard({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: campaignPrompt }),
     });
-    // Delete all existing steps
-    const existing = await fetch(`/api/workflows/${workflowId}/steps`);
-    const existingSteps: Step[] = existing.ok ? await existing.json() : [];
-    await Promise.all(
-      existingSteps.map((s) =>
-        fetch(`/api/workflows/${workflowId}/steps/${s.id}`, { method: "DELETE" })
-      )
-    );
-    // Save per-track: each track's steps saved in order with correct delays
-    // We interleave all steps together (API auto-assigns track from step_type / track field)
-    // Process linkedin steps then email steps (order within each track matters, cross-track order is irrelevant)
+    // P2-3 / NF-1. ONE non-destructive save. This used to DELETE every step and
+    // re-POST it, which minted a fresh uuid per step on every save and destroyed
+    // step identity — the reason everything downstream had to refer to steps by
+    // position, and the reason a reorder could make an already-connected track
+    // send its message immediately (N3). Ids are now sent back, so surviving rows
+    // are UPDATED in place and `run_profile_tracks.current_step_id` keeps
+    // pointing at the same step across an edit.
     const byTrack: Record<Track, WizardStep[]> = { linkedin: [], email: [] };
-    for (const ws of wizardSteps) {
-      byTrack[ws.track].push(ws);
-    }
+    for (const ws of wizardSteps) byTrack[ws.track].push(ws);
+
     let emailPosition = 1;
     let messagePosition = 1;
-    // Save all steps flat — the track field tells the API which track each step belongs to
-    // We must save them interleaved so positions increment correctly per type
-    const allOrdered = [...byTrack.linkedin, ...byTrack.email];
-    // Re-calculate positions independently
-    emailPosition = 1; messagePosition = 1;
-    for (const ws of allOrdered) {
+    const payload: Record<string, unknown>[] = [];
+    for (const ws of [...byTrack.linkedin, ...byTrack.email]) {
       if (ws.delayDaysBefore > 0) {
-        await fetch(`/api/workflows/${workflowId}/steps`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ step_type: "delay", track: ws.track, delay_seconds: ws.delayDaysBefore * 86400 }),
+        payload.push({
+          ...(ws.delayStepId ? { id: ws.delayStepId } : {}),
+          step_type: "delay", track: ws.track, delay_seconds: ws.delayDaysBefore * 86400,
         });
       }
       const isEmail = ws.type === "email";
       const isInMail = ws.type === "sales_inmail";
-      // sales_inmail behaves like message (body + optional AI + templates) plus a subject.
       const isMessage = ws.type === "message" || isInMail;
       const hasAI = isMessage || isEmail;
-      await fetch(`/api/workflows/${workflowId}/steps`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          step_type: ws.type,
-          track: ws.track,
-          connect_note: ws.type === "connect" ? (ws.connectNote || null) : null,
-          message_body: isMessage ? (ws.messageBody || null) : null,
-          template_id: isMessage && ws.templateIds.length === 0 ? (ws.templateId ?? null) : null,
-          template_ids: isMessage ? ws.templateIds : [],
-          // InMail subject reuses the email_subject column (an InMail step never sends email).
-          email_subject: isEmail ? (ws.emailSubject || null) : isInMail ? (ws.emailSubject || null) : null,
-          email_body: isEmail ? (ws.emailBody || null) : null,
-          email_signature: isEmail ? (ws.emailSignature) : null,
-          email_position: isEmail ? emailPosition : null,
-          message_position: isMessage ? messagePosition : null,
-          ai_enabled: hasAI ? (ws.aiEnabled ? 1 : 0) : 0,
-          ai_model: hasAI ? (ws.aiModel || null) : null,
-          ai_prompt: hasAI ? (ws.aiPrompt || null) : null,
-          ai_max_words: hasAI && ws.aiEnabled && ws.aiMaxWordsEnabled ? ws.aiMaxWords : null,
-          ai_language: hasAI ? (ws.aiLanguage || "English") : null,
-        }),
+      payload.push({
+        ...(ws.id ? { id: ws.id } : {}),
+        step_type: ws.type,
+        track: ws.track,
+        connect_note: ws.type === "connect" ? (ws.connectNote || null) : null,
+        message_body: isMessage ? (ws.messageBody || null) : null,
+        template_id: isMessage && ws.templateIds.length === 0 ? (ws.templateId ?? null) : null,
+        template_ids: isMessage ? ws.templateIds : [],
+        email_subject: isEmail || isInMail ? (ws.emailSubject || null) : null,
+        email_body: isEmail ? (ws.emailBody || null) : null,
+        email_signature: isEmail ? ws.emailSignature : null,
+        email_position: isEmail ? emailPosition : 1,
+        message_position: isMessage ? messagePosition : 1,
+        ai_enabled: hasAI ? (ws.aiEnabled ? 1 : 0) : 0,
+        ai_model: hasAI ? (ws.aiModel || null) : null,
+        ai_prompt: hasAI ? (ws.aiPrompt || null) : null,
+        ai_max_words: hasAI && ws.aiEnabled && ws.aiMaxWordsEnabled ? ws.aiMaxWords : null,
+        ai_language: hasAI ? (ws.aiLanguage || "English") : null,
       });
       if (isEmail) emailPosition++;
       if (isMessage) messagePosition++;
     }
+
+    const stepsRes = await fetch(`/api/workflows/${workflowId}/steps`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!stepsRes.ok) {
+      // Surface the server's own message — 409 while a run is live is the one a
+      // person needs to act on, and "Failed to save" would hide it.
+      const err = await stepsRes.json().catch(() => ({} as { error?: string }));
+      toast.error(err.error ?? "Failed to save steps");
+      setSaving(false);
+      return;
+    }
+
     setSaving(false);
   }
 

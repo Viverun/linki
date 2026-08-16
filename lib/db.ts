@@ -597,7 +597,7 @@ function runMigrations(db: Database.Database) {
     // with a fresh uuid (pages/workflows/[id].tsx + steps.ts), which would orphan
     // every row here and silently disable the guard. "pos:<message_position>" is
     // stable across re-saves and is the identity a human means by "follow-up #2".
-    // The prefix reserves room for "stepid:<uuid>" once steps gain stable ids,
+    // SWITCHED to "stepid:<uuid>" by X3.3, now that steps have stable ids. The
     // so the two schemes can coexist with no data migration.
     `CREATE TABLE IF NOT EXISTS step_side_effects (
       id                TEXT PRIMARY KEY,
