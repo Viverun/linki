@@ -432,3 +432,28 @@ forever.
 Each was caught by an independent check — a changed untracked count, a re-read of
 the file, a re-run mutation — and none by the tool reporting failure. Tooling that
 reports its own success is not a control. See `docs/generation-audit.md`.
+
+## A threshold needs a test on BOTH sides of it
+
+From NF-12 (2026-08-16). `WATCHDOG_STALE_MS` could be multiplied by 1000 with
+`tests/runner-watchdog.test.ts` staying green, so the number deciding when a dead
+runner gets revived was load-bearing and unpinned.
+
+Two rules, both learned from why the *existing* boundary test could not catch it:
+
+1. **Test both directions.** Every stale-marker case asserted the watchdog does
+   NOT fire; the one revive case used an ABSENT marker, whose branch
+   short-circuits before the constant is read. Widening was therefore invisible.
+   A threshold tested on one side only is droppable from the other.
+2. **The input must not be derived from the constant.** The old test computed
+   `WATCHDOG_STALE_MS - 5_000`, so mutating the constant moved the input with it
+   and the assertion still held. Pin thresholds with absolute values chosen
+   independently — 11 minutes and 9 minutes against a 10-minute budget.
+
+Both apply to `LIVENESS_THRESHOLD_MS` in `pages/api/health.ts`, which had the same
+one-sided shape and is now covered in both directions.
+
+**And a threshold is not the only thing with sides.** NF-11's `restart_will_help`
+conjunct was droppable because no test paired `state:"dead"` with
+`restart_will_help:false`. Same rule, different shape: a conditional needs a case
+on each side of every conjunct, or the conjunct is decoration.

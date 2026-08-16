@@ -58,6 +58,22 @@ fetch(url)
       process.exit(0);
     }
     const act = b.runner && b.runner.state === "dead" && b.restart_will_help === true;
+
+    // NF-11. The one declining branch that was still silent, and the one that
+    // matters most: the runner is DEAD and a restart will not fix it, so nothing
+    // will act — while the exit code (0) is identical to a healthy instance.
+    // That is the fail-safe-but-fail-silent shape this file exists to avoid: the
+    // three restart-proof 503s at least surface a 503 to a human, whereas a dead
+    // runner on a reachable server is invisible from the outside. Deliberately
+    // NOT reusing "SUPERVISOR INACTIVE" — the supervisor is working correctly
+    // here; it is the runner that needs a person.
+    if (b.runner && b.runner.state === "dead" && b.restart_will_help !== true) {
+      warn(
+        "runner state=dead but restart_will_help=false — NOT restarting, because a restart " +
+        "would repeat the same failure and kill in-flight LinkedIn work each cycle. " +
+        "This needs a human: check /api/health for the underlying reason."
+      );
+    }
     if (process.env.HEALTH_PREDICATE_VERBOSE === "1") {
       const state = (b.runner && b.runner.state) || b.schema || "unknown";
       console.log(`state=${state} restart_will_help=${b.restart_will_help} act=${!!act}`);

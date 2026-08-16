@@ -90,6 +90,48 @@ test("P2-1: a watchdog failure can never propagate", () => {
   assert.doesNotThrow(() => runner.runnerWatchdogTick(broken));
 });
 
+// ─── NF-12 — the threshold itself had no test ────────────────────────────────
+//
+// Found by the W3 mutation sample: WATCHDOG_STALE_MS could be multiplied by 1000
+// and this file stayed green. Every stale-marker case above asserts the watchdog
+// does NOT fire, and the one revive below uses an ABSENT marker, whose branch
+// short-circuits on `ageMs = Infinity` and never consults the constant. So the
+// number deciding when a dead runner gets revived was load-bearing and unpinned:
+// a units error could have disabled the watchdog silently.
+//
+// These use ABSOLUTE ages on purpose. "P2-1: a marker just inside the threshold
+// does not fire" derives its input from `runner.WATCHDOG_STALE_MS`, so a mutation
+// of the constant moves the input with it and the assertion still holds — which
+// is exactly why that test could not catch this. A threshold must be pinned by
+// numbers chosen independently of it.
+
+/**
+ * Restores the not-running precondition the tests below depend on. The revived
+ * loop is left alive in its unref'd retry path (dbThrows), exactly as the absent
+ * marker case leaves it; only the observable handle is cleared, so ordering
+ * further down is unchanged. Reaching for the global is deliberate and confined
+ * to this one line — there is no operator-facing stop, by NF-6.
+ */
+const clearLoopHandle = () => {
+  (globalThis as typeof globalThis & { __linkiRunner?: { loop: Promise<void> | null } })
+    .__linkiRunner!.loop = null;
+};
+
+test("NF-12: a marker OLDER than the threshold fires the watchdog", () => {
+  dbThrows = true;                    // keep the revived loop in its unref'd retry path
+  setMarker(stale());                 // 11 min — an absolute age, not derived from the constant
+  const before = revivals();
+  assert.equal(runner.runnerWatchdogTick(db), true, "11 minutes without progress means the loop is not running");
+  assert.equal(revivals(), before + 1, "the intervention is counted, not silent");
+  clearLoopHandle();
+});
+
+test("NF-12: a marker just under the threshold does not fire (absolute, not derived)", () => {
+  setMarker(new Date(Date.now() - 9 * 60_000).toISOString());   // 9 min < 10 min
+  assert.equal(runner.runnerWatchdogTick(db), false, "9 minutes is still alive");
+  assert.equal(runner.runnerState().running, false, "and no loop was started");
+});
+
 test("P2-1: an absent marker counts as dead and revives, counting the intervention", () => {
   dbThrows = true;                    // keep the revived loop in its unref'd retry path
   setMarker(null);

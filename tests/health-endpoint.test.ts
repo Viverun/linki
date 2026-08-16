@@ -194,3 +194,17 @@ test("P2-1: both probes delegate to the shared predicate rather than inlining it
     assert.doesNotMatch(src, /restart_will_help===?true/, `${f}: no inline copy to drift`);
   }
 });
+
+// NF-12 (health side): the same threshold, the same missing side. "dead: stale
+// marker → 503" pins the firing side with an absolute 11 minutes, but nothing
+// pinned the other: a NARROWED threshold would report a working runner dead and
+// hand the supervisor a restart loop. `fresh()` is ~0s old and survives almost
+// any narrowing, so this uses an absolute age just under the real boundary.
+test("NF-12: a marker just under the liveness threshold is still healthy", () => {
+  setKey("runner_progress_at", new Date(Date.now() - 9 * 60_000).toISOString());
+  setKey("runner_tick_failures", "0");
+  const r = call();
+  assert.equal(r.status, 200, "9 minutes without progress is within budget, not dead");
+  assert.equal(r.body.runner.state, "healthy");
+  assert.equal(r.body.restart_will_help, false, "and nothing should be restarting it");
+});

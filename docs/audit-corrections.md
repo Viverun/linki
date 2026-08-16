@@ -747,8 +747,8 @@ the threshold. So the constant that decides when a dead runner gets revived has
 no test pinning its effect — the watchdog could be silently disabled by a units
 error and the suite would not notice.
 
-Both gaps are recorded, not fixed: each needs a test, and neither is in the
-current work order.
+**Both CLOSED on 2026-08-16 — see the X1 entry at the end of this file.** NF-11
+turned out to contain a live defect, not only a coverage gap.
 
 ### W4 — claims that cannot be verified from artifacts
 
@@ -776,3 +776,82 @@ matches every Phase 2 baseline figure: schema fingerprint, 28 tables, integrity
 ok, `foreign_key_check` 0, `step_side_effects` 0, all key counts, 7 completed / 1
 paused runs, 5 completed / 2 failed / 1 in_progress tracks, and all four
 invitation rows unchanged.
+
+---
+
+## X1 — NF-11 and NF-12 CLOSED (2026-08-16)
+
+Both were found by the W3 mutation sample, and **neither was in the original work
+order**. That is the finding worth keeping: the layer with the thinnest tests in
+the repo was the one that autonomously restarts the client's system. Coverage had
+been driven by where defects had already been found, and the recovery layer had
+never produced one.
+
+### NF-11 — a LIVE DEFECT, not just a gap
+
+Reproduce-first showed the conjunct itself is correct: `state:"dead"` with
+`restart_will_help:false` already exits 0. It was simply untested, and therefore
+droppable.
+
+The second test failed against unmodified code:
+
+```
+✖ NF-11: declining to restart a DEAD runner is never silent
+  AssertionError: naming the field that decided it
+    actual: ''
+    expected: /restart_will_help/
+```
+
+**`stderr` was empty.** The predicate declined to restart a dead runner and said
+nothing at all — the exact fail-safe-but-fail-silent shape that
+`health-predicate.js`'s own §2 header calls "the worst outcome available here".
+Every other declining branch shouts; this one, the most consequential, did not.
+
+It is worse than the branches that already warn. The three restart-proof 503s at
+least surface a 503 to a human. A dead runner with `restart_will_help:false` sits
+behind an exit code (0) indistinguishable from a healthy instance, on a server
+that answers normally. Nothing restarts it and nothing says so.
+
+Fixed at `scripts/health-predicate.js:60` with a distinct diagnostic —
+deliberately *not* reusing `SUPERVISOR INACTIVE`, because the supervisor is
+working correctly; it is the runner that needs a person.
+
+### NF-12 — a coverage gap only; all four new tests passed unmodified
+
+The threshold behaves correctly on both sides. What was missing was any test that
+would notice if it stopped.
+
+**Why the existing boundary test could not catch it:** `"P2-1: a marker just
+inside the threshold does not fire"` computes its input as
+`WATCHDOG_STALE_MS - 5_000`. Mutate the constant and the input moves with it, so
+the assertion still holds. A threshold can only be pinned by numbers chosen
+**independently of it** — the new tests use absolute ages (11 min, 9 min).
+
+The same shape existed on the health side: `"dead: stale marker → 503"` pins the
+firing direction absolutely, but nothing pinned the other, so a *narrowed*
+`LIVENESS_THRESHOLD_MS` would have reported a working runner dead and handed the
+supervisor a permanent restart loop. Now covered.
+
+Ordering note: the new firing test must run before the absent-marker revive,
+because once a loop is up the running guard short-circuits everything after it.
+It clears only the observable loop handle afterwards, leaving the revived loop in
+its unref'd retry path exactly as the absent-marker case does, so no existing
+test's precondition changed.
+
+### Mutations — 5 applied, 5 attributed kills
+
+| Mutation | Killed by |
+|---|---|
+| delete `&& b.restart_will_help === true` | NF-11: restart_will_help gates a DEAD runner — both sides of the conjunct |
+| silence the new diagnostic | NF-11: declining to restart a DEAD runner is never silent |
+| `WATCHDOG_STALE_MS` ×1000 | NF-12: a marker OLDER than the threshold fires the watchdog |
+| `WATCHDOG_STALE_MS` ÷1000 | NF-12: a marker just under the threshold does not fire |
+| `LIVENESS_THRESHOLD_MS` ÷1000 | NF-12: a marker just under the liveness threshold is still healthy |
+
+Both directions are mutated on purpose. A single-direction test leaves the
+constant droppable the other way — the same reason NF-11's two cases are asserted
+as a pair rather than as one test.
+
+**Generalisable rule, now in `docs/operations.md`: a threshold with a test on only
+one side of it is a number, not a guard — and the test's input must not be derived
+from the constant it is pinning.**

@@ -71,3 +71,11 @@ scripts/tmp/
 # credentials
 # One-off handoff doc (Opsily GHCR access instructions) — keep local, not tracked
 docs/OPSILY_GHCR_ACCESS.md
+
+# Claude Code session state (agent tooling, not project files). Kept in
+# .gitignore rather than .git/info/exclude: that file is reserved for the five
+# Linki QA artifacts whose FILENAMES must not appear in a public repo, and
+# preflight asserts each of them exists on disk — which RESUME.md, being
+# ephemeral session state, does not reliably do. Its sibling
+# .claude/settings.local.json is already ignored globally the same way.
+.claude/

@@ -165,3 +165,41 @@ test("scripts/watchdog.sh uses the shared predicate and enforces a restart budge
   // cost of a miss (root-equivalent host access).
   assert.doesNotMatch(raw, /docker\.sock/, "no socket mount: that is root-equivalent on the host");
 });
+
+// ─── NF-11 — the `restart_will_help` conjunct had no test ────────────────────
+//
+// Found by the W3 mutation sample: deleting `&& b.restart_will_help === true`
+// from health-predicate.js survived this entire file. The three restart-proof
+// 503s carry no `runner` object at all, so the FIRST conjunct already decides
+// them; `does NOT act on degraded or healthy` uses states other than "dead".
+// Nothing paired state:"dead" with restart_will_help:false — the one case the
+// conjunct exists for, and the one where acting means a restart loop that kills
+// in-flight LinkedIn work every cycle.
+//
+// Both sides are asserted in ONE test on purpose: with only the false case, the
+// conjunct is droppable in the other direction (a predicate hard-wired to never
+// act would pass it), and with only the true case it is droppable as found.
+
+test("NF-11: restart_will_help gates a DEAD runner — both sides of the conjunct", async () => {
+  const dead = { health_schema: 1, runner: { state: "dead" } };
+  assert.equal(
+    await runPredicate({ ...dead, restart_will_help: true }, 503), 1,
+    "dead + a restart will help = restart"
+  );
+  assert.equal(
+    await runPredicate({ ...dead, restart_will_help: false }, 503), 0,
+    "dead + a restart will NOT help = leave it alone; restarting would loop forever and kill in-flight work each time"
+  );
+});
+
+test("NF-11: declining to restart a DEAD runner is never silent", async () => {
+  // §2's rule, applied to the one branch that was still exempt from it: "no
+  // action" and "healthy" are indistinguishable in exit codes alone. A dead
+  // runner nobody is restarting is precisely what an operator must be told.
+  const r = await runPredicateWithStderr(
+    { health_schema: 1, runner: { state: "dead" }, restart_will_help: false }, 503
+  );
+  assert.equal(r.code, 0, "still must not act");
+  assert.match(r.stderr, /restart_will_help/, "naming the field that decided it");
+  assert.match(r.stderr, /dead/i, "and the state it saw");
+});
