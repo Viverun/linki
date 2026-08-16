@@ -2,6 +2,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import type { Page } from "playwright";
+import { codeOnly } from "@/tests/support/source-text";
 import {
   sendConnectionRequest,
   AlreadyConnectedError,
@@ -459,9 +460,13 @@ test("N7b/§3.4: verifyInvitationSent's vanity comparison is never reached with 
 function codeOnlyConnect(): string {
   // Comments and strings stripped — the §2 rule. This assertion is about call
   // ORDER in code, and connect.ts's prose mentions both function names.
-  const raw = readFileSync("lib/linkedin/connect.ts", "utf8");
-  return raw
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1 ")
-    .replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, (m) => m[0] + m[0]);
+  //
+  // H2 (2026-08-16): this was a PRIVATE COPY of the old regex helper, left
+  // behind when ca35aaf replaced the shared one with a walker. It truncated
+  // `const HARD_WALL_RE = /\/authwall\b|\/checkpoint\//;` at the `//` inside the
+  // regex literal — real code, deleted silently. The assertions below survived
+  // only because they are anchored positively (`openIdx > 0 && verifyIdx > 0`)
+  // and the damage fell outside the slice they read. Now delegated, so there is
+  // one implementation and `tests/source-text-drift.test.ts` keeps it that way.
+  return codeOnly(readFileSync("lib/linkedin/connect.ts", "utf8"));
 }

@@ -457,3 +457,35 @@ one-sided shape and is now covered in both directions.
 conjunct was droppable because no test paired `state:"dead"` with
 `restart_will_help:false`. Same rule, different shape: a conditional needs a case
 on each side of every conjunct, or the conjunct is decoration.
+
+## Positive anchors on every negative source assertion
+
+From H2 (2026-08-16). A negative source assertion — `assert.doesNotMatch`,
+`assert.ok(!…)` — passes when its target is absent. It cannot distinguish "the
+code does not do this" from "the text I was given is empty, truncated, or was
+eaten by the helper that produced it". Both stripper defects found in H2 produced
+exactly that input.
+
+**The rule: every negative source assertion must be preceded by a positive one
+that anchors it** — assert something known-present near the region under test, so
+mangled input fails loudly instead of certifying the file.
+
+```ts
+const code = codeOnly(readFileSync(file, "utf8"));
+assert.match(code, /function sendConnectionRequest/);   // anchor: we have the file
+assert.doesNotMatch(code, /catch\s*\(/);                // the real assertion
+```
+
+`lib/linkedin/connect.test.ts` is the worked example: its
+`assert.ok(openIdx > 0 && verifyIdx > 0, "both calls must exist")` is the anchor,
+and it is why that test survived reading a `connect.ts` whose line 23 was being
+truncated by a private copy of the old regex stripper.
+
+**Adversarially validated**, per the same standard as the mutation harness: the
+helpers are fed empty, whitespace-only, truncated, and unterminated-block-comment
+input in `tests/support/source-text.test.ts`. A test that passes on empty input is
+not a test.
+
+**And do not re-implement the stripper.** Three private copies existed and none
+received the fix applied to the shared one; two were corrupting live code.
+`tests/source-text-drift.test.ts` fails on a fourth.

@@ -855,3 +855,93 @@ as a pair rather than as one test.
 **Generalisable rule, now in `docs/operations.md`: a threshold with a test on only
 one side of it is a number, not a guard — and the test's input must not be derived
 from the constant it is pinning.**
+
+---
+
+## H2 — stripComments blast radius, enumerated (2026-08-16)
+
+`ca35aaf` replaced the regex comment-stripper with a walker and re-ran the five
+mutations that depend on it. What it never produced was proof of **what the old
+helper had been destroying**. Method: reconstruct the old implementation from
+`ca35aaf^:tests/support/source-text.ts`, run old and new over every source input
+any consumer processes (**127 files**), and diff the outputs. Ground truth is the
+diff, not a bespoke parser — the first attempt at this used its own string-walker
+and was fooled by a quote inside a regex literal, which is the bug under audit.
+
+### What the OLD helper corrupted — 3 files
+
+| File | Region | Trigger | Damage |
+|---|---|---|---|
+| `lib/linkedin/session.ts` | line 399 → 441 | `/*` inside the glob `"**/feed/**"` | **1905 chars**, 25 code lines, 27 quotes swallowed; quote balance −19, so `stripStrings` mispaired across the remainder |
+| `lib/linkedin/sync-accepted.ts` | 2 lines | `//` inside the regex `/\/login\|\/authwall\|\/uas\//` | line truncated mid-guard — the authwall check deleted |
+| `lib/linkedin/connect.ts` | line 23 | `//` inside `/\/authwall\b\|\/checkpoint\//` | `const HARD_WALL_RE = …` truncated |
+
+Only the first was previously known. The other two are a **second trigger shape**
+the original write-up did not identify: `//` inside a *regex literal*, defeated by
+the old `[^:]` lookbehind hack, which only ever protected `://` in URLs.
+
+### What the NEW walker corrupted — 4 files, introduced by the fix
+
+The fix had the original defect mirrored. A **quote inside a regex literal** —
+`.replace(/"/g, "")` — made the walker emit `/` as an ordinary character, then
+open a phantom STRING on the `"`. From that point every quote is mispaired and
+real comments survive as "string contents".
+
+| File | Trigger | Effect |
+|---|---|---|
+| `lib/linkedin/scraper.ts:162` | `.replace(/"/g, "")` | 16 comment lines left in the "code" |
+| `lib/linkedin/profile-scrape.ts:177` | `.replace(/"/g, "")` | 5 comment lines |
+| `scripts/demo-connect-message.ts` | same shape | 5 comment lines |
+| `pages/settings.tsx` | URL literal in JSX | 1 line |
+
+`source-text.ts`'s own comment asserted this was safe: *"a `/*` or `//` inside
+[a regex] cannot occur without an escape, so the practical hazard is closed."*
+The reasoning is sound and the hazard was misidentified — it is a **quote** inside
+a regex, not a comment marker. Fixed by adding regex-literal awareness
+(`opensRegex`), using the standard "a `/` begins a regex only where a value may
+begin" heuristic. `pages/api/lists/[id]/{apollo-enrich,enrich}.ts` and
+`pages/api/targets/[id]/profile-scrape.ts` differ by whitespace only — benign.
+
+**Direction of harm differs between the two defects, and it matters.** The old one
+DELETED code: a negative assertion over a deleted region passes vacuously. The new
+one KEPT comments: a *positive* assertion can then be satisfied by prose. Both are
+unsafe, in opposite assertion polarities — which is why the anchor rule below is
+not sufficient on its own and the helper itself needs tests.
+
+### Three private copies — the corrected consumer count is 9, not 8
+
+The blast radius was never only about the shared helper. Three files carried their
+own copy of the old regex, none of which received the `ca35aaf` fix:
+
+| Copy | State | Actually corrupting? |
+|---|---|---|
+| `lib/linkedin/connect.test.ts:459` `codeOnlyConnect()` | old regex verbatim | **yes** — truncating `connect.ts`'s `HARD_WALL_RE`, in the very file whose call ORDER its assertions protect |
+| `tests/health-isolation.test.ts:36` `stripCommentsAndStrings()` | old block+line regex | truncation possible; import lines unaffected in practice |
+| `tests/degraded-alerting.test.ts:200` | old regex **with no `[^:]` guard at all** — the worst copy | no lines eaten from its input, by luck |
+
+All three now delegate to the shared helper. `health-isolation`'s was additionally
+**misnamed**: `stripCommentsAndStrings` never stripped strings — and must not,
+because `SPECIFIER_RE` reads the quoted specifier itself, so blanking strings
+would find zero imports and every isolation assertion would pass vacuously.
+Renamed `stripCommentsOnly`. The name asserted the opposite of what the code did.
+
+`tests/source-text-drift.test.ts` now fails on any new private copy, with a
+guard-the-guard test proving the tripwire matches the literal old source. It found
+the third copy immediately — it was not in the list of eight.
+
+### Vacuously-passing assertions: NONE found
+
+Every assertion in the nine consumers was checked against the corrupted regions.
+None read a deleted or unbalanced region:
+
+- `connect.test.ts` — damage at `connect.ts:23`; the assertions read the slice
+  between `openInviteDialog` and `verifyInvitationSent`, far below it, and are
+  positively anchored (`openIdx > 0 && verifyIdx > 0`), which would have failed
+  loudly had the damage reached them. **The anchor did real work here.**
+- `degraded-alerting.test.ts` — 0 lines eaten from `RunnerHealthBanner.tsx`. Its
+  negative `!/localStorage/` is genuine: the token appears only in a comment, and
+  both helpers correctly strip it.
+- `health-isolation.test.ts` — import specifiers sit above any affected line.
+
+This is a better outcome than the audit expected, and it is luck rather than
+design in two of the three cases. The tests below are the design.

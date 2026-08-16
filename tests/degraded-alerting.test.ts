@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
+import { stripComments } from "@/tests/support/source-text";
 
 const dbDir = mkdtempSync(join(tmpdir(), "linki-alerting-test-"));
 process.env.LINKI_DB_PATH = join(dbDir, "test.db");
@@ -197,7 +198,12 @@ test("B: the component's polling hygiene", async () => {
   // explains in prose why the wrong API is wrong — so `assert.match(src, /res\.ok/)`
   // passed against a comment while the code had stopped checking it. A structural
   // test that can be satisfied by a comment is not a test.
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  // H2 (2026-08-16): was a THIRD private copy of the old regex stripper — and
+  // the worst of them, with no `[^:]` guard at all, so it truncated any line
+  // holding `//` including inside a URL literal. Delegated to the shared walker.
+  // stripComments, not codeOnly: the assertions below read string CONTENTS
+  // (`addEventListener("visibilitychange"`), which codeOnly would blank.
+  const code = stripComments(src);
 
   assert.match(code, /POLL_MS = 60_000/, "polls at 60s");
   assert.match(code, /addEventListener\("visibilitychange"/, "pauses when the tab is hidden");

@@ -63,12 +63,65 @@ export type CommentStyle = "c" | "hash";
  * from division needs a real tokenizer — but a `/` immediately followed by `*`
  * cannot occur inside one without an escape, so the practical hazard is closed.
  */
+/**
+ * Does the `/` at `i` open a REGEX LITERAL rather than a division?
+ *
+ * H2 (2026-08-16). The walker's first version skipped this, reasoning that "a
+ * `/*` or `//` inside a regex cannot occur without an escape, so the practical
+ * hazard is closed". The hazard is not `/*` inside a regex — it is a **quote**
+ * inside one. `lib/linkedin/scraper.ts:162` and `profile-scrape.ts:177` both
+ * contain
+ *
+ *     .replace(/"/g, "")
+ *
+ * The walker saw `/`, found neither `/` nor `*` after it, emitted it as an
+ * ordinary character, then met `"` and opened a phantom STRING. From there every
+ * quote in the file is mispaired and real comments survive as "string contents" —
+ * the mirror image of the regex version's `/*`-inside-a-string bug, in the same
+ * helper, introduced by the fix for it.
+ *
+ * Regex-vs-division cannot be settled without a tokenizer, but it can be settled
+ * well enough: a `/` begins a regex only where a VALUE may begin, i.e. after an
+ * operator, an opening bracket, a comma, a semicolon, or nothing at all. After an
+ * identifier, a literal, or a closing bracket it is division.
+ */
+function opensRegex(src: string, i: number): boolean {
+  let j = i - 1;
+  while (j >= 0 && /\s/.test(src[j])) j--;
+  if (j < 0) return true;
+  const p = src[j];
+  if ("([{,;:=!&|?+-*%<>~^".includes(p)) return true;
+  // `return /re/`, `typeof /re/`, `case /re/` — a keyword, not an identifier.
+  const word = /[A-Za-z_$][\w$]*$/.exec(src.slice(0, j + 1))?.[0];
+  return word ? ["return", "typeof", "case", "in", "of", "delete", "void", "instanceof", "new", "do", "else", "yield", "await"].includes(word) : false;
+}
+
 function stripCComments(src: string): string {
   let out = "";
   let i = 0;
   while (i < src.length) {
     const c = src[i];
     const next = src[i + 1];
+
+    // ── a regex literal: copy verbatim so its quotes cannot open a string ──
+    if (c === "/" && next !== "/" && next !== "*" && opensRegex(src, i)) {
+      const start = i;
+      out += c; i++;
+      let inClass = false;
+      while (i < src.length) {
+        const d = src[i];
+        if (d === "\\") { out += d + (src[i + 1] ?? ""); i += 2; continue; }
+        if (d === "\n") break;                       // unterminated — not a regex after all
+        out += d; i++;
+        if (d === "[") inClass = true;
+        else if (d === "]") inClass = false;
+        else if (d === "/" && !inClass) break;       // closing delimiter
+      }
+      // A newline before the delimiter means this was division, not a regex.
+      // Rewind and let the ordinary path handle it, so `a / b` is untouched.
+      if (src[i - 1] !== "/" || i === start + 1) { out = out.slice(0, out.length - (i - start)); i = start; }
+      else continue;
+    }
 
     // ── inside a string or template: copy verbatim, honouring escapes ──
     if (c === '"' || c === "'" || c === "`") {

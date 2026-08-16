@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync, statSync } from "node:fs";
+import { stripComments } from "@/tests/support/source-text";
 import { dirname, join, relative, resolve } from "node:path";
 
 /**
@@ -33,17 +34,25 @@ const ROOT = resolve(import.meta.dirname, "..");
  * `import { x } from "@/lib/linkedin/runner"` is not an edge, and a test that
  * counted it would fail for a reason that does not exist.
  */
-function stripCommentsAndStrings(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1 ");
+function stripCommentsOnly(src: string): string {
+  // H2 (2026-08-16): this was a PRIVATE COPY of the old regex helper, left behind
+  // when ca35aaf replaced the shared one with a walker. It truncated any line
+  // holding `//` inside a regex literal — e.g. sync-accepted.ts's
+  // `/\\/login|\\/authwall|\\/uas\\//.test(url)` — deleting real code from the text
+  // these imports are read out of. Now delegated to the one implementation.
+  //
+  // Renamed: it never stripped STRINGS, and must not — SPECIFIER_RE reads the
+  // quoted specifier itself, so blanking string contents would find zero imports
+  // and every isolation assertion would pass vacuously. The old name asserted the
+  // opposite of what the code did.
+  return stripComments(src);
 }
 
 /** Static imports, re-exports, dynamic import() and require(). */
 const SPECIFIER_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)["']([^"']+)["']/g;
 
 function importsOf(file: string): string[] {
-  const src = stripCommentsAndStrings(readFileSync(file, "utf8"));
+  const src = stripCommentsOnly(readFileSync(file, "utf8"));
   const found = new Set<string>();
   for (const m of src.matchAll(SPECIFIER_RE)) found.add(m[1]);
   return [...found];
@@ -194,7 +203,7 @@ test("§1: scripts/health-predicate.js has no dependencies at all", () => {
   // It runs as the container's healthcheck command. A missing or broken module
   // there means the healthcheck itself fails, which the supervisor reads as an
   // unhealthy container — the same false-restart loop, one layer out.
-  const src = stripCommentsAndStrings(readFileSync(join(ROOT, "scripts/health-predicate.js"), "utf8"));
+  const src = stripCommentsOnly(readFileSync(join(ROOT, "scripts/health-predicate.js"), "utf8"));
   const specs = [...src.matchAll(SPECIFIER_RE)].map(m => m[1]);
   assert.deepEqual(
     specs, [],
