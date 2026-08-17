@@ -132,3 +132,60 @@ browsers and send duplicates. Do not scale it up.
 
 **One known defect is unfixed and listed above:** the non-UTC timezone limit
 doubling. It is not dangerous if you keep every account on UTC.
+
+## 7. If Linki runs on a machine that sleeps
+
+Laptops sleep. So does WSL2 on a Windows machine. A dedicated server or VPS does
+not. Which one you are running on changes nothing about safety, but it is worth
+knowing what you will see.
+
+**What happens when the machine sleeps:** everything freezes, including Linki's
+internal clock. When the machine wakes, Linki picks up where it left off. We
+measured this: after a **200-second** freeze, Linki was doing useful work again
+**29 milliseconds** after waking, and the automatic restart never triggered.
+Nothing was lost, no data changed, and the container did not restart.
+
+**What you may briefly see:** for a few seconds after waking, Docker may report
+the container as `unhealthy`. It clears on its own within about 30 seconds. If it
+clears, ignore it.
+
+**When it would matter.** The automatic restart is meant for a Linki that has
+genuinely hung while the machine is awake. Machine suspension does not trigger it,
+because while the machine is asleep the thing that would order the restart is
+asleep too. **You do not need to disable anything just because your machine
+sleeps.**
+
+**One exception, and it is not about sleeping:** while you are watching a live
+campaign closely and want no automated interference, disable the restart script
+for that period and re-enable it afterwards. Anyone doing that should verify it is
+switched back on — a monitor everyone believes is running, that is not, is worse
+than no monitor.
+
+## 8. The first accepted connection — watch this closely
+
+Linki has been tested end-to-end for **sending connection requests**. The
+**messaging** side has been thoroughly tested in software, but has not yet run
+against a live accepted connection, because nobody can accept on demand — it takes
+days or weeks.
+
+**So: the first message Linki sends after somebody accepts is the first real test
+of that machinery.** Watch it the way you would watch a first flight.
+
+What to check when the first acceptance comes through:
+
+1. **The message sends once.** Confirm on LinkedIn that exactly one message
+   arrived, and that the person is the one you intended.
+2. **The record matches.** In Linki, that person should show a "message sent"
+   timestamp, and the internal record for that step should read **confirmed**.
+3. **If a step ends in failure and its record still reads `in_flight`, do NOT
+   retry it.** That state means: *Linki sent something and could not confirm
+   whether it arrived.* Retrying may send it twice, to a real person. Go and look
+   at LinkedIn yourself. If the message is there, mark it delivered in Linki. If it
+   is not, then resend.
+4. **Treat messaging as unproven until several have gone out cleanly.** Not
+   because a specific problem is expected — the tests are thorough — but because
+   "it passed its tests" and "it has done this for real" are different claims, and
+   only the second one has been earned for connection requests so far.
+
+Once a handful of messages have sent and confirmed cleanly, this stops being
+special and becomes ordinary operation.

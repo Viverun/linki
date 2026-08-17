@@ -273,3 +273,150 @@ Also corrected: a detached sampler was reported as "running" on the strength of 
 `pgrep -f` that was matching its own command line, while its log file did not
 exist. Re-run in bounded foreground chunks, which is where the 112 samples come
 from.
+
+
+---
+
+# GA-1 — host suspension vs the live supervisor (measured 2026-08-17)
+
+The Phase 2 observation window showed a 25-minute gap that Docker's own
+healthcheck corroborated: the WSL2 host suspended. With a supervisor now able to
+restart the container, that stops being a curiosity — a restart mid-step is what
+manufactures the `in_flight` dead end the ledger exists to prevent. So it was
+measured rather than reasoned about.
+
+**Method.** `docker pause` for 200 s, which is what a host suspend looks like from
+inside the container: the process is frozen, its timers included.
+
+| Measurement | Result |
+|---|---|
+| Resume → next fresh progress marker | **29 ms** |
+| Docker healthcheck probes that FAILED across the pause | **zero** — `exit=0` at 15:57:41 and again at 16:02:03 |
+| `FailingStreak` after resume | 0 |
+| `RestartCount` | **0**, unchanged |
+| App state on the first successful probe after resume | `healthy`, `consecutive_tick_failures: 0` |
+| Data after the freeze | all 8 table counts and all 4 invitation rows unchanged |
+
+**Conclusion: host suspension does not restart the container.** Three independent
+reasons, and the first is the measured one:
+
+1. The loop's `sleep(POLL_INTERVAL_MS)` is frozen with everything else, so on
+   resume the pending iteration completes **immediately** — 29 ms, against a
+   600 000 ms liveness threshold and a watchdog that needs 3 consecutive failures
+   at 60 s intervals (~3 minutes). The window in which health could report `dead`
+   is ~29 ms wide; nothing can sample it three times.
+2. During a **host** suspend the host cron is suspended too, so the watchdog does
+   not run and no failure streak can accumulate. The supervisor cannot act on a
+   host that is not executing it.
+3. Nothing acts on Docker's health status directly — `restart: unless-stopped`
+   restarts on *exit*, not on *unhealthy*. The transient `unhealthy` seen right
+   after resume is cosmetic and cleared on the next probe.
+
+**The scenario that WOULD restart, and should:** the container hung or frozen
+while the **host stays awake**. Then the watchdog probes, gets no answer, the
+predicate treats an unanswerable server as restart-fixable (exit 1), and after
+~3 minutes of sustained failure it restarts. That is the design working, and it is
+a different situation from host suspension.
+
+**Deployment question — for the client to answer.** This development host is WSL2
+and suspends regularly. A laptop or WSL2 host will do this; a dedicated server or
+VPS will not. If Linki runs on a machine that sleeps, the measurement above says
+suspension is harmless — but it has only been measured for a 200 s freeze on this
+host, and a very long suspend on a slower machine has not been. The guidance in
+`docs/handover.md` is written accordingly.
+
+---
+
+# §7 (expanded) — Gate A: the watched live run
+
+**Do not execute any of this without explicit go-ahead.** Real invitations go to
+real people.
+
+## GA-2.1 Pre-flight — all of it, before a single invitation
+
+1. **Disable the host watchdog and prove it.** Comment out the cron line, then
+   confirm with `crontab -l | grep -c watchdog.sh` returning 0, and record the
+   exact edit so re-enabling is mechanical. The Docker `HEALTHCHECK` stays —
+   nothing acts on it directly (GA-1, reason 3).
+   *Why:* the supervisor can now restart the container, and a restart mid-step
+   kills a live LinkedIn action and strands the ledger row `in_flight`. A human is
+   watching; automated restart adds only risk in that window.
+2. **Fresh backup** — `node scripts/backup.mjs`, then open and verify the snapshot
+   (`integrity_check`, `foreign_key_check`, and decrypt the stored session from
+   the snapshot, as in the Phase 2 deploy).
+3. **Full baseline** — `node scripts/verify-deploy.mjs --save-baseline <file>`.
+   Captures all 8 table counts and the invitation rows; the same file is the
+   comparison input afterwards. Record separately: `/api/health` payload,
+   `RestartCount`, WAL size.
+4. **Confirm the session is genuinely live** — not just `is_authenticated = 1`,
+   but a **present, non-empty `li_at`** read through the NF-8 path. A dead session
+   mid-run is the authwall-misread path that wipes a valid `degree = 1`.
+5. **Record the daily cap and today's consumption.** The run must fit inside the
+   cap with margin. The cap is the safeguard protecting the account, not a target.
+
+## GA-2.2 Target selection
+
+- **10–20 fresh targets in a NEW run.** Not the existing paused run: its armed
+  tracks sit on connect steps for targets that already carry
+  `connection_requested_at`, so resuming it would re-tread recorded history.
+- **These are real invitations to real people, sent on the client's behalf.**
+  Choose genuine prospects the client wants to reach. Not filler, not test
+  accounts, not colleagues-as-guinea-pigs. There is no such thing as a throwaway
+  invitation — every one is a permanent, visible act from the client's account.
+- **Pre-validate every URL before enrolling:** passes the NF-9 host allowlist,
+  parses a non-null vanity, and is not already in `targets` with a
+  `connection_requested_at`.
+- **Pace it like a person.** An anomalous burst is an account risk no code change
+  mitigates.
+
+## GA-2.3 During the run — per target
+
+| Field | Source |
+|---|---|
+| Runner's claim | `logs` table / track state |
+| What LinkedIn actually shows | your own eyes — the profile, or the sent-invitations list |
+| `connection_requested_at` | DB |
+| Ledger row + `status` | `step_side_effects` |
+| Step timing | `logs` |
+| Divergence | yes/no + description |
+
+Report **every** target, including the ones where nothing interesting happened. A
+table of exceptions cannot show that the ordinary case worked.
+
+Watch continuously: `/api/health` stays `healthy`; `consecutive_tick_failures`
+stays 0; `RestartCount` unchanged; and **re-measure WAL growth** — the 112-tick
+observation was effectively idle and its zero-growth result may not survive real
+activity.
+
+## GA-2.4 Stop immediately if
+
+- An invitation reaches anyone other than the intended target.
+- Any target receives two invitations.
+- `connection_requested_at` is stamped for an invitation LinkedIn does not show.
+- LinkedIn shows an invitation the DB did not record.
+- Any weekly-limit or error popup appears.
+- Health leaves `healthy`, or the container restarts.
+
+**On any stop: do not fix it during the run.** Record the state, halt, report.
+Debugging live is how evidence gets destroyed.
+
+## GA-2.5 After the run
+
+- Zero `in_flight` ledger rows.
+- Sends counted equal cap consumption.
+- Zero orphans on the five referential checks; `integrity_check` and
+  `foreign_key_check` clean.
+- `node scripts/verify-deploy.mjs --baseline <file>` — everything except the
+  intended new rows unchanged.
+- **Re-enable the host watchdog and verify it is ARMED** — not that the cron line
+  exists, but that the predicate returns a payload containing
+  `restart_will_help`. An un-re-enabled supervisor is the silent failure this
+  whole phase was about.
+
+## GA-2.6 What Gate A does NOT cover
+
+Gate A exercises **connect only**. The message path — the ledger, the `abandoned`
+classification, `resend`, `mark_delivered`, the body fingerprint, retry's guards,
+nearly all of the P0 work — does not execute until a real person **accepts**. That
+takes days to weeks, and no amount of session time compresses it. See
+`docs/handover.md` for what to watch when the first acceptance lands.

@@ -531,3 +531,56 @@ wrong move, because nothing in the tooling would have complained if that next
 commit never came. `PREFLIGHT_EXPECT_RED` makes the same intent enforceable:
 the expectation is checked on every run instead of resting on a promise in a
 comment. Use it. Do not use `todo`, and do not use `skip`.
+
+## Every deploy verification must anchor that the action HAPPENED
+
+From the Phase 2 deploy (2026-08-16). The rule:
+
+> **A verification step must first assert a positive precondition proving the
+> action occurred, and only then assert the outcome.**
+
+A check that cannot distinguish *unchanged because the system behaved correctly*
+from *unchanged because nothing ran* is not a check. `scripts/verify-deploy.mjs`
+encodes this — every section prints an `anchor` line before its assertions, and a
+failed anchor fails the run rather than letting the assertions below it report.
+
+### The worked example — step 5g
+
+"Two saves leave the step ids unchanged." Both saves returned **401 Not
+authenticated**. The ids were therefore trivially unchanged, and the step reported
+PASS. Nothing had executed. Re-run with the internal service secret it returned
+200 with `"created": false`, which is the real evidence. **The HTTP status is the
+anchor**, and it is now asserted.
+
+### Two more of the same shape, found by auditing the other eight steps
+
+**The supervisor predicate.** A missing script exits **1** on this host —
+byte-identical to a genuine "restart needed" verdict. Asserting "non-zero" would
+pass with the predicate never running. Two fixes: assert the **exact** exit code
+(1, not "non-zero"), and assert an output string only the predicate itself
+produces (`state=…`, from `HEALTH_PREDICATE_VERBOSE=1`). Adversarially validated
+against a nonexistent path *and* against a stub whose entire body is
+`process.exit(1)`; both now fail the anchor.
+
+**Zero-LinkedIn-navigation.** This one was weaker than it looked. **The runner
+writes no per-tick line to stdout** — the container log is 11 startup lines and
+never grows — so `grep -c linkedin.com` returns 0 whether the runner is idle,
+busy, or dead. The log cannot carry that evidence in either direction, and the
+`Tick —` count sometimes proposed as its anchor **does not exist in this system**.
+Re-anchored on things that do move: the `logs` **table** (every executed step
+writes a row; 38 rows, newest 2026-08-08), live chromium processes, `runs.status`,
+and the invitation rows.
+
+### The three that were already sound, and why
+
+Recorded so the audit is complete rather than only listing failures:
+
+- **backfill** — asserts *exactly* 3 non-terminal with ids and 5 terminal NULL. A
+  query returning zero rows fails it. Anchored by construction.
+- **schema fingerprint** — compares against a specific expected value
+  (`88dff891…`), not "it changed". An empty read cannot produce that string.
+- **banner** — asserts the transition healthy → degraded → healthy, and the
+  degraded sample carries `consecutive_tick_failures: 7`, which proves the forcing
+  took effect. Note the honest limit: this verifies the state the banner renders
+  *from*, plus that the component is mounted in `Layout` below the `/login`
+  return. It does not render the DOM.
