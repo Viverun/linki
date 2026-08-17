@@ -1051,3 +1051,96 @@ migration record.
 `rearm` deliberately does **not** move the pinned id: it re-runs the same step.
 The tempting "keep them in sync everywhere" change would be wrong there, so it
 has its own test.
+
+---
+
+## GB-1 — the `Tick —` contradiction, resolved against the code (2026-08-17)
+
+Two reports disagreed. Phase 1's restart record said `Tick —` at zero was
+"load-bearing… logged at :1580, right after the early return". GA-0 said the
+`Tick —` count "does not exist in this system". **Both were wrong in different
+ways, and the code settles it.**
+
+**Answer: (a).** The line exists and sits immediately AFTER the early return:
+
+```
+lib/linkedin/runner.ts:1734   if (activeRuns.length === 0) return;
+lib/linkedin/runner.ts:1736   console.log(`[runner] Tick — ${activeRuns.length} active run(s)`);
+```
+
+Two lines apart, and that relationship has held in every committed version:
+
+| commit | early return | `Tick —` |
+|---|---|---|
+| `85934ab` | :1094 | :1096 |
+| `4af831c` | :1428 | :1430 |
+| `8bc6aaa` | :1578 | **:1580** |
+| `ca35aaf` | :1652 | :1654 |
+| `HEAD` | :1734 | :1736 |
+
+**The Phase 1 line number was correct.** At `8bc6aaa` the line really was at
+:1580 — the citation was accurate when written, and the file has since grown by
+~160 lines.
+
+**What was wrong in Phase 1 was the attribution.** With zero running runs the
+early return fires and `Tick —` never executes, so a count of zero is *guaranteed*
+and cannot distinguish "the loop ran and had no work" from "the loop is dead". The
+evidence for the loop being alive came entirely from `runner_progress_at`
+advancing — which the same sentence mentioned, and then credited to the wrong
+mechanism. **The conclusion was right; the reasoning attached to it was not.**
+
+**What was wrong in GA-0 was mine, and it was a factual error.** I searched with
+`grep -n 'Tick\|console.log' … | grep -iE 'tick' | head -5`. That returns **8**
+matches; `head -5` discarded three, including :1736. I read "not in the first five"
+as "not in the file" and wrote *does not exist* as a statement of fact. The
+operational conclusion still holds — the container-log grep is not a valid anchor
+for the idle state — but the stated reason was false.
+
+**A wrong record propagated into a later instruction.** The GA prompt proposed the
+`Tick —` count as an anchor *on the strength of the Phase 1 sentence*. It is not a
+usable anchor while idle, for the reason above. This is the second measurable cost
+of an unverified figure reaching the docs — see the 8.6-pages/tick note, which had
+no derivation in the repo and turned out not to hold. **A number or citation that
+enters a doc unverified will be reasoned from later, by someone who has no way to
+tell it was never checked.**
+
+## GB-2 — retroactive scope of the vacuous log grep
+
+The container log is 11 startup lines and never grows while idle, so
+`grep -c linkedin.com` returns 0 regardless of state. Every past verification that
+rested on it was vacuous. Enumerated, with what survives when re-anchored on
+evidence that actually moves:
+
+| # | Claim | Vacuous evidence | Surviving evidence | Verdict |
+|---|---|---|---|---|
+| 1 | Phase 1 mid-workflow restart performed no LinkedIn navigation | container-log grep | `logs` table still 38 rows, newest **2026-08-08 15:46:19**; `runs` 7 completed + 1 paused, **0 running**; 4 invitation rows, newest `connection_requested_at` **2026-08-09**; `tick()` early-returns at `:1734` before every LinkedIn call | **SURVIVES** |
+| 2 | The P2-4 RTO drill's restored instance performed no navigation | container-log grep | the drill ran against a snapshot with **0 running runs**, so the early return fires; scratch DB row counts unchanged after; no chromium process observed | **SURVIVES** |
+| 3 | The Phase 2 deploy performed no navigation | container-log grep | same `logs`/`runs`/invitation evidence as #1, plus **0 chromium processes** sampled directly, plus the `verify-deploy.mjs` baseline comparison showing all 8 table counts unchanged | **SURVIVES, and is now re-anchored in the tool** |
+
+All three conclusions hold. **This is the third time in this project that "the
+conclusion stands, the reasoning did not"** — after the X2 enumeration and the
+GB-1 attribution above. Three occurrences is a category, not a coincidence, and it
+is recorded as one in `docs/operations.md`.
+
+### A flaky test in the gate, found by the gate (2026-08-17)
+
+`enrolling within the last 15 minutes still reschedules to tomorrow` refused a
+commit, then passed on the next three runs. Rather than retry past it, the cause
+was worked out arithmetically.
+
+The test sets tomorrow's window to `[00:00, now + 0.1h]` and
+`rescheduleToTomorrow()` picks a **random** slot inside it. It then asserted
+`slot > now + 6h` as a proxy for "lands on a later day". The earliest possible
+slot is `24 − nowHour` hours away, so **after 18:00 UTC the proxy can fail**; at
+19:14 UTC the pass probability per row is about 69%, and with two rows roughly a
+coin flip. That is exactly what happened.
+
+Fixed by asserting the **actual intent** — a strictly later calendar day in the
+account's timezone — rather than a wall-clock proxy for it. Not a weakening: the
+mutation `rescheduleToTomorrow → today` still kills it, attributed, and it now
+passes five runs in a row at the hour that used to break it.
+
+**The general shape:** a proxy assertion is a second thing that can be wrong. This
+one encoded "a later day" as "at least 6 hours", which is true for most of the day
+and false in the evening. When the property is expressible directly, assert it
+directly.

@@ -584,3 +584,34 @@ Recorded so the audit is complete rather than only listing failures:
   took effect. Note the honest limit: this verifies the state the banner renders
   *from*, plus that the component is mounted in `Layout` below the `/login`
   return. It does not render the DOM.
+
+## A verification whose evidence source cannot change is not a verification
+
+The category behind three separate findings. Before relying on any source — a log,
+a counter, a file, a table — **demonstrate that it MOVES under the condition you
+are trying to detect.** A source that reads the same whether the condition holds
+or not is not evidence, however carefully you read it.
+
+The worked example is the container log. `docker logs linki-linki-1` is 11 startup
+lines and never grows while the runner is idle, because the runner writes nothing
+per-tick to stdout unless a run is `running`. So `grep -c linkedin.com` returns 0
+whether the runner is idle, busy, or dead, and three past "zero LinkedIn
+navigation" verifications rested on it. All three conclusions survived
+re-anchoring, but none of them had been *established* — see
+`docs/audit-corrections.md` GB-2 for the enumeration.
+
+The test to apply, before trusting a source:
+
+1. **Can it move at all in this state?** The `Tick —` line sits two lines after
+   `if (activeRuns.length === 0) return;`, so with no running run it can never
+   fire. Its count is structurally pinned to zero.
+2. **Have you seen it move?** Prefer a source you have observed changing — the
+   `logs` table, `runner_progress_at`, a row count — over one you have only ever
+   observed at rest.
+3. **If it cannot move, say so and find another.** Do not report "grep returned
+   zero" as though it were an observation.
+
+Related and distinct: `docs/operations.md`'s anchor rule ("assert the action
+happened before asserting the outcome") covers a check whose *action* did not run.
+This one covers a check whose *evidence source* could not have reported the action
+either way. Both produce a confident PASS from nothing.

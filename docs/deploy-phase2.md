@@ -420,3 +420,109 @@ classification, `resend`, `mark_delivered`, the body fingerprint, retry's guards
 nearly all of the P0 work — does not execute until a real person **accepts**. That
 takes days to weeks, and no amount of session time compresses it. See
 `docs/handover.md` for what to watch when the first acceptance lands.
+
+---
+
+# GB-3 — Gate A observability, and an unintended LinkedIn navigation
+
+## What reaches stdout once a run is `running` — established, at a cost
+
+A scratch container was booted against a **copy** of the database with one
+`running` run added. The intent was to answer "does `Tick —` appear?" without
+touching LinkedIn, reasoning that a run with **no enrolled profiles** yields no due
+tracks and therefore no step execution.
+
+**That reasoning was wrong, and the probe navigated to LinkedIn.** Observed
+stdout:
+
+```
+[runner] Global loop started
+[runner] Tick — 1 active run(s)
+[runner] Starting accepted-connections sync for account eaa0625e…
+[sync-accepted] Session looks logged out (…/checkpoint/challenge/…) — skipping
+[sync-accepted] Ended on a wall (…/checkpoint/challenge/…) — not persisting; flagging re-auth
+[session] account eaa0625e… flagged needs-reauth (session logged out)
+[runner] Accepted-connections sync complete — 0 stamped
+[runner] [info] run=gb3-run target=- All profiles processed — run completed
+```
+
+Nine chromium processes were live during it.
+
+**Why the safety argument failed.** "No profiles → no due tracks → no execution"
+is true of **step** execution. But `shouldSyncAccepted()` is gated on *an account
+having an active run*, not on due tracks, and it sits after the early return. The
+`docs/backup-restore.md` safety case for booting a drill instance depends on
+`activeRuns` being **empty** — and this probe deliberately made it non-empty
+without re-deriving what that unlocked. **Creating a `running` run is sufficient
+to cause LinkedIn navigation, with zero prospects enrolled.**
+
+### Answer to the GB-3 question
+
+| Reaches stdout once a run is `running` | Yes |
+|---|---|
+| `[runner] Tick — N active run(s)` | one per tick |
+| `[runner] Starting accepted-connections sync…` / `complete — N stamped` | per sync interval (8 h) |
+| `[sync-accepted] …` | on session/wall conditions |
+| `[runner] [info] run=… target=… <message>` | mirrors each `logs` table row |
+| `[runner] Tick error: …` | on a throwing tick |
+
+So during Gate A `docker logs -f` **is** a live feed. It was empty before only
+because nothing was running.
+
+## The queries the watcher will use — copy-paste ready
+
+```sh
+# per-target state, one row per track
+docker exec linki-linki-1 node -e "
+const D=require('/app/node_modules/better-sqlite3');
+const db=new D('/data/linki.db',{readonly:true});
+const RUN='<RUN_ID>';
+for (const r of db.prepare(\`
+  SELECT t.full_name, t.linkedin_url, t.connection_requested_at, t.degree,
+         rt.state, rt.current_step, rt.current_step_id, rt.error_message,
+         (SELECT status FROM step_side_effects s
+           WHERE s.run_profile_id=rp.id AND s.track=rt.track) AS ledger
+    FROM run_profiles rp
+    JOIN run_profile_tracks rt ON rt.run_profile_id=rp.id
+    JOIN targets t ON t.id=rp.target_id
+   WHERE rp.run_id=? ORDER BY t.full_name\`).all(RUN)) console.log(JSON.stringify(r));
+db.close();"
+
+# the run's log, newest last
+docker exec linki-linki-1 node -e "
+const D=require('/app/node_modules/better-sqlite3');
+const db=new D('/data/linki.db',{readonly:true});
+for (const r of db.prepare('SELECT created_at,level,message FROM logs WHERE run_id=? ORDER BY created_at').all('<RUN_ID>'))
+  console.log(r.created_at, r.level, r.message);
+db.close();"
+
+# live feed
+docker logs -f linki-linki-1
+```
+
+## One-minute checkpoint at the top of the run
+
+Within 60 s of the run going `running`, confirm **both**:
+
+1. `docker logs` has produced a new `[runner] Tick — N active run(s)` line, and
+2. the `logs` table row count has grown above its baseline of 38.
+
+**If neither moves, STOP.** A watched run where the watcher is blind is not a
+watched run — and after GB-2 there is no excuse for trusting a source that has not
+been seen to move.
+
+## Session caveat that this probe surfaced — read before Gate A
+
+The pre-flight session check (GA-2.1 step 4) verifies the **stored** session:
+`is_authenticated = 1` and a non-empty `li_at`. Both are currently TRUE, with
+`li_at` valid until **2027-08-08**.
+
+**That is not sufficient, and this probe proved it.** LinkedIn answered the
+navigation with a `checkpoint/challenge` page — the stored cookie is structurally
+valid and LinkedIn still would not serve the app. The DB-side check cannot detect
+that; only a navigation can, which is what Gate A itself is.
+
+Therefore: **a `checkpoint`/`challenge`/`authwall` response on the first target is
+a STOP condition**, not something to retry through. It means re-authentication is
+required before Gate A can proceed, and pushing past it is how a run misreads an
+authwall as "not connected" and wipes a valid `degree = 1`.

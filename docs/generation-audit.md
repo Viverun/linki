@@ -67,7 +67,7 @@ If a heredoc is genuinely unavoidable: quote the delimiter, then read the file
 back and diff it against intent. "The generator reported success" is not evidence
 that the file is correct.
 
-## The pattern across eight failures
+## The pattern across nine failures
 
 | # | Failure | Where the defect lived |
 |---|---|---|
@@ -79,6 +79,7 @@ that the file is correct.
 | 6 | `stripComments` deleted live code, silently | **the tool that makes source assertions trustworthy** |
 | 7 | A work report claimed changes that were never made | **the report — the channel every other finding travels through** |
 | 8 | The fix for #6 carried the same class of bug it fixed | **the remediation itself** |
+| 9 | A truncated search reported as a statement of fact | **the search itself — `head -5` over 8 matches** |
 
 **#5 differs in kind.** The first four corrupted an *artifact* — a staged file, a
 commit, three docs, a gate's verdict — and each was visible by inspecting the
@@ -271,6 +272,48 @@ positive anchor of their own. A negative assertion over a walked corpus cannot
 easily carry a per-file anchor — which is why the integrity of the INPUT is now
 guaranteed upstream instead, by `tests/source-text-corpus.test.ts`.
 
+### #9 — a truncated search, reported as fact
+
+**2026-08-17.** GA-0 stated that the `Tick —` log line "does not exist in this
+system". It exists, at `lib/linkedin/runner.ts:1736`.
+
+The search was:
+
+```sh
+grep -n 'Tick\|console.log' lib/linkedin/runner.ts | grep -iE "tick" | head -5
+```
+
+Eight matches; `head -5` discarded three, including the one that mattered. Absence
+from a truncated list was read as absence from the file, and written down as a
+fact rather than as "not in the first five hits".
+
+It is the same family as #7 (a report asserting something the tree does not
+contain), but the mechanism is narrower and worth naming separately: **the tool
+was asked a question it was not given the chance to answer.** `head`, `-m`,
+`| head -n`, and a `find` with `-quit` all do this. If a search is being used to
+prove ABSENCE, it must not be truncated — and the count of matches should be
+printed alongside the matches, so a truncation is visible in the output.
+
+The operational conclusion drawn from the false claim happened to survive (the
+container-log grep is genuinely not a valid idle-state anchor, for a different
+reason), which is exactly why this needed catching: a wrong premise that yields a
+right answer leaves nothing to notice.
+
+### The checking tool has now carried the defect it checks for, four times
+
+#5 the mutation harness, #6 `stripComments`, #8 its replacement, and — self-caught
+during GA-0 — `verify-deploy.mjs`'s own adversarial validation, where the
+"missing predicate" case never ran (the container filesystem is read-only, so the
+edit silently failed) and the healthy path was re-tested and read as a pass. Add
+#9's truncated grep and the count is five.
+
+The pattern is stable enough to state as a rule: **when a tool is built to catch a
+class of defect, assume it contains one, and design the validation to fail
+loudly if the validation itself does not run.** The `PREDICATE_PATH` override in
+`verify-deploy.mjs` exists for exactly this — it makes "point the checker at
+something broken" a first-class operation rather than an improvised file edit that
+can fail without saying so.
+
 ## Structural resolutions
 
 Each failure got a fix that makes it inexpressible rather than remembered:
@@ -283,6 +326,7 @@ Each failure got a fix that makes it inexpressible rather than remembered:
 | 4 | `scripts/hooks/pre-commit` invokes preflight via `core.hooksPath`, so `git commit` refuses. Verified by staging a deliberate failure and confirming HEAD did not move |
 | 5 | `scripts/mutate.sh` proves the mutation landed, proves the run happened, and attributes each kill to a NAMED test — a file-level failure is reported INCONCLUSIVE, never as a kill. Validated with a syntax error and an import-time throw |
 | 6 | `stripComments` walks the source instead of pattern-matching it, so a `/*` inside a string cannot open a comment. `tests/support/source-text.test.ts` pins the behaviour, and every mutation depending on `codeOnly` was re-run to confirm none had been passing vacuously |
+| 9 | Searches used to prove ABSENCE are not truncated, and print their match count. `scripts/verify-deploy.mjs` anchors every section on evidence that can move |
 | 8 | Both hand-rolled matchers deleted; `stripComments`/`stripStrings` delegate to `ts.createSourceFile`. `tests/source-text-corpus.test.ts` proves on all 166 tracked source files that stripping comments does not change the token stream, and `tests/source-text-drift.test.ts` fails on any new private copy |
 | 7 | The reporting protocol in `docs/operations.md` — every report opens with `git show --stat HEAD`, every claim of change cites `git log -S` or `git diff` naming the commit, "I did X" is stated separately from "X is in the tree", and "there is no diff to show you" is banned as evidence |
 

@@ -56,7 +56,6 @@ const stateOf = (id: string) =>
 /** Deterministic "random": always mid-bucket. */
 const midBucket = () => 0.5;
 const at = (iso: string) => new Date(iso);
-const HOUR = 3600_000;
 
 // A fixed Saturday, so weekday handling can't vary run to run.
 const WINDOW_START = at("2026-08-08T09:00:00.000Z");
@@ -176,9 +175,19 @@ test("enrolling within the last 15 minutes still reschedules to tomorrow", () =>
   const rows = makeBatch(2);
   spreadEnrollBatch(getDb(), lastRunId, rows, limits, "linkedin", { now: realNow, random: midBucket });
 
+  // FLAKY UNTIL 2026-08-17. This asserted `s > now + 6h` as a proxy for "lands on
+  // a later day". Tomorrow's window here is [00:00, now+0.1h] and the slot is
+  // RANDOM within it, so the earliest possible slot is (24 - nowHour) hours away.
+  // After 18:00 UTC that is under 6h and the proxy fails — at 19:14 UTC it is
+  // roughly a coin flip per row, which is what broke a commit. Assert the actual
+  // intent instead: a strictly later calendar day in the account's timezone.
+  const dayOf = (ms: number) =>
+    new Intl.DateTimeFormat("en-CA", { timeZone: limits.timezone, year: "numeric", month: "2-digit", day: "2-digit" })
+      .format(new Date(ms));
+  const today = dayOf(realNow.getTime());
   for (const s of slotsOf(rows)) {
     assert.ok(s > realNow.getTime(), "the tomorrow slot must be in the future");
-    assert.ok(s > realNow.getTime() + 6 * HOUR, "must land on a later day, not the tail of today");
+    assert.ok(dayOf(s) > today, `must land on a LATER DAY, not the tail of today — got ${dayOf(s)} vs ${today}`);
   }
 });
 
