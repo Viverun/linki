@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { idListError } from "@/lib/api-validate";
 import { randomUUID } from "crypto";
 import { methodNotAllowed } from "@/lib/api-validate";
 
@@ -74,6 +75,20 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       ? (target_ids as string[]).map((id) => ({ target_id: id }))
       : db.prepare("SELECT target_id FROM list_targets WHERE list_id = ?").all(list_id) as { target_id: string }[];
 
+    // Phase 4: explicit unknown ids used to die as FK throws → 500. The
+    // UI only ever sends selected (real) ids, so an unknown one is a client
+    // bug — fail loudly rather than half-creating the run.
+    if (Array.isArray(target_ids) && target_ids.length > 0) {
+      const listErr = idListError(target_ids, "target_ids");
+      if (listErr) return res.status(400).json({ error: listErr });
+      const ids = target_ids as string[];
+      const known = new Set(
+        (db.prepare(`SELECT id FROM targets WHERE id IN (${ids.map(() => "?").join(",")})`).all(...ids) as { id: string }[]).map(r => r.id)
+      );
+      const unknown = ids.filter(t => !known.has(t));
+      if (unknown.length > 0) return res.status(400).json({ error: `unknown target_ids: ${unknown.slice(0, 5).join(", ")}${unknown.length > 5 ? ` (+${unknown.length - 5} more)` : ""}` });
+    }
+
     // Exclude targets already enrolled in any run of this workflow
     const alreadyEnrolled = new Set(
       (db.prepare(
@@ -109,7 +124,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
     // Assign email accounts: company-grouped round-robin
     // All targets at the same company get the same sender; companies cycle through the pool
-    let emailAssignment: Map<string, string | null> = new Map();
+    const emailAssignment: Map<string, string | null> = new Map();
     if (emailAccountPool.length > 0) {
       // Load company_id for each candidate target
       const targetIds = targets.map(t => t.target_id);

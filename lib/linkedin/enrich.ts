@@ -36,11 +36,6 @@ interface SalesNavProfileData {
   skills?: Array<{ name?: string }>;
 }
 
-interface InterceptedResponse {
-  data?: SalesNavProfileData;
-  [key: string]: unknown;
-}
-
 export async function enrichProfile(
   ctx: BrowserContext,
   target: { id: string; sales_nav_url: string; full_name: string }

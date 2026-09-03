@@ -68,3 +68,17 @@ export function isAllowedLinkedinUrl(raw: string | null | undefined): boolean {
   if (url.protocol !== "https:" && url.protocol !== "http:") return false;
   return LINKEDIN_HOST.test(url.hostname);
 }
+
+const VANITY_RE = /\/in\/([^/?#]+)/;
+
+/**
+ * Phase 4: the vanity in a profile URL, or null. Same expression as
+ * `vanityNameOf` in lib/linkedin/connect.ts, but composed with the host
+ * allowlist so `https://example.com/in/bob` yields null instead of "bob" —
+ * and dependency-free, so API routes can validate input shape without
+ * importing the browser-automation graph.
+ */
+export function profileVanityOf(raw: string | null | undefined): string | null {
+  if (!isAllowedLinkedinUrl(raw)) return null;
+  return (raw as string).match(VANITY_RE)?.[1]?.toLowerCase() ?? null;
+}

@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
-import { escapeLike, pageParams } from "@/lib/api-validate";
+import { escapeLike, idListError, pageParams } from "@/lib/api-validate";
+import { profileVanityOf } from "@/lib/linkedin-url";
 import { randomUUID } from "crypto";
 import type { ActiveFilter, FilterOp } from "@/components/ui/FilterBar";
 
@@ -120,6 +121,17 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     if (!full_name || !linkedin_url) {
       return res.status(400).json({ error: "full_name and linkedin_url are required" });
     }
+    // Phase 4 (N7b production path): a truncated or foreign-host URL used to
+    // be stored and only fail later — as a wasted step, or as an invitation
+    // to a stranger. Reject the shape at the boundary instead. The CSV path
+    // already validates (normalizeLinkedinUrl); this was the unguarded one.
+    if (profileVanityOf(typeof linkedin_url === "string" ? linkedin_url : "") === null) {
+      return res.status(400).json({ error: "linkedin_url must be a valid LinkedIn profile URL (https://www.linkedin.com/in/<vanity>)" });
+    }
+    if (list_id) {
+      const list = db.prepare("SELECT id FROM lists WHERE id = ?").get(list_id);
+      if (!list) return res.status(404).json({ error: "List not found" });
+    }
     const id = randomUUID();
     try {
       db.prepare(
@@ -133,9 +145,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       throw e;
     }
     if (list_id) {
-      try {
-        db.prepare("INSERT OR IGNORE INTO list_targets (list_id, target_id) VALUES (?, ?)").run(list_id, id);
-      } catch { /* ignore */ }
+      db.prepare("INSERT OR IGNORE INTO list_targets (list_id, target_id) VALUES (?, ?)").run(list_id, id);
     }
     return res.status(201).json(db.prepare("SELECT * FROM targets WHERE id = ?").get(id));
   }
@@ -143,16 +153,18 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === "DELETE") {
     const db = getDb();
     const { target_ids } = req.body as { target_ids?: string[] };
-    if (!Array.isArray(target_ids) || target_ids.length === 0) {
-      return res.status(400).json({ error: "target_ids must be a non-empty array" });
-    }
-    const placeholders = target_ids.map(() => "?").join(",");
+    // Phase 4: shared shape + size check (a string's .length passed the old
+    // guard, then .map threw → 500).
+    const listErr = idListError(target_ids, "target_ids");
+    if (listErr) return res.status(400).json({ error: listErr });
+    const ids = target_ids ?? []; // validated above; ?? [] is for the type checker
+    const placeholders = ids.map(() => "?").join(",");
     // run_profiles/logs have no ON DELETE CASCADE — clear them first so the FK
     // constraint doesn't block the delete. run_profile_tracks cascade off run_profiles.
     const result = db.transaction(() => {
-      db.prepare(`DELETE FROM run_profiles WHERE target_id IN (${placeholders})`).run(...target_ids);
-      db.prepare(`DELETE FROM logs WHERE target_id IN (${placeholders})`).run(...target_ids);
-      return db.prepare(`DELETE FROM targets WHERE id IN (${placeholders})`).run(...target_ids);
+      db.prepare(`DELETE FROM run_profiles WHERE target_id IN (${placeholders})`).run(...ids);
+      db.prepare(`DELETE FROM logs WHERE target_id IN (${placeholders})`).run(...ids);
+      return db.prepare(`DELETE FROM targets WHERE id IN (${placeholders})`).run(...ids);
     })();
     return res.json({ deleted: result.changes });
   }

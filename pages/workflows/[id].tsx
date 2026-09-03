@@ -7,7 +7,7 @@ import { getDb } from "@/lib/db";
 import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import { OrModel } from "@/components/ui/ModelPicker";
-import FilterBar, { ActiveFilter, filtersToParams, FILTER_FIELDS } from "@/components/ui/FilterBar";
+import FilterBar, { ActiveFilter, filtersToParams } from "@/components/ui/FilterBar";
 import {
   RiArrowLeftLine,
   RiAddLine,

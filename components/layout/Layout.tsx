@@ -8,7 +8,7 @@ const NO_LAYOUT_PATHS = ["/login"];
 
 export default function Layout({ children }: { children: ReactNode }) {
   const router = useRouter();
-  const handleCollapse = useCallback((_c: boolean) => {}, []);
+  const handleCollapse = useCallback(() => {}, []);
 
   if (NO_LAYOUT_PATHS.includes(router.pathname)) {
     return <>{children}</>;
