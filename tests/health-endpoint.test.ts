@@ -23,6 +23,7 @@ function call(method = "GET"): Cap {
     status(c: number) { cap.status = c; return this; },
     json(b: unknown) { cap.body = b; return this; },
     end() { return this; },
+    setHeader() { return this; },
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   healthHandler({ method, query: {} } as any, res as any);

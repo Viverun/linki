@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
@@ -26,5 +27,5 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(201).json(db.prepare("SELECT * FROM workflows WHERE id = ?").get(id));
   }
 
-  res.status(405).end();
+  methodNotAllowed(res, ["GET", "POST"]);
 }

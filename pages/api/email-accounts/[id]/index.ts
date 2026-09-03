@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { encryptSecret } from "@/lib/crypto";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
@@ -38,19 +39,23 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     const pwParams = password ? [encryptSecret(password)] : [];
     const imapPwParams = imap_password ? [encryptSecret(imap_password)] : [];
 
+    // Phase 2: the bare `?` columns below nulled anything a partial update
+    // did not send — same wipe class as companies PUT. Passwords already had
+    // the conditional treatment; extend the COALESCE to the rest.
     db.prepare(`
       UPDATE email_accounts SET
         name = COALESCE(?, name), from_email = COALESCE(?, from_email),
-        from_name = ?, reply_to = ?, smtp_host = COALESCE(?, smtp_host),
+        from_name = COALESCE(?, from_name), reply_to = COALESCE(?, reply_to),
+        smtp_host = COALESCE(?, smtp_host),
         smtp_port = COALESCE(?, smtp_port), smtp_secure = COALESCE(?, smtp_secure),
-        imap_host = ?, imap_port = COALESCE(?, imap_port),
+        imap_host = COALESCE(?, imap_host), imap_port = COALESCE(?, imap_port),
         username = COALESCE(?, username), ${pwClause}
-        imap_username = ?, ${imapPwClause}
+        imap_username = COALESCE(?, imap_username), ${imapPwClause}
         daily_email_limit = COALESCE(?, daily_email_limit),
         active_hours_start = COALESCE(?, active_hours_start),
         active_hours_end = COALESCE(?, active_hours_end),
         timezone = COALESCE(?, timezone), working_days = COALESCE(?, working_days),
-        signature = ?, ramp_up_enabled = COALESCE(?, ramp_up_enabled),
+        signature = COALESCE(?, signature), ramp_up_enabled = COALESCE(?, ramp_up_enabled),
         ramp_start_date = COALESCE(?, ramp_start_date)
       WHERE id = ?
     `).run(
@@ -70,9 +75,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "DELETE") {
-    db.prepare("DELETE FROM email_accounts WHERE id = ?").run(id);
+    const { changes } = db.prepare("DELETE FROM email_accounts WHERE id = ?").run(id);
+    if (changes === 0) return res.status(404).json({ error: "not found" });
     return res.json({ ok: true });
   }
 
-  res.status(405).end();
+  methodNotAllowed(res, ["DELETE", "GET", "PUT"]);
 }

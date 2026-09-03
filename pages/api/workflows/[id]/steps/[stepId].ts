@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
@@ -49,5 +50,5 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.json({ ok: true });
   }
 
-  res.status(405).end();
+  methodNotAllowed(res, ["DELETE", "PUT"]);
 }

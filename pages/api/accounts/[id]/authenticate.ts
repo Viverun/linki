@@ -4,9 +4,10 @@ import {
   persistAuthenticatedState,
   AuthenticationNotEstablishedError,
 } from "@/lib/linkedin/session";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
   const db = getDb();
   const id = req.query.id as string;

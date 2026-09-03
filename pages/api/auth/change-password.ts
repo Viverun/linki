@@ -3,9 +3,10 @@ import { getServerSession } from "next-auth/next";
 import { authOptions } from "./[...nextauth]";
 import bcrypt from "bcryptjs";
 import { getDb } from "@/lib/db";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
   const session = await getServerSession(req, res, authOptions);
   if (!session?.user?.email) return res.status(401).json({ error: "Not authenticated" });

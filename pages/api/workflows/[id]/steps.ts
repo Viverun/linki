@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
 import { z } from "zod";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 
 // ─── P2-3 / X3.1 — the non-destructive save ──────────────────────────────────
@@ -216,5 +217,5 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(201).json({ id });
   }
 
-  res.status(405).end();
+  methodNotAllowed(res, ["GET", "POST", "PUT"]);
 }

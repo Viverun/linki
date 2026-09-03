@@ -13,14 +13,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (req.method === "PUT") {
     const { name, body } = req.body;
-    db.prepare(
+    const { changes } = db.prepare(
       "UPDATE templates SET name = COALESCE(?, name), body = COALESCE(?, body) WHERE id = ?"
-    ).run(name, body, id);
+    ).run(name ?? null, body ?? null, id);
+    if (changes === 0) return res.status(404).json({ error: "Template not found" });
     return res.json(db.prepare("SELECT * FROM templates WHERE id = ?").get(id));
   }
 
   if (req.method === "DELETE") {
-    db.prepare("DELETE FROM templates WHERE id = ?").run(id);
+    const { changes } = db.prepare("DELETE FROM templates WHERE id = ?").run(id);
+    if (changes === 0) return res.status(404).json({ error: "Template not found" });
     return res.status(204).end();
   }
 

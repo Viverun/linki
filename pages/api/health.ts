@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { DEGRADED_AFTER_FAILURES, classifyError } from "@/lib/health-contract";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 /**
  * Liveness endpoint. Unauthenticated by design (see proxy.ts), therefore:
@@ -54,7 +55,7 @@ const HEALTH_SCHEMA = 1;
 // it judges. The reasoning is recorded in that file.
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "GET") return res.status(405).end();
+  if (req.method !== "GET") return methodNotAllowed(res, ["GET"]);
 
   let db: ReturnType<typeof getDb>;
   try {

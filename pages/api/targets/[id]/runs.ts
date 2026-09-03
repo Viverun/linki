@@ -1,10 +1,11 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 // Which runs/campaigns a contact is enrolled in, with per-track (linkedin/email) state + step.
 // Answers "is this person in a campaign, and where are they in it?" without scanning a whole run.
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "GET") return res.status(405).end();
+  if (req.method !== "GET") return methodNotAllowed(res, ["GET"]);
 
   const db = getDb();
   const targetId = req.query.id as string;

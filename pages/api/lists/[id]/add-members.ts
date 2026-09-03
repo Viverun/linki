@@ -1,11 +1,12 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 // Add EXISTING contacts to a list by id (membership only — does not create
 // contacts). Idempotent: already-member ids are skipped. This is the inverse of
 // remove-members and the way to UNDO a removal (feed back removed_contact_ids).
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
   const db = getDb();
   const list_id = req.query.id as string;

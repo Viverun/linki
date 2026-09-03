@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
@@ -37,6 +38,14 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     if (!workflow_id || !list_id || !account_id)
       return res.status(400).json({ error: "workflow_id, list_id, account_id required" });
 
+    // Phase 2: unknown ids used to die later as FK throws → 500. Fail 404 here.
+    const workflow = db.prepare("SELECT id FROM workflows WHERE id = ?").get(workflow_id);
+    if (!workflow) return res.status(404).json({ error: "Workflow not found" });
+    const list = db.prepare("SELECT id FROM lists WHERE id = ?").get(list_id);
+    if (!list) return res.status(404).json({ error: "List not found" });
+    const account = db.prepare("SELECT id FROM accounts WHERE id = ?").get(account_id);
+    if (!account) return res.status(404).json({ error: "Account not found" });
+
     // Normalise email account list — prefer the new array, fall back to legacy single-id
     const emailAccountPool: string[] = Array.isArray(email_account_ids) && email_account_ids.length > 0
       ? email_account_ids
@@ -47,7 +56,8 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       "SELECT id FROM runs WHERE workflow_id = ? AND status IN ('running', 'paused') LIMIT 1"
     ).get(workflow_id) as { id: string } | undefined;
     if (activeRun) {
-      return res.status(400).json({
+      // Phase 2: a conflict is a 409, not a 400 (matches retry/start/PATCH).
+      return res.status(409).json({
         error: "workflow_already_active",
         message: "This workflow is already running. Stop or pause it before enrolling a new list.",
       });
@@ -163,5 +173,5 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(201).json({ id: runId });
   }
 
-  res.status(405).end();
+  methodNotAllowed(res, ["GET", "POST"]);
 }

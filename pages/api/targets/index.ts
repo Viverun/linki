@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { pageParams } from "@/lib/api-validate";
 import { randomUUID } from "crypto";
 import type { ActiveFilter, FilterOp } from "@/components/ui/FilterBar";
 
@@ -162,8 +163,9 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   const db = getDb();
-  const { list_id, page = "0", limit = "50", search } = req.query;
-  const offset = Number(page) * Number(limit);
+  const { list_id, search } = req.query;
+  // Phase 2: page=abc/limit=-5 used to reach SQL as NaN/negative → 500.
+  const { limit: safeLimit, offset } = pageParams(req.query);
 
   const extraClauses: string[] = [];
   const extraParams: unknown[] = [];
@@ -199,7 +201,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
          ORDER BY t.full_name ASC
          LIMIT ? OFFSET ?`
       )
-      .all(list_id, ...allExtraParams, Number(limit), offset);
+      .all(list_id, ...allExtraParams, safeLimit, offset);
     total = (
       db
         .prepare(
@@ -220,7 +222,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
          ORDER BY t.full_name ASC
          LIMIT ? OFFSET ?`
       )
-      .all(...allExtraParams, Number(limit), offset);
+      .all(...allExtraParams, safeLimit, offset);
     total = (
       db
         .prepare(`SELECT COUNT(*) as c FROM targets t ${whereClause}`)

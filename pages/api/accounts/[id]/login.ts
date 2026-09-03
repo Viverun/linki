@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { startHeadlessLogin, submitLoginChallenge, awaitLoginApproval } from "@/lib/linkedin/session";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 /**
  * Server-side headless LinkedIn login.
@@ -12,7 +13,7 @@ import { startHeadlessLogin, submitLoginChallenge, awaitLoginApproval } from "@/
  * and captures all cookies (incl. httpOnly li_ep_auth_context).
  */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
   const db = getDb();
   const id = req.query.id as string;

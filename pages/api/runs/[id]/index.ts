@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 /**
  * The only statuses the run state machine recognises.
@@ -157,5 +158,5 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.json({ ok: true });
   }
 
-  res.status(405).end();
+  methodNotAllowed(res, ["DELETE", "GET", "PATCH"]);
 }

@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { stepRefOf, legacyStepRefOf } from "@/lib/linkedin/runner";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 /**
  * Re-arms failed track-runs so the runner picks them up again.
@@ -61,7 +62,7 @@ const RESOLUTIONS = ["skip", "resend", "mark_delivered"] as const;
 type Resolution = (typeof RESOLUTIONS)[number];
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
   const db = getDb();
   const runId = req.query.id as string;

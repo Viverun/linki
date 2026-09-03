@@ -3,9 +3,10 @@ import bcrypt from "bcryptjs";
 import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
 import { isRateLimited } from "@/lib/rate-limit";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
   // Invite code + password are both guessable secrets — throttle attempts per IP.
   if (isRateLimited(req, "signup", 10, 15 * 60 * 1000)) {

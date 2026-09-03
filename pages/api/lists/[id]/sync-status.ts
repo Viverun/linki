@@ -24,7 +24,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(account_id) as
     | { cookies_json: string | null; is_authenticated: number }
     | undefined;
-  if (!account?.is_authenticated) return res.status(400).json({ error: "Account not authenticated" });
+  // Phase 2: missing account is a 404; a present-but-unauthenticated
+  // account stays a 400 (same split as enrich.ts/import.ts).
+  if (!account) return res.status(404).json({ error: "Account not found" });
+  if (!account.is_authenticated) return res.status(400).json({ error: "Account not authenticated" });
 
   const { getSessionContext } = await import("@/lib/linkedin/session");
   const { scrapeNavigatorList } = await import("@/lib/linkedin/scraper");

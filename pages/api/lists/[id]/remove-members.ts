@@ -1,10 +1,11 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 // Remove contacts from a list (membership only — never deletes the contact). Filters are OR'd:
 // titles (exact), title_patterns (LIKE %p%), exclude_location_substrings (LIKE %l%). dry_run previews.
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
   const db = getDb();
   const list_id = req.query.id as string;

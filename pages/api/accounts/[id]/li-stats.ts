@@ -2,9 +2,10 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { getSessionPage, saveSessionState } from "@/lib/linkedin/session";
 import { scrapeLinkedInStats } from "@/lib/linkedin/li-stats";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).end();
+  if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
   const accountId = req.query.id as string;
   const db = getDb();

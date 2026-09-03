@@ -1,9 +1,10 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { methodNotAllowed } from "@/lib/api-validate";
 
 // Title + location breakdown for a list — used to spot irrelevant contacts before cleaning.
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "GET") return res.status(405).end();
+  if (req.method !== "GET") return methodNotAllowed(res, ["GET"]);
 
   const db = getDb();
   const list_id = req.query.id as string;

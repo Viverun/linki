@@ -20,7 +20,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (req.method === "PUT") {
     const { name, email, daily_connection_limit, daily_message_limit, daily_inmail_limit, active_hours_start, active_hours_end, timezone, working_days } = req.body;
-    db.prepare(
+    const { changes } = db.prepare(
       `UPDATE accounts SET
         name = COALESCE(?, name),
         email = COALESCE(?, email),
@@ -32,7 +32,8 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         timezone = COALESCE(?, timezone),
         working_days = COALESCE(?, working_days)
        WHERE id = ?`
-    ).run(name, email, daily_connection_limit, daily_message_limit, daily_inmail_limit, active_hours_start, active_hours_end, timezone, working_days, id);
+    ).run(name ?? null, email ?? null, daily_connection_limit ?? null, daily_message_limit ?? null, daily_inmail_limit ?? null, active_hours_start ?? null, active_hours_end ?? null, timezone ?? null, working_days ?? null, id);
+    if (changes === 0) return res.status(404).json({ error: "Not found" });
     return res.json(db.prepare(`SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE id = ?`).get(id));
   }
 
