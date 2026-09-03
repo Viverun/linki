@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { idListError } from "@/lib/api-validate";
 import { methodNotAllowed } from "@/lib/api-validate";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -9,11 +10,9 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const runId = req.query.id as string;
   const { target_ids } = req.body as { target_ids: string[] };
 
-  // Array.isArray, not a truthy .length check: a string has a length, so
-  // `target_ids: "abc"` passed the old guard and then threw in .map().
-  if (!Array.isArray(target_ids) || target_ids.length === 0 || !target_ids.every(t => typeof t === "string")) {
-    return res.status(400).json({ error: "target_ids must be a non-empty array of strings" });
-  }
+  // Phase 3.2: shared shape + size check.
+  const listErr = idListError(target_ids, "target_ids");
+  if (listErr) return res.status(400).json({ error: listErr });
 
   const run = db.prepare("SELECT id FROM runs WHERE id = ?").get(runId);
   if (!run) return res.status(404).json({ error: "Run not found" });

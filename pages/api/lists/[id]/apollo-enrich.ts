@@ -3,6 +3,7 @@ import { getDb } from "@/lib/db";
 import { matchPerson } from "@/lib/apollo";
 import { randomUUID } from "crypto";
 import { decryptSecret } from "@/lib/crypto";
+import { idListError } from "@/lib/api-validate";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") {
@@ -24,8 +25,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
   const apiKey = decryptSecret(integration.api_key)!;
 
-  // Optional: target_ids in body to enrich specific contacts only
+  // Optional: target_ids in body to enrich specific contacts only.
+  // Phase 3.2: a present-but-malformed list (e.g. a string, whose .length
+  // would silently drive the placeholders) is a 400; the cap bounds the loop.
   const { target_ids } = req.body as { target_ids?: string[] };
+  if (target_ids !== undefined) {
+    const listErr = idListError(target_ids, "target_ids");
+    if (listErr) return res.status(400).json({ error: listErr });
+  }
 
   let targets: { id: string; linkedin_url: string | null; sales_nav_url: string | null }[];
   if (target_ids && target_ids.length > 0) {

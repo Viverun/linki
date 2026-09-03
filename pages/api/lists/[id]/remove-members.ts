@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
-import { methodNotAllowed } from "@/lib/api-validate";
+import { escapeLike, methodNotAllowed } from "@/lib/api-validate";
 
 // Remove contacts from a list (membership only — never deletes the contact). Filters are OR'd:
 // titles (exact), title_patterns (LIKE %p%), exclude_location_substrings (LIKE %l%). dry_run previews.
@@ -37,15 +37,17 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     conditions.push(`t.title IN (${placeholders})`);
     params.push(...titles);
   }
+  // Phase 3.2: patterns are user input — escape wildcards so `%`/`_`
+  // match literally (a pattern must not silently widen the removal set).
   if (title_patterns && title_patterns.length > 0) {
-    const patternClauses = title_patterns.map(() => "t.title LIKE ?").join(" OR ");
+    const patternClauses = title_patterns.map(() => "t.title LIKE ? ESCAPE '\\'").join(" OR ");
     conditions.push(`(${patternClauses})`);
-    for (const p of title_patterns) params.push(`%${p}%`);
+    for (const p of title_patterns) params.push(`%${escapeLike(p)}%`);
   }
   if (exclude_location_substrings && exclude_location_substrings.length > 0) {
-    const locClauses = exclude_location_substrings.map(() => "t.location LIKE ?").join(" OR ");
+    const locClauses = exclude_location_substrings.map(() => "t.location LIKE ? ESCAPE '\\'").join(" OR ");
     conditions.push(`(${locClauses})`);
-    for (const l of exclude_location_substrings) params.push(`%${l}%`);
+    for (const l of exclude_location_substrings) params.push(`%${escapeLike(l)}%`);
   }
 
   if (conditions.length === 0) {

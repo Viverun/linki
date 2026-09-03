@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { escapeLike, pageParams } from "@/lib/api-validate";
 import { randomUUID } from "crypto";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -14,11 +15,13 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     // (the companies UI relies on this for its own client-side search/filter).
     const explicitPaging = req.query.limit !== undefined || req.query.page !== undefined;
     const hasPaging = explicitPaging || !full;
-    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
-    const offset = (Number(req.query.page) || 0) * limit;
+    // Phase 3.2: pageParams clamps garbage (page=abc/limit=-5) to safe ints.
+    const { limit, offset } = pageParams(req.query, { limit: 50 });
 
-    const where = search ? "WHERE c.name LIKE ?" : "";
-    const whereArgs: unknown[] = search ? [`%${search}%`] : [];
+    // Phase 3.2: escape user wildcards — a search for `100%` must not match
+    // `1000`. ESCAPE '\' is load-bearing: without it the backslash is literal.
+    const where = search ? "WHERE c.name LIKE ? ESCAPE '\\'" : "";
+    const whereArgs: unknown[] = search ? [`%${escapeLike(search)}%`] : [];
 
     const select = full
       ? "c.*"

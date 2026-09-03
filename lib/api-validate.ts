@@ -25,8 +25,7 @@ export function isStringArray(value: unknown): value is string[] {
 /**
  * Safe LIMIT/OFFSET from query params. Garbage (`page=abc`, `limit=-5`)
  * used to reach SQL as NaN/negative and throw → 500. Clamped ints instead.
- */
-export function pageParams(
+ */export function pageParams(
   query: { page?: unknown; limit?: unknown },
   defaults: { page?: number; limit?: number; maxLimit?: number } = {}
 ): { limit: number; offset: number } {
@@ -38,4 +37,26 @@ export function pageParams(
   const page = Math.max(0, toInt(query.page, defaultPage));
   const limit = Math.min(maxLimit, Math.max(1, toInt(query.limit, defaultLimit)));
   return { limit, offset: page * limit };
+}
+
+/**
+ * Escape LIKE wildcards in user input. A search for `100%` must not match
+ * `1000`, and a remove-members pattern containing `_` must not match any
+ * single character. Callers must append `ESCAPE '\'` to the LIKE clause —
+ * without it the backslash is literal and the escaping does nothing.
+ */
+export function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, m => `\\${m}`);
+}
+
+/** Upper bound for id-list bodies (add-members, enroll, move, enrich, remove). */
+export const MAX_ID_LIST = 500;
+
+/** Combined shape + size check for id-list bodies. Null when valid. */
+export function idListError(value: unknown, name: string): string | null {
+  if (!isStringArray(value)) return `${name} must be a non-empty array of strings`;
+  if ((value as string[]).length > MAX_ID_LIST) {
+    return `${name} exceeds the ${MAX_ID_LIST}-id limit — split into batches`;
+  }
+  return null;
 }

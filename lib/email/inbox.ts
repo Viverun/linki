@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { getDb } from "@/lib/db";
 import { premium } from "@/lib/premium";
 import { decryptSecret } from "@/lib/crypto";
+import { emailTlsOptions } from "@/lib/email/tls";
 
 const IMAP_POLL_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
 // Jul 2026 incident: all email accounts became "due" in the same tick and synced
@@ -197,7 +198,7 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
       host: account.imap_host!,
       port: account.imap_port ?? 993,
       tls: true,
-      tlsOptions: { rejectUnauthorized: false },
+      tlsOptions: emailTlsOptions(),
       user: imapUser,
       password: imapPass,
       authTimeout: 10_000,

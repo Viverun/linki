@@ -3,6 +3,7 @@ import Imap from "imap";
 import { simpleParser } from "mailparser";
 import { getDb } from "@/lib/db";
 import { decryptSecret } from "@/lib/crypto";
+import { emailTlsOptions } from "@/lib/email/tls";
 
 export interface EmailMessage {
   uid: number;
@@ -63,7 +64,7 @@ async function fetchThread(cfg: ImapConfig, contactEmail: string): Promise<Email
       host: cfg.host,
       port: cfg.port,
       tls: true,
-      tlsOptions: { rejectUnauthorized: false },
+      tlsOptions: emailTlsOptions(),
       user: cfg.user,
       password: cfg.password,
       authTimeout: 10_000,

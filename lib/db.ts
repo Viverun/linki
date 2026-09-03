@@ -785,12 +785,18 @@ function runMigrations(db: Database.Database) {
 // encryption-at-rest was added. isEncrypted() lets this run safely on every boot — already
 //-encrypted rows (real "v1:" ciphertext) are skipped, so this is idempotent and cheap once
 // migrated. See lib/crypto.ts for the format and lib/premium.ts-style boundary notes.
-function encryptLegacySecretsMigration(db: Database.Database) {
+// Exported for tests (tests/secret-migration.test.ts drives it directly).
+export function encryptLegacySecretsMigration(db: Database.Database) {
+  // Phase 3.3: count what this pass encrypted and report leftovers. Reads
+  // still pass plaintext through (lib/crypto.ts), so without this a row the
+  // migration skipped would sit unencrypted at rest forever, silently.
+  let encrypted = 0;
   const accounts = db.prepare("SELECT id, cookies_json FROM accounts WHERE cookies_json IS NOT NULL").all() as
     { id: string; cookies_json: string }[];
   for (const row of accounts) {
     if (isEncrypted(row.cookies_json)) continue;
     db.prepare("UPDATE accounts SET cookies_json = ? WHERE id = ?").run(encryptSecret(row.cookies_json), row.id);
+    encrypted++;
   }
 
   const emailAccounts = db
@@ -805,6 +811,7 @@ function encryptLegacySecretsMigration(db: Database.Database) {
       needsImapPassword ? encryptSecret(row.imap_password!) : row.imap_password,
       row.id
     );
+    encrypted++;
   }
 
   const integrations = db.prepare("SELECT key, api_key FROM integrations WHERE api_key IS NOT NULL").all() as
@@ -812,7 +819,17 @@ function encryptLegacySecretsMigration(db: Database.Database) {
   for (const row of integrations) {
     if (isEncrypted(row.api_key)) continue;
     db.prepare("UPDATE integrations SET api_key = ? WHERE key = ?").run(encryptSecret(row.api_key), row.key);
+    encrypted++;
   }
+  if (encrypted > 0) console.warn(`[db] encryptLegacySecretsMigration: encrypted ${encrypted} plaintext secret row(s)`);
+  const leftover = (
+    db.prepare("SELECT COUNT(*) n FROM accounts WHERE cookies_json IS NOT NULL AND cookies_json NOT LIKE 'v1:%'").get() as { n: number }
+  ).n + (
+    db.prepare("SELECT COUNT(*) n FROM email_accounts WHERE password NOT LIKE 'v1:%' OR (imap_password IS NOT NULL AND imap_password NOT LIKE 'v1:%')").get() as { n: number }
+  ).n + (
+    db.prepare("SELECT COUNT(*) n FROM integrations WHERE api_key IS NOT NULL AND api_key NOT LIKE 'v1:%'").get() as { n: number }
+  ).n;
+  if (leftover > 0) console.warn(`[db] WARNING: ${leftover} secret row(s) remain unencrypted at rest`);
 }
 
 function initDb(db: Database.Database) {

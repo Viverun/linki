@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
-import { pageParams } from "@/lib/api-validate";
+import { escapeLike, pageParams } from "@/lib/api-validate";
 import { randomUUID } from "crypto";
 import type { ActiveFilter, FilterOp } from "@/components/ui/FilterBar";
 
@@ -171,8 +171,9 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const extraParams: unknown[] = [];
 
   if (search && typeof search === "string" && search.trim()) {
-    const like = `%${search.trim()}%`;
-    extraClauses.push("(t.full_name LIKE ? OR t.company LIKE ? OR t.title LIKE ?)");
+    // Phase 3.2: escape user wildcards (see companies/index.ts).
+    const like = `%${escapeLike(search.trim())}%`;
+    extraClauses.push("(t.full_name LIKE ? ESCAPE '\\' OR t.company LIKE ? ESCAPE '\\' OR t.title LIKE ? ESCAPE '\\')");
     extraParams.push(like, like, like);
   }
 

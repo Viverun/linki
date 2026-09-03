@@ -1365,19 +1365,89 @@ export async function executeStep(
         return;
       }
 
+      // ── side-effect ledger: same shape as the message step ────────────────
+      // Phase 3.1: this branch previously sent with no ledger row, so a crash
+      // between sendInMail and inmail_sent_at retried the InMail — the exact
+      // F1 the ledger exists to prevent for `message`. The table CHECK
+      // already allowed 'inmail'; only this branch never wrote one.
+      // The fingerprint covers subject+body: both are payload.
+      const stepRef = stepRefOf(step);
+      const legacyRef = legacyStepRefOf(step);
+      const fingerprint = bodyFingerprint(`${inmailSubject}\n${inmailBody}`);
+      const prior = sideEffectFor(db, tr.run_profile_id, tr.track, stepRef, "inmail", legacyRef);
+
+      if (prior?.status === "confirmed") {
+        // Convergent: a previous attempt delivered this and only the
+        // bookkeeping failed. Finish the bookkeeping instead of re-sending.
+        db.prepare("UPDATE targets SET inmail_sent_at = COALESCE(inmail_sent_at, ?), message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?")
+          .run(nowIso(), nowIso(), target.id);
+        trRecordContext(db, tr, { linkedinMessage: inmailBody });
+        trAdvance(db, tr, steps);
+        log(db, runId, target.id, "info", `InMail to ${name} was already delivered — skipping send and advancing`);
+        return;
+      }
+      if (prior?.status === "in_flight") {
+        throw new UnresolvedSideEffectError(
+          `A previous InMail attempt to ${name} may already have been delivered (ledger ${stepRef} still in flight). ` +
+          `Refusing to send again — resolve this manually before retrying.`
+        );
+      }
+      const collision = conflictingFingerprint(db, tr.run_profile_id, tr.target_id, stepRef, fingerprint);
+      if (collision) {
+        throw new UnresolvedSideEffectError(
+          `This exact InMail was already sent to ${name} at step ${collision.step_ref} (now ${stepRef}) — ` +
+          `the campaign was likely re-saved and the step renumbered. Refusing to send a duplicate.`
+        );
+      }
+      // Commit the intent. If this insert fails, nothing is sent.
+      sideEffectBegin(db, tr, stepRef, "inmail", fingerprint);
+
       db.prepare("UPDATE run_profile_tracks SET last_step_at = datetime('now') WHERE id = ?").run(tr.id);
       log(db, runId, target.id, "info", `Sending InMail to ${name}`);
       const page = await getSessionPage(accountId);
       try {
         await premium.inmail.sendInMail(page, freshTarget.sales_nav_url, inmailSubject, inmailBody);
+      } catch (err) {
+        // Same rule as the message step: retract the intent ONLY for errors
+        // that provably precede the Send click; everything else stays
+        // in_flight and fails closed.
+        if (isPreSendFailure(err)) {
+          db.prepare("UPDATE step_side_effects SET status = 'abandoned', error_message = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'inmail'")
+            .run(err instanceof Error ? err.message.slice(0, 500) : String(err), tr.run_profile_id, tr.track, stepRef);
+        } else {
+          db.prepare("UPDATE step_side_effects SET error_message = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'inmail'")
+            .run(
+              `left in_flight — may have been delivered: ${err instanceof Error ? err.message.slice(0, 400) : String(err)}`,
+              tr.run_profile_id, tr.track, stepRef
+            );
+          log(db, runId, target.id, "warn",
+            `${name}: InMail step failed after the send was attempted — leaving the ledger in flight because delivery cannot be ruled out`);
+        }
+        throw err;
       } finally {
-        await page.close();
+        await page.close().catch(() => { /* page already gone */ });
       }
-      await saveSessionState(accountId);
-      db.prepare("UPDATE targets SET inmail_sent_at = ?, message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?").run(nowIso(), nowIso(), target.id);
-      trRecordContext(db, tr, { linkedinMessage: inmailBody });
-      trAdvance(db, tr, steps);
-      log(db, runId, target.id, "info", `InMail sent to ${name}`);
+
+      // ── past this line the InMail HAS been delivered ──────────────────────
+      // Bookkeeping only, mirroring the message step: none of it may throw
+      // out, or Retry re-sends to a real person.
+      try {
+        db.transaction(() => {
+          db.prepare("UPDATE step_side_effects SET status = 'confirmed', confirmed_at = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'inmail'")
+            .run(nowIso(), tr.run_profile_id, tr.track, stepRef);
+          db.prepare("UPDATE targets SET inmail_sent_at = COALESCE(inmail_sent_at, ?), message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?")
+            .run(nowIso(), nowIso(), target.id);
+        })();
+        trRecordContext(db, tr, { linkedinMessage: inmailBody });
+        trAdvance(db, tr, steps);
+        log(db, runId, target.id, "info", `InMail sent to ${name}`);
+      } catch (bookkeepingErr) {
+        log(db, runId, target.id, "error",
+          `InMail to ${name} WAS delivered but bookkeeping failed: ${bookkeepingErr instanceof Error ? bookkeepingErr.message : bookkeepingErr}`);
+      }
+      // Best-effort session cache refresh — never a reason to fail a delivered step.
+      await saveSessionState(accountId).catch(e => log(db, runId, target.id, "warn", `Session cache refresh failed: ${e instanceof Error ? e.message : e}`));
+      return;
 
     } else if (step.step_type === "email") {
       await ensureApolloEnriched(db, target, runId);

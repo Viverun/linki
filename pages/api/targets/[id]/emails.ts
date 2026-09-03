@@ -4,6 +4,7 @@ import { simpleParser } from "mailparser";
 import { getDb } from "@/lib/db";
 import { sendEmail, type EmailAccount } from "@/lib/email/sender";
 import { decryptSecret } from "@/lib/crypto";
+import { emailTlsOptions } from "@/lib/email/tls";
 
 // Email conversation for one contact, account-resolved automatically so callers (incl. the MCP)
 // never need to know the email_account_id.
@@ -130,7 +131,7 @@ async function fetchThread(cfg: ImapConfig, contactEmail: string): Promise<Email
   return new Promise((resolve, reject) => {
     const imap = new Imap({
       host: cfg.host, port: cfg.port, tls: true,
-      tlsOptions: { rejectUnauthorized: false },
+      tlsOptions: emailTlsOptions(),
       user: cfg.user, password: cfg.password,
       authTimeout: 10_000, connTimeout: 12_000,
     });

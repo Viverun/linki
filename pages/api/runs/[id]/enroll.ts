@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { idListError } from "@/lib/api-validate";
 import { randomUUID } from "crypto";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -12,9 +13,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const runId = req.query.id as string;
   const { target_ids } = req.body as { target_ids?: string[] };
 
-  if (!Array.isArray(target_ids) || target_ids.length === 0 || !target_ids.every(t => typeof t === "string")) {
-    return res.status(400).json({ error: "target_ids must be a non-empty array of strings" });
-  }
+  // Phase 3.2: shared shape + size check.
+  const listErr = idListError(target_ids, "target_ids");
+  if (listErr) return res.status(400).json({ error: listErr });
+  const ids = target_ids ?? []; // validated above; ?? [] is for the type checker
 
   const run = db
     .prepare("SELECT id, workflow_id, status FROM runs WHERE id = ?")
@@ -71,15 +73,23 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   let skipped_already_enrolled = 0;
   let skipped_active_elsewhere = 0;
+  let skipped_unknown = 0;
   const eligible: string[] = [];
-  for (const tid of target_ids) {
+  // Phase 3.2: unknown ids used to die later as FK throws → 500. Filter to
+  // existing targets and report them (add-members precedent).
+  const knownIds = new Set(
+    (db.prepare(`SELECT id FROM targets WHERE id IN (${ids.map(() => "?").join(",")})`).all(...ids) as { id: string }[])
+      .map(r => r.id)
+  );
+  for (const tid of ids) {
+    if (!knownIds.has(tid)) { skipped_unknown++; continue; }
     if (alreadyEnrolled.has(tid)) { skipped_already_enrolled++; continue; }
     if (activeElsewhere.has(tid)) { skipped_active_elsewhere++; continue; }
     eligible.push(tid);
   }
 
   if (eligible.length === 0) {
-    return res.json({ enrolled: 0, skipped_already_enrolled, skipped_active_elsewhere });
+    return res.json({ enrolled: 0, skipped_already_enrolled, skipped_active_elsewhere, skipped_unknown });
   }
 
   // Assign email accounts: company-grouped round-robin (same as run creation)
@@ -135,5 +145,6 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     enrolled: eligible.length,
     skipped_already_enrolled,
     skipped_active_elsewhere,
+    skipped_unknown,
   });
 }
