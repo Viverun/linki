@@ -3,6 +3,7 @@ import { useState } from "react";
 import { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import { getDb } from "@/lib/db";
+import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import {
   RiAddLine,
@@ -76,7 +77,9 @@ const STEP_LABEL: Record<string, string> = {
   message: "Message",
 };
 
-export const getServerSideProps: GetServerSideProps = async () => {
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const guard = await requirePageSession(ctx);
+  if (guard) return guard;
   const db = getDb();
 
   // Steps subquery — isolated to avoid row multiplication when joined with runs

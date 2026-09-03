@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import { getDb } from "@/lib/db";
+import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import {
   RiExternalLinkLine, RiArrowLeftSLine, RiArrowRightSLine,
@@ -40,7 +41,9 @@ interface ListOption {
   target_count: number;
 }
 
-export const getServerSideProps: GetServerSideProps = async () => {
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const guard = await requirePageSession(ctx);
+  if (guard) return guard;
   const db = getDb();
   const lists = db
     .prepare(

@@ -4,6 +4,7 @@ import { useRouter } from "next/router";
 import { GetServerSideProps } from "next";
 import { useSession } from "next-auth/react";
 import { getDb } from "@/lib/db";
+import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import {
   RiAddLine, RiDeleteBinLine, RiEditLine, RiMailLine,
@@ -46,7 +47,10 @@ interface Template {
 
 // ─── Server-side data ─────────────────────────────────────────────────────────
 
-export const getServerSideProps: GetServerSideProps = async ({ query }) => {
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const guard = await requirePageSession(ctx);
+  if (guard) return guard;
+  const { query } = ctx;
   const db = getDb();
   const liAccounts = db
     .prepare(

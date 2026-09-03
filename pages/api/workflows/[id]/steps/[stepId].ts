@@ -22,19 +22,25 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "PUT") {
-    const { step_type, template_id, delay_seconds, step_order, connect_note, message_body, email_subject, email_body } = req.body;
-    db.prepare(
-      `UPDATE workflow_steps SET
-        step_type = COALESCE(?, step_type),
-        template_id = COALESCE(?, template_id),
-        delay_seconds = COALESCE(?, delay_seconds),
-        step_order = COALESCE(?, step_order),
-        connect_note = ?,
-        message_body = ?,
-        email_subject = ?,
-        email_body = ?
-       WHERE id = ?`
-    ).run(step_type ?? null, template_id ?? null, delay_seconds ?? null, step_order ?? null, connect_note ?? null, message_body ?? null, email_subject ?? null, email_body ?? null, stepId);
+    const { step_type, template_id, delay_seconds, step_order } = req.body as Record<string, unknown>;
+    // Text bodies are clearable: a key present in the body is written (even
+    // null), an absent key is preserved. The old code wrote `?? null` for
+    // every column, so a partial update nulled the fields it did not send.
+    const textFields = ["connect_note", "message_body", "email_subject", "email_body"] as const;
+    const sets = [
+      "step_type = COALESCE(?, step_type)",
+      "template_id = COALESCE(?, template_id)",
+      "delay_seconds = COALESCE(?, delay_seconds)",
+      "step_order = COALESCE(?, step_order)",
+    ];
+    const vals: unknown[] = [step_type ?? null, template_id ?? null, delay_seconds ?? null, step_order ?? null];
+    for (const key of textFields) {
+      if ((req.body as Record<string, unknown>)[key] !== undefined) {
+        sets.push(`${key} = ?`);
+        vals.push((req.body as Record<string, unknown>)[key]);
+      }
+    }
+    db.prepare(`UPDATE workflow_steps SET ${sets.join(", ")} WHERE id = ?`).run(...vals, stepId);
     return res.json({ ok: true });
   }
 

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { GetServerSideProps } from "next";
 import Link from "next/link";
 import { getDb } from "@/lib/db";
+import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import { RiAddLine, RiDeleteBinLine, RiBuildingLine, RiGlobalLine } from "react-icons/ri";
 
@@ -21,7 +22,9 @@ interface Company {
 
 const BLANK_FORM = { name: "", domain: "", industry: "", location: "", linkedin_url: "", website: "", notes: "" };
 
-export const getServerSideProps: GetServerSideProps = async () => {
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const guard = await requirePageSession(ctx);
+  if (guard) return guard;
   const db = getDb();
   const companies = db.prepare(`
     SELECT c.*, COUNT(t.id) as contact_count

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useState, useRef, useEffect } from "react";
 import { GetServerSideProps } from "next";
 import { getDb } from "@/lib/db";
+import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import {
   RiArrowLeftLine, RiExternalLinkLine, RiMailLine, RiBuilding2Line,
@@ -96,9 +97,11 @@ interface Target {
   lists: ListRef[];
 }
 
-export const getServerSideProps: GetServerSideProps = async ({ params }) => {
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const guard = await requirePageSession(ctx);
+  if (guard) return guard;
   const db = getDb();
-  const id = params?.id as string;
+  const id = ctx.params?.id as string;
   const target = db.prepare("SELECT * FROM targets WHERE id = ?").get(id) as Target | undefined;
   if (!target) return { notFound: true };
   const companyObj = target.company_id

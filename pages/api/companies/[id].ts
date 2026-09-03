@@ -15,22 +15,23 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "PUT") {
-    const { name, domain, industry, location, linkedin_url, website, notes } = req.body;
-    db.prepare(`
-      UPDATE companies SET
-        name = COALESCE(?, name),
-        domain = ?,
-        industry = ?,
-        location = ?,
-        linkedin_url = ?,
-        website = ?,
-        notes = ?
-      WHERE id = ?
-    `).run(
-      name ?? null, domain ?? null, industry ?? null,
-      location ?? null, linkedin_url ?? null, website ?? null, notes ?? null,
-      id
-    );
+    const existing = db.prepare("SELECT id FROM companies WHERE id = ?").get(id);
+    if (!existing) return res.status(404).json({ error: "not found" });
+    // Partial update: only keys present in the body are written, so omitting
+    // a field preserves it while an explicit null clears it. The old code
+    // wrote `field ?? null` for every column, nulling anything the caller
+    // did not send.
+    const allowed = ["name", "domain", "industry", "location", "linkedin_url", "website", "notes"] as const;
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    for (const key of allowed) {
+      if ((req.body as Record<string, unknown>)[key] !== undefined) {
+        sets.push(`${key} = ?`);
+        vals.push((req.body as Record<string, unknown>)[key]);
+      }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: "Nothing to update" });
+    db.prepare(`UPDATE companies SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
     return res.json(db.prepare("SELECT * FROM companies WHERE id = ?").get(id));
   }
 

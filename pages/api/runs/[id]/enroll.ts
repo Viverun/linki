@@ -12,14 +12,22 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const runId = req.query.id as string;
   const { target_ids } = req.body as { target_ids?: string[] };
 
-  if (!Array.isArray(target_ids) || target_ids.length === 0) {
-    return res.status(400).json({ error: "target_ids required" });
+  if (!Array.isArray(target_ids) || target_ids.length === 0 || !target_ids.every(t => typeof t === "string")) {
+    return res.status(400).json({ error: "target_ids must be a non-empty array of strings" });
   }
 
   const run = db
-    .prepare("SELECT id, workflow_id FROM runs WHERE id = ?")
-    .get(runId) as { id: string; workflow_id: string } | undefined;
+    .prepare("SELECT id, workflow_id, status FROM runs WHERE id = ?")
+    .get(runId) as { id: string; workflow_id: string; status: string } | undefined;
   if (!run) return res.status(404).json({ error: "run_not_found" });
+  // Phase 1c: enrolling into a completed run created pending tracks tick()
+  // never picks up — a silent no-op (same class as F2). Only live runs enrol.
+  if (run.status !== "running" && run.status !== "paused") {
+    return res.status(409).json({
+      error: `Cannot enrol into a run with status '${run.status}' — only running or paused runs can enrol.`,
+      status: run.status,
+    });
+  }
 
   // Tracks defined on this workflow
   const workflowTracks = [...new Set(

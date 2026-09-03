@@ -4,6 +4,7 @@ import { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import Link from "next/link";
 import { getDb } from "@/lib/db";
+import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import { OrModel } from "@/components/ui/ModelPicker";
 import FilterBar, { ActiveFilter, filtersToParams, FILTER_FIELDS } from "@/components/ui/FilterBar";
@@ -221,9 +222,11 @@ function formatNextAction(next_step_at: string | null, state: string): string {
 
 // ─── Server-side ──────────────────────────────────────────────────────────────
 
-export const getServerSideProps: GetServerSideProps = async ({ params, query }) => {
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const guard = await requirePageSession(ctx);
+  if (guard) return guard;
   const db = getDb();
-  const id = params?.id as string;
+  const id = ctx.params?.id as string;
   const workflow = db.prepare("SELECT * FROM workflows WHERE id = ?").get(id);
   if (!workflow) return { notFound: true };
 
@@ -301,7 +304,7 @@ export const getServerSideProps: GetServerSideProps = async ({ params, query }) 
       emailAccounts,
       activeRunEmailAccountIds,
       // auto-open wizard if ?setup=1 (redirected from create)
-      autoSetup: query.setup === "1",
+      autoSetup: ctx.query.setup === "1",
     },
   };
 };

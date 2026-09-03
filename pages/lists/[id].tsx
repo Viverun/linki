@@ -4,6 +4,7 @@ import { GetServerSideProps } from "next";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { getDb } from "@/lib/db";
+import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import {
   RiArrowLeftLine, RiDownloadLine, RiExternalLinkLine, RiDeleteBinLine,
@@ -59,9 +60,11 @@ interface Account {
   is_authenticated: number;
 }
 
-export const getServerSideProps: GetServerSideProps = async ({ params }) => {
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const guard = await requirePageSession(ctx);
+  if (guard) return guard;
   const db = getDb();
-  const id = params?.id as string;
+  const id = ctx.params?.id as string;
   const list = db.prepare("SELECT * FROM lists WHERE id = ?").get(id);
   if (!list) return { notFound: true };
   const targets = db

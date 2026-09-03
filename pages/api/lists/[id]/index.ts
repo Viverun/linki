@@ -28,8 +28,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "DELETE") {
-    db.prepare("DELETE FROM runs WHERE list_id = ?").run(id);
-    db.prepare("DELETE FROM lists WHERE id = ?").run(id);
+    // Phase 1c: the two deletes were non-atomic (a crash between them left
+    // runs without a list), and deleting an unknown id still returned 204.
+    // Cascades (runs → profiles → tracks/side-effects/logs, lists →
+    // list_targets) already cover the children — atomicity was the gap.
+    const existing = db.prepare("SELECT id FROM lists WHERE id = ?").get(id);
+    if (!existing) return res.status(404).json({ error: "List not found" });
+    db.transaction(() => {
+      db.prepare("DELETE FROM runs WHERE list_id = ?").run(id);
+      db.prepare("DELETE FROM lists WHERE id = ?").run(id);
+    })();
     return res.status(204).end();
   }
 

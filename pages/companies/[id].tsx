@@ -2,6 +2,7 @@ import Head from "next/head";
 import Link from "next/link";
 import { GetServerSideProps } from "next";
 import { getDb } from "@/lib/db";
+import { requirePageSession } from "@/lib/page-auth";
 import {
   RiArrowLeftLine, RiExternalLinkLine, RiGlobalLine,
   RiMapPinLine, RiBuildingLine, RiLinkedinBoxLine, RiUserLine,
@@ -44,9 +45,11 @@ interface Company {
   contacts: Contact[];
 }
 
-export const getServerSideProps: GetServerSideProps = async ({ params }) => {
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const guard = await requirePageSession(ctx);
+  if (guard) return guard;
   const db = getDb();
-  const id = params?.id as string;
+  const id = ctx.params?.id as string;
   const company = db.prepare(`
     SELECT id, name, domain, industry, location, city, country, linkedin_url, website,
            description, employee_count, founded_year, annual_revenue, phone,

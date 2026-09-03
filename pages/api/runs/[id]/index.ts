@@ -143,6 +143,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "DELETE") {
+    // Phase 1c: deleting a live run orphans in-flight browser work and
+    // mirrors the workflow-delete guard — pause/stop it first.
+    const existing = db.prepare("SELECT status FROM runs WHERE id = ?").get(id) as { status: string } | undefined;
+    if (!existing) return res.status(404).json({ error: "Run not found" });
+    if (existing.status === "running" || existing.status === "paused") {
+      return res.status(409).json({
+        error: `Cannot delete a ${existing.status} run — pause/stop it first.`,
+        status: existing.status,
+      });
+    }
     db.prepare("DELETE FROM runs WHERE id = ?").run(id);
     return res.json({ ok: true });
   }
