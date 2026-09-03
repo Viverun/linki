@@ -267,7 +267,7 @@ test("1b mark_delivered confirms the ledger, stamps the target and advances — 
   assert.equal(track.current_step, 1, "advanced past the delivered step so nothing re-sends");
 });
 
-test("1b mark_delivered is rejected for a non-message (inmail) ledger row", () => {
+test("1b mark_delivered is accepted for an inmail ledger row (operator checks Sent)", () => {
   const ids = scenario({ ledger: { stepRef: "pos:1", status: "in_flight" } });
   const db = getDb();
   db.prepare("UPDATE step_side_effects SET action = 'inmail' WHERE run_profile_id = ?").run(ids.profile);
@@ -276,11 +276,14 @@ test("1b mark_delivered is rejected for a non-message (inmail) ledger row", () =
   const r = callRetry(ids.run, { target_ids: [ids.target], resolve: "mark_delivered" });
 
   const body = r.body as { outcomes: Array<{ outcome: string; reason?: string }> };
-  assert.equal(body.outcomes[0].outcome, "blocked");
-  assert.match(body.outcomes[0].reason ?? "", /message steps only/);
+  assert.equal(body.outcomes[0].outcome, "marked_delivered");
   assert.equal(
     (db.prepare("SELECT status FROM step_side_effects WHERE run_profile_id = ?").get(ids.profile) as { status: string }).status,
-    "in_flight", "ledger untouched");
+    "confirmed", "ledger confirmed by operator assertion");
+  const t = db.prepare("SELECT inmail_sent_at, message_sent_at FROM targets WHERE id = ?").get(ids.target) as
+    { inmail_sent_at: string | null; message_sent_at: string | null };
+  assert.ok(t.inmail_sent_at, "inmail_sent_at stamped");
+  assert.ok(t.message_sent_at, "message_sent_at stamped alongside");
 });
 
 test("1b mark_delivered is rejected when there is no in_flight row", () => {
@@ -290,7 +293,7 @@ test("1b mark_delivered is rejected when there is no in_flight row", () => {
 
   const body = r.body as { outcomes: Array<{ outcome: string; reason?: string }> };
   assert.equal(body.outcomes[0].outcome, "blocked");
-  assert.match(body.outcomes[0].reason ?? "", /requires an in-flight message ledger row/);
+  assert.match(body.outcomes[0].reason ?? "", /requires an in-flight message\/InMail ledger row/);
   assert.equal(trackOf(ids.track).state, "failed", "not re-armed");
 });
 

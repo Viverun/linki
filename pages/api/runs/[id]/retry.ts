@@ -137,7 +137,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         if (resolution === "mark_delivered") {
           outcomes.push({
             track_id: c.id, target_id: c.target_id, outcome: "blocked",
-            reason: `mark_delivered applies to message steps only, not ${step?.step_type ?? "an unknown step"}`,
+            reason: `mark_delivered applies to message/InMail steps only, not ${step?.step_type ?? "an unknown step"}`,
           });
           continue;
         }
@@ -185,23 +185,29 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
       if (ledger?.status === "in_flight") {
         if (resolution === "mark_delivered") {
-          if (action !== "message") {
+          if (action !== "message" && action !== "inmail") {
             outcomes.push({
               track_id: c.id, target_id: c.target_id, outcome: "blocked",
-              reason: `mark_delivered applies to message steps only, not ${action}`,
+              reason: `mark_delivered applies to message/InMail steps only, not ${action}`,
             });
             continue;
           }
           // Operator asserts they checked LinkedIn and the message arrived.
           // Records the assertion, advances past the step. No send, no browser.
+          // Phase 5: extended to InMail (operator checks the Sent folder) —
+          // the F2 note's symmetric stamp for connect's self-heal.
           db.prepare(
             `UPDATE step_side_effects SET status = 'confirmed', confirmed_at = ?, error_message = ?
-             WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'message'`
-          ).run(new Date().toISOString(), OPERATOR_ASSERTION, c.run_profile_id, c.track, ledger.step_ref);
+             WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
+          ).run(new Date().toISOString(), OPERATOR_ASSERTION, c.run_profile_id, c.track, ledger.step_ref, action);
           db.prepare("UPDATE targets SET message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?")
             .run(new Date().toISOString(), c.target_id);
+          if (action === "inmail") {
+            db.prepare("UPDATE targets SET inmail_sent_at = COALESCE(inmail_sent_at, ?) WHERE id = ?")
+              .run(new Date().toISOString(), c.target_id);
+          }
           advance.run(c.current_step + 1, stepIdAt(c.workflow_id, c.track, c.current_step + 1), c.id);
-          console.warn(`[retry] run=${runId} track=${c.id} operator MARKED a possibly-delivered message as delivered (no send performed)`);
+          console.warn(`[retry] run=${runId} track=${c.id} operator MARKED a possibly-delivered ${action} as delivered (no send performed)`);
           outcomes.push({
             track_id: c.id, target_id: c.target_id, outcome: "marked_delivered",
             reason: OPERATOR_ASSERTION,
@@ -220,7 +226,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (resolution === "mark_delivered") {
         outcomes.push({
           track_id: c.id, target_id: c.target_id, outcome: "blocked",
-          reason: "mark_delivered requires an in-flight message ledger row; this track has none",
+          reason: "mark_delivered requires an in-flight message/InMail ledger row; this track has none",
         });
         continue;
       }

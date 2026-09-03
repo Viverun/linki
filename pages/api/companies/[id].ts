@@ -38,6 +38,8 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (req.method === "DELETE") {
     // Unlink contacts first, then delete company
+    const existing = db.prepare("SELECT id FROM companies WHERE id = ?").get(id);
+    if (!existing) return res.status(404).json({ error: "not found" });
     db.prepare("UPDATE targets SET company_id = NULL WHERE company_id = ?").run(id);
     db.prepare("DELETE FROM companies WHERE id = ?").run(id);
     return res.json({ ok: true });

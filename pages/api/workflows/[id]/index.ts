@@ -39,6 +39,8 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (req.method === "PATCH") {
     const { is_archived } = req.body;
+    const existing = db.prepare("SELECT id FROM workflows WHERE id = ?").get(id);
+    if (!existing) return res.status(404).json({ error: "Workflow not found" });
     if (is_archived !== undefined) {
       db.prepare("UPDATE workflows SET is_archived = ? WHERE id = ?").run(is_archived ? 1 : 0, id);
     }

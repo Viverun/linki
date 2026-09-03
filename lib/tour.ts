@@ -6,15 +6,9 @@
 
 import { driver, type DriveStep } from "driver.js";
 import "driver.js/dist/driver.css";
+import type { TourPage } from "@/lib/tour-pages";
 
-export type TourPage =
-  | "dashboard"
-  | "lists"
-  | "contacts"
-  | "companies"
-  | "workflows"
-  | "inbox"
-  | "settings";
+export type { TourPage };
 
 // Steps whose `element` selector isn't in the DOM are silently skipped by driver.js —
 // relied on here so a step referencing a premium-only anchor (Todos nav, InMail, MCP)
@@ -276,7 +270,7 @@ export async function getSeenTours(): Promise<Set<TourPage>> {
   }
 }
 
-export const ALL_TOUR_PAGES: TourPage[] = ["dashboard", "lists", "contacts", "companies", "workflows", "inbox", "settings"];
+export { ALL_TOUR_PAGES } from "@/lib/tour-pages";
 
 export const TOUR_PAGE_LABELS: Record<TourPage, string> = {
   dashboard: "Dashboard",

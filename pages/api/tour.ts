@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { ALL_TOUR_PAGES } from "@/lib/tour-pages";
 
 // Per-page product tour "seen" flags, stored as app_settings rows (tour_seen_<page>).
 // Single-user tool — no per-account state needed, so a global key/value flag is enough.
@@ -17,6 +18,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === "POST") {
     const { page } = req.body as { page?: string };
     if (!page) return res.status(400).json({ error: "page is required" });
+    // Phase 5: the suffix becomes an app_settings key — restrict it to the
+    // known tour pages so arbitrary keys can't be written here.
+    if (!(ALL_TOUR_PAGES as readonly string[]).includes(page)) {
+      return res.status(400).json({ error: `unknown tour page: ${page}` });
+    }
     db.prepare(
       `INSERT INTO app_settings (key, value, updated_at) VALUES (?, '1', datetime('now'))
        ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = datetime('now')`

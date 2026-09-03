@@ -27,6 +27,12 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     const { key, api_key } = req.body;
     if (!key) return res.status(400).json({ error: "key required" });
     if (!api_key) return res.status(400).json({ error: "api_key required" });
+    // Phase 5: keys become column values and masked labels — keep them short
+    // slugs rather than arbitrary strings. (A closed allowlist would freeze
+    // out future ee/ keys; the readers only ever look up 'apollo'/'openrouter'.)
+    if (typeof key !== "string" || !/^[a-z0-9_-]{1,32}$/.test(key)) {
+      return res.status(400).json({ error: "key must be a short slug: [a-z0-9_-], max 32 chars" });
+    }
     db.prepare(`
       INSERT INTO integrations (key, api_key, updated_at)
       VALUES (?, ?, datetime('now'))
