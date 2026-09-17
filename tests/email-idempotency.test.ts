@@ -47,7 +47,9 @@ const smtpError = (s: SmtpShape) => Object.assign(new Error("synthetic smtp fail
 const failBefore = (s: SmtpShape) => { transport = async () => { throw smtpError(s); }; };
 /** Records the send, THEN throws: the message may be on the wire. */
 const failAfter = (s: SmtpShape) => { transport = async rec => { sends.push(rec); throw smtpError(s); }; };
-const accept = () => { transport = async rec => ({ accepted: [rec.to], rejected: [], messageId: "<m@fake>" }); };
+// Models Nodemailer's real behaviour: `accepted` is built from its normalized
+// envelope (trimmed, domain lowercased/punycoded), not an echo of the raw `to`.
+const accept = () => { transport = async rec => ({ accepted: [rec.to.trim().toLowerCase()], rejected: [], messageId: "<m@fake>" }); };
 const rejectAll = () => { transport = async rec => ({ accepted: [], rejected: [rec.to], messageId: null }); };
 
 // ─── fixtures ───────────────────────────────────────────────────────────────
@@ -59,7 +61,7 @@ const RENDERED_SUBJECT = "Quick question, Ada";
 const RENDERED_BODY = "Hi Ada, following up on our connection.";
 let seq = 0;
 
-function scenario(steps: Array<{ subject: string; body: string }> = [{ subject: SUBJECT, body: BODY }], opts: { currentStep?: number } = {}) {
+function scenario(steps: Array<{ subject: string; body: string }> = [{ subject: SUBJECT, body: BODY }], opts: { currentStep?: number; email?: string } = {}) {
   const n = ++seq;
   const ids = { run: `run-${n}`, wf: `wf-${n}`, profile: `profile-${n}`, track: `track-${n}`, target: `target-${n}`, email: `ea-${n}` };
   const db = getDb();
@@ -74,7 +76,7 @@ function scenario(steps: Array<{ subject: string; body: string }> = [{ subject: 
   ).run(ids.email);
   db.prepare("INSERT INTO runs (id, workflow_id, status, email_account_id) VALUES (?, ?, 'running', ?)").run(ids.run, ids.wf, ids.email);
   db.prepare("INSERT INTO targets (id, full_name, first_name, linkedin_url, email) VALUES (?, 'Ada Lovelace', 'Ada', ?, ?)")
-    .run(ids.target, `https://www.linkedin.com/in/ada-${n}/`, `ada-${n}@fixture.test`);
+    .run(ids.target, `https://www.linkedin.com/in/ada-${n}/`, opts.email ?? `ada-${n}@fixture.test`);
   db.prepare("INSERT INTO run_profiles (id, run_id, target_id, email_account_id) VALUES (?, ?, ?, ?)").run(ids.profile, ids.run, ids.target, ids.email);
   db.prepare(
     `INSERT INTO run_profile_tracks (id, run_profile_id, track, state, current_step, current_step_id, next_step_at)
@@ -96,6 +98,8 @@ const ledger = (profileId: string) =>
 const track = (id: string) =>
   getDb().prepare("SELECT state, current_step, error_message, last_email_subject FROM run_profile_tracks WHERE id = ?").get(id) as
     { state: string; current_step: number; error_message: string | null; last_email_subject: string | null };
+const targetMessageSentAt = (targetId: string) =>
+  (getDb().prepare("SELECT message_sent_at FROM targets WHERE id = ?").get(targetId) as { message_sent_at: string | null }).message_sent_at;
 function callRetry(runId: string, body: unknown) {
   const captured = { status: 200, body: undefined as unknown };
   const res = { status(c: number) { captured.status = c; return this; }, json(p: unknown) { captured.body = p; return this; }, end() { return this; } };
@@ -172,6 +176,7 @@ test("E5 mark_delivered on an in-flight email advances with zero sends", async (
   assert.equal(sends.length, 0);
   assert.equal(track(s.ids.track).state, "in_progress");
   assert.equal(track(s.ids.track).current_step, 1);
+  assert.equal(targetMessageSentAt(s.ids.target), null, "email mark_delivered must not stamp message_sent_at");
 });
 
 test("E6 resend on an in-flight email sends exactly once more", async () => {
@@ -225,4 +230,25 @@ test("E10 a bookkeeping failure after acceptance leaves the row confirmed and se
   assert.equal(sends.length, 1);
   assert.equal(ledger(s.ids.profile)[0].status, "confirmed");
   assert.notEqual(track(s.ids.track).state, "failed", "a delivered email must never look like a send failure");
+  // The trigger is gone now, so a retry + re-entry must find the row already
+  // confirmed and send nothing more.
+  callRetry(s.ids.run, { target_ids: [s.ids.target] });
+  await run(reload(s));
+  assert.equal(sends.length, 1, "a confirmed row must refuse to send again on retry");
+});
+
+test("E11 acceptance is judged by accepted.length, not raw address equality", async () => {
+  reset();
+  const s = scenario([{ subject: SUBJECT, body: BODY }], { email: "Ada@Example.COM" });
+  // accept() normalizes rec.to (trim + lowercase) the way Nodemailer's real
+  // envelope does — targets.email stores the raw mixed-case address, so a
+  // naive string comparison against sendResult.accepted would wrongly abandon
+  // a message the server actually accepted.
+  await run(s);
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].to, "Ada@Example.COM");
+  const [row] = ledger(s.ids.profile);
+  assert.equal(row.status, "confirmed");
+  assert.equal(track(s.ids.track).state, "completed");
+  assert.equal(callRetry(s.ids.run, { target_ids: [s.ids.target] }).outcomes.length, 0, "nothing failed, nothing to retry");
 });

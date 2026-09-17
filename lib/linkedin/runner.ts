@@ -1640,7 +1640,14 @@ export async function executeStep(
         throw err;
       }
 
-      if (!sendResult.accepted.includes(freshTarget.email)) {
+      // We send exactly one recipient per call, so `accepted.length === 0` is
+      // the rejected condition. Do NOT string-compare against freshTarget.email:
+      // Nodemailer normalizes its envelope (trimmed, domain lowercased/punycoded)
+      // before populating `accepted`, but targets.email is only lowercased by CSV
+      // import — POST /api/targets, PATCH and Apollo enrichment store it raw. A
+      // mixed-case or padded address would then never match `.includes(...)`
+      // even though the server accepted it, abandoning a delivered email.
+      if (sendResult.accepted.length === 0) {
         // Resolved without a throw but the recipient was not accepted (all rejected).
         setEmailLedger.run("abandoned", `rejected: server did not accept ${freshTarget.email}`, null, tr.run_profile_id, tr.track, emailStepRef);
         trFail(db, tr, `Email rejected by server for ${freshTarget.email}`);
@@ -1652,9 +1659,12 @@ export async function executeStep(
       // Everything below is bookkeeping. None of it may throw out of this branch.
       try {
         setEmailLedger.run("confirmed", null, nowIso(), tr.run_profile_id, tr.track, emailStepRef);
+        // Logged here, not after trAdvance: the daily-limit guard counts rows
+        // matching `logs.message LIKE 'Email sent%'`, so a bookkeeping throw
+        // below must not hide an accepted send from that count.
+        log(db, runId, target.id, "info", `Email sent to ${name}`);
         trRecordContext(db, tr, { emailSubject, emailBody });
         trAdvance(db, tr, steps);
-        log(db, runId, target.id, "info", `Email sent to ${name}`);
       } catch (bookkeepingErr) {
         log(db, runId, target.id, "error",
           `Email to ${name} WAS accepted by the server but bookkeeping failed: ${bookkeepingErr instanceof Error ? bookkeepingErr.message : bookkeepingErr}`);

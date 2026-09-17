@@ -293,7 +293,7 @@ test("1b mark_delivered is rejected when there is no in_flight row", () => {
 
   const body = r.body as { outcomes: Array<{ outcome: string; reason?: string }> };
   assert.equal(body.outcomes[0].outcome, "blocked");
-  assert.match(body.outcomes[0].reason ?? "", /requires an in-flight message\/InMail ledger row/);
+  assert.match(body.outcomes[0].reason ?? "", /requires an in-flight message\/InMail\/email ledger row/);
   assert.equal(trackOf(ids.track).state, "failed", "not re-armed");
 });
 

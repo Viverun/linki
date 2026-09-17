@@ -231,7 +231,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (resolution === "mark_delivered") {
         outcomes.push({
           track_id: c.id, target_id: c.target_id, outcome: "blocked",
-          reason: "mark_delivered requires an in-flight message/InMail ledger row; this track has none",
+          reason: "mark_delivered requires an in-flight message/InMail/email ledger row; this track has none",
         });
         continue;
       }
