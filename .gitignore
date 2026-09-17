@@ -79,3 +79,6 @@ docs/OPSILY_GHCR_ACCESS.md
 # ephemeral session state, does not reliably do. Its sibling
 # .claude/settings.local.json is already ignored globally the same way.
 .claude/
+
+# superpowers SDD scratch (ledgers, briefs, review packages)
+.superpowers/
