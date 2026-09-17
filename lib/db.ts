@@ -330,6 +330,51 @@ function backfillCurrentStepId(db: Database.Database) {
   }
 }
 
+const STEP_SIDE_EFFECTS_COLUMNS =
+  "id, run_profile_id, track, step_ref, target_id, action, status, body_fingerprint, attempt_count, started_at, confirmed_at, error_message";
+
+/** The one definition of the ledger table; `name` lets the rebuild create it under a temporary name. */
+const stepSideEffectsDdl = (name: string) => `CREATE TABLE IF NOT EXISTS ${name} (
+      id                TEXT PRIMARY KEY,
+      run_profile_id    TEXT NOT NULL REFERENCES run_profiles(id) ON DELETE CASCADE,
+      track             TEXT NOT NULL,
+      step_ref          TEXT NOT NULL,
+      target_id         TEXT NOT NULL,
+      action            TEXT NOT NULL CHECK(action IN ('message', 'inmail', 'email')),
+      status            TEXT NOT NULL CHECK(status IN ('in_flight', 'confirmed', 'abandoned')),
+      body_fingerprint  TEXT,
+      attempt_count     INTEGER NOT NULL DEFAULT 1,
+      started_at        TEXT NOT NULL,
+      confirmed_at      TEXT,
+      error_message     TEXT
+    )`;
+const STEP_SIDE_EFFECTS_INDEXES = [
+  "CREATE UNIQUE INDEX IF NOT EXISTS ux_step_side_effects ON step_side_effects(run_profile_id, track, step_ref, action)",
+  // Layer 2 lookup: has this exact rendered body already gone to this person in
+  // this enrolment under a DIFFERENT step_ref? Catches the position-shift case,
+  // where re-saving a campaign renumbers an already-delivered message.
+  "CREATE INDEX IF NOT EXISTS ix_step_side_effects_fingerprint ON step_side_effects(run_profile_id, target_id, body_fingerprint)",
+];
+
+/** Only errors that mean "this migration was already applied" are tolerated. */
+const isAlreadyApplied = (err: unknown) =>
+  err instanceof Error && /duplicate column name|already exists/i.test(err.message);
+
+/**
+ * C2-A (PR-02): `action` gains 'email'. SQLite cannot alter a CHECK constraint,
+ * so an existing table is rebuilt under the same transaction as the rest of the
+ * loop: a failure anywhere leaves the old table exactly as it was.
+ */
+function widenStepSideEffectActions(db: Database.Database) {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='step_side_effects'").get() as { sql: string } | undefined;
+  if (!row || row.sql.includes("'email'")) return;
+  db.exec(stepSideEffectsDdl("step_side_effects_new"));
+  db.exec(`INSERT INTO step_side_effects_new (${STEP_SIDE_EFFECTS_COLUMNS}) SELECT ${STEP_SIDE_EFFECTS_COLUMNS} FROM step_side_effects`);
+  db.exec("DROP TABLE step_side_effects");
+  db.exec("ALTER TABLE step_side_effects_new RENAME TO step_side_effects");
+  for (const sql of STEP_SIDE_EFFECTS_INDEXES) db.exec(sql);
+}
+
 function runMigrations(db: Database.Database) {
   // Add columns introduced after initial schema — safe to run on existing DBs
   const migrations = [
@@ -605,25 +650,8 @@ function runMigrations(db: Database.Database) {
     // stable across re-saves and is the identity a human means by "follow-up #2".
     // SWITCHED to "stepid:<uuid>" by X3.3, now that steps have stable ids. The
     // so the two schemes can coexist with no data migration.
-    `CREATE TABLE IF NOT EXISTS step_side_effects (
-      id                TEXT PRIMARY KEY,
-      run_profile_id    TEXT NOT NULL REFERENCES run_profiles(id) ON DELETE CASCADE,
-      track             TEXT NOT NULL,
-      step_ref          TEXT NOT NULL,
-      target_id         TEXT NOT NULL,
-      action            TEXT NOT NULL CHECK(action IN ('message', 'inmail')),
-      status            TEXT NOT NULL CHECK(status IN ('in_flight', 'confirmed', 'abandoned')),
-      body_fingerprint  TEXT,
-      attempt_count     INTEGER NOT NULL DEFAULT 1,
-      started_at        TEXT NOT NULL,
-      confirmed_at      TEXT,
-      error_message     TEXT
-    )`,
-    "CREATE UNIQUE INDEX IF NOT EXISTS ux_step_side_effects ON step_side_effects(run_profile_id, track, step_ref, action)",
-    // Layer 2 lookup: has this exact rendered body already gone to this person in
-    // this enrolment under a DIFFERENT step_ref? Catches the position-shift case,
-    // where re-saving a campaign renumbers an already-delivered message.
-    "CREATE INDEX IF NOT EXISTS ix_step_side_effects_fingerprint ON step_side_effects(run_profile_id, target_id, body_fingerprint)",
+    stepSideEffectsDdl("step_side_effects"),
+    ...STEP_SIDE_EFFECTS_INDEXES,
     // P2-3. Stable step identity. `current_step` is an INDEX into an ordered
     // list that the UI rebuilds from scratch on every save, so it names a
     // different step whenever the campaign is edited — the N3 class. This column
@@ -634,9 +662,18 @@ function runMigrations(db: Database.Database) {
     "ALTER TABLE run_profile_tracks ADD COLUMN current_step_id TEXT",
     "CREATE INDEX IF NOT EXISTS ix_rpt_current_step_id ON run_profile_tracks(current_step_id)",
   ];
-  for (const sql of migrations) {
-    try { db.exec(sql); } catch { /* column already exists */ }
-  }
+  // C2-A (PR-04): only "already applied" errors are tolerated. Anything else —
+  // a lock, a malformed statement, a missing column — propagates out of
+  // initialiseConnection, where getDb() closes the orphan handle and leaves the
+  // singleton unset, so the process fails loudly and the next getDb() re-runs
+  // from an unchanged schema. IMMEDIATE so a concurrent reader never sees a
+  // half-migrated schema.
+  db.transaction(() => {
+    for (const sql of migrations) {
+      try { db.exec(sql); } catch (err) { if (!isAlreadyApplied(err)) throw err; }
+    }
+    widenStepSideEffectActions(db);
+  }).immediate();
 
   backfillCurrentStepId(db);
 
