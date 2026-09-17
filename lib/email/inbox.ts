@@ -198,7 +198,7 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
       host: account.imap_host!,
       port: account.imap_port ?? 993,
       tls: true,
-      tlsOptions: emailTlsOptions(),
+      tlsOptions: emailTlsOptions(account.imap_host!),
       user: imapUser,
       password: imapPass,
       authTimeout: 10_000,

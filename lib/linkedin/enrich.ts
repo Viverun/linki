@@ -11,6 +11,7 @@
  */
 import type { BrowserContext } from "playwright";
 import { getDb } from "@/lib/db";
+import { isAllowedSalesNavLeadUrl } from "@/lib/linkedin-url";
 
 interface EnrichedPosition {
   title: string;
@@ -40,10 +41,24 @@ export async function enrichProfile(
   ctx: BrowserContext,
   target: { id: string; sales_nav_url: string; full_name: string }
 ): Promise<boolean> {
+  if (!isAllowedSalesNavLeadUrl(target.sales_nav_url)) return false;
+
   const db = getDb();
   const page = await ctx.newPage();
 
   try {
+    let navigationBlocked = false;
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame() &&
+          !isAllowedSalesNavLeadUrl(request.url())) {
+        navigationBlocked = true;
+        await route.abort();
+        return;
+      }
+      await route.continue();
+    });
+
     // Box it so the async response listener can mutate it (TS can't narrow across async callbacks)
     const box: { data: SalesNavProfileData | null } = { data: null };
 
@@ -65,7 +80,9 @@ export async function enrichProfile(
     });
 
     await page.goto(target.sales_nav_url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    if (navigationBlocked || !isAllowedSalesNavLeadUrl(page.url())) return false;
     await page.waitForTimeout(8000);
+    if (navigationBlocked || !isAllowedSalesNavLeadUrl(page.url())) return false;
 
     const intercepted = box.data;
     if (!intercepted) {

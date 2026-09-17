@@ -30,12 +30,16 @@ process.env.AUTH_PASSWORD = "the-invite-code-and-login-password";
 // test, it is a coin flip.
 let hashCalls = 0;
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 const fakeBcrypt = {
   async hash() { hashCalls++; return "$2a$10$fakehashfortests"; },
   async compare() { return false; },
 };
-mockModule("bcryptjs", { exports: { default: fakeBcrypt, ...fakeBcrypt } });
+// Node 22's mock.module REPLACES a CJS namespace and its shim cannot emit a
+// `default` binding ("export let default" is a SyntaxError), so the mocked
+// module must expose `hash` as a NAMED export — matching the route's
+// `import { hash } from "bcryptjs"` — and must not carry a default key.
+mockModule("bcryptjs", { namedExports: { ...fakeBcrypt } });
 
 const { default: signup } = await import("@/pages/api/auth/signup");
 const { getDb } = await import("@/lib/db");

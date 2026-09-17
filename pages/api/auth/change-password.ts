@@ -1,15 +1,16 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "./[...nextauth]";
-import bcrypt from "bcryptjs";
+import { getToken } from "next-auth/jwt";
+import { getSessionUser } from "@/lib/auth";
+import { compare, hash } from "bcryptjs";
 import { getDb } from "@/lib/db";
 import { methodNotAllowed } from "@/lib/api-validate";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
 
-  const session = await getServerSession(req, res, authOptions);
-  if (!session?.user?.email) return res.status(401).json({ error: "Not authenticated" });
+  const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET }).catch(() => null);
+  const sessionUser = getSessionUser(token);
+  if (!sessionUser) return res.status(401).json({ error: "Not authenticated" });
 
   const { currentPassword, newPassword } = req.body as {
     currentPassword?: string;
@@ -25,16 +26,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const db = getDb();
   const user = db
-    .prepare("SELECT id, password_hash FROM users WHERE email = ?")
-    .get(session.user.email) as { id: string; password_hash: string } | undefined;
+    .prepare("SELECT id, password_hash FROM users WHERE id = ? AND session_version = ?")
+    .get(sessionUser.id, sessionUser.session_version) as { id: string; password_hash: string } | undefined;
 
-  if (!user) return res.status(404).json({ error: "User not found." });
+  if (!user) return res.status(401).json({ error: "Not authenticated" });
 
-  const valid = await bcrypt.compare(currentPassword, user.password_hash);
+  const valid = await compare(currentPassword, user.password_hash);
   if (!valid) return res.status(400).json({ error: "Current password is incorrect." });
 
-  const hash = await bcrypt.hash(newPassword, 10);
-  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(hash, user.id);
+  const passwordHash = await hash(newPassword, 10);
+  const result = db.prepare(
+    "UPDATE users SET password_hash = ?, session_version = session_version + 1 WHERE id = ? AND session_version = ? AND password_hash = ?"
+  ).run(passwordHash, user.id, sessionUser.session_version, user.password_hash);
+  if (result.changes !== 1) return res.status(401).json({ error: "Not authenticated" });
 
   return res.status(200).json({ ok: true });
 }

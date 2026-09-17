@@ -47,7 +47,11 @@ export function ModelPicker({ models, value, onChange, placeholder = "Select a m
   function toggleProvider(p: string) {
     setCollapsedProviders(prev => {
       const n = new Set(prev);
-      n.has(p) ? n.delete(p) : n.add(p);
+      if (n.has(p)) {
+        n.delete(p);
+      } else {
+        n.add(p);
+      }
       return n;
     });
   }

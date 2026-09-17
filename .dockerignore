@@ -6,11 +6,11 @@ node_modules
 *.db-wal
 data/
 # Exclude local/dev scripts, but KEEP the build-critical ones: the Docker build runs
-# `npm run build` → prebuild → scripts/mirror-ee.js (open-core mirror; no-ops without ee/).
-# strip-mirrored-pages.js is kept alongside it for consistency. See docs/OPEN_CORE.md.
+# `npm run build` → prebuild → scripts/mirror-ee.mjs (open-core mirror; no-ops without ee/).
+# strip-mirrored-pages.mjs is kept alongside it for consistency. See docs/OPEN_CORE.md.
 scripts/*
-!scripts/mirror-ee.js
-!scripts/strip-mirrored-pages.js
+!scripts/mirror-ee.mjs
+!scripts/strip-mirrored-pages.mjs
 # Also KEEP the live LinkedIn retest harness: it has to run INSIDE the container,
 # where the pinned Chromium and the mounted /data/linki.db session live — running
 # it on the host would use a different browser fingerprint. retest-connect.ts is

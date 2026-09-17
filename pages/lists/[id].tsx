@@ -141,7 +141,6 @@ export default function ListDetailPage({
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [allFilteredSelected, setAllFilteredSelected] = useState(false);
-  const [deleting, setDeleting] = useState(false);
 
   const [showImport, setShowImport] = useState(false);
   const [importSource, setImportSource] = useState<"pick" | "sales_nav" | "csv">("pick");
@@ -229,32 +228,21 @@ export default function ListDetailPage({
   }
 
   function toggleOne(id: string) {
-    setSelected((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) {
+        n.delete(id);
+      } else {
+        n.add(id);
+      }
+      return n;
+    });
   }
 
   const effectiveSelectedIds = allFilteredSelected
     ? filteredTargets.map((t) => t.id)
     : [...selected];
   const effectiveSelectedCount = allFilteredSelected ? filteredTargets.length : selected.size;
-
-  async function deleteSelected() {
-    if (effectiveSelectedCount === 0) return;
-    setDeleting(true);
-    const res = await fetch(`/api/lists/${initialList.id}/targets`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_ids: effectiveSelectedIds }),
-    });
-    setDeleting(false);
-    if (!res.ok) { toast.error("Failed to remove leads"); return; }
-    const data = await res.json();
-    toast.success(`Removed ${data.removed} lead${data.removed !== 1 ? "s" : ""}`);
-    const removedSet = new Set(effectiveSelectedIds);
-    setTargets((prev) => prev.filter((t) => !removedSet.has(t.id)));
-    setSelected(new Set());
-    setAllFilteredSelected(false);
-    setPage(0);
-  }
 
   async function removeFromList() {
     if (effectiveSelectedCount === 0) return;
@@ -363,10 +351,6 @@ export default function ListDetailPage({
     setImportSource("pick");
     setCsvFile(null);
     setCsvResult(null);
-  }
-
-  function downloadCsvTemplate() {
-    window.location.href = `/api/lists/${initialList.id}/csv-template`;
   }
 
   async function runCsvImport(e: React.FormEvent) {
@@ -582,7 +566,6 @@ export default function ListDetailPage({
                   <button
                     className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium bg-error/10 text-error border border-error/20 hover:bg-error/20 transition-colors"
                     onClick={removeFromList}
-                    disabled={deleting}
                   >
                     <RiDeleteBinLine size={12} /> Remove from list
                   </button>
@@ -887,13 +870,13 @@ export default function ListDetailPage({
                 </div>
 
                 <form onSubmit={runCsvImport} className="flex flex-col gap-3">
-                  <button
-                    type="button"
+                  <a
+                    href={`/api/lists/${initialList.id}/csv-template`}
+                    download
                     className="inline-flex items-center gap-1.5 self-start text-xs font-medium text-primary hover:underline"
-                    onClick={downloadCsvTemplate}
                   >
                     <RiDownloadLine size={13} /> Download template
-                  </button>
+                  </a>
                   <div>
                     <label className="label text-xs text-base-content/50 pb-1">CSV file</label>
                     <input

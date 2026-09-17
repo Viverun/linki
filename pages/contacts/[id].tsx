@@ -144,7 +144,7 @@ export const getServerSideProps: GetServerSideProps = async (ctx) => {
 
   const campaignHistory: CampaignRun[] = runRows.map((r) => ({
     ...r,
-    logs: (logsByRun[r.run_id] ?? []).map(({ run_id: _rid, ...l }) => l),
+    logs: (logsByRun[r.run_id] ?? []).map(({ id, level, message, created_at }) => ({ id, level, message, created_at })),
   }));
 
   const todos = db.prepare(

@@ -18,7 +18,7 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-visit-degree-tests";
 // `namedExports` option. Node 24 deprecates that in favour of `exports`.
 // Bound, not detached — mock.module reads private state off `mock`.
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 type Observation = "first_degree" | "not_first_degree" | "inconclusive";
 interface VisitResult { degree: Observation; isFirstDegree: boolean; messagingUrn: string | null }
@@ -36,7 +36,7 @@ const observe = (degree: Observation, messagingUrn: string | null = null): Visit
 });
 
 mockModule("@/lib/linkedin/visit", {
-  exports: {
+  namedExports: {
     ...realVisit,
     visitProfile: async () => {
       visitCalls++;
@@ -48,7 +48,7 @@ mockModule("@/lib/linkedin/visit", {
 
 const realSession = await import("@/lib/linkedin/session");
 mockModule("@/lib/linkedin/session", {
-  exports: {
+  namedExports: {
     ...realSession,
     getSessionPage: async () => ({ close: async () => {} }),
     saveSessionState: async () => {},

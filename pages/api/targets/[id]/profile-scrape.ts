@@ -1,7 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { getSessionContext } from "@/lib/linkedin/session";
-import { scrapeProfile } from "@/lib/linkedin/profile-scrape";
+import { InvalidSalesNavUrlError, ProfileNavigationError, scrapeProfile } from "@/lib/linkedin/profile-scrape";
+import { isAllowedSalesNavLeadUrl } from "@/lib/linkedin-url";
 import { resolveLinkedInAccount } from "@/lib/linkedin/resolve-account";
 
 // POST /api/targets/[id]/profile-scrape
@@ -20,6 +21,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!target) return res.status(404).json({ error: "Contact not found" });
   if (!target.sales_nav_url) {
     return res.status(400).json({ error: "Contact has no Sales Navigator URL — re-import the list to capture it." });
+  }
+
+  if (!isAllowedSalesNavLeadUrl(target.sales_nav_url)) {
+    return res.status(400).json({ error: new InvalidSalesNavUrlError().message });
   }
 
   const account = resolveLinkedInAccount(db, id, req.body?.account_id);
@@ -52,6 +57,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.json({ contact_id: id, account_id: account.id, profile });
   } catch (err) {
+    if (err instanceof InvalidSalesNavUrlError) return res.status(400).json({ error: err.message });
+    if (err instanceof ProfileNavigationError) return res.status(502).json({ error: err.message });
     const message = err instanceof Error ? err.message : String(err);
     // A dead session surfaces as "No data intercepted" / re-auth — flag it so the runner stops.
     if (/re-authentication|No data intercepted|login|checkpoint/i.test(message)) {

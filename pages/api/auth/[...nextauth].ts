@@ -1,10 +1,17 @@
-import NextAuth, { NextAuthOptions } from "next-auth";
+import NextAuth, { type NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
-import bcrypt from "bcryptjs";
+import { compare } from "bcryptjs";
 import { getDb } from "@/lib/db";
 import { isRateLimited } from "@/lib/rate-limit";
+import { getSessionUser } from "@/lib/auth";
 
-type UserRow = { id: string; email: string; password_hash: string };
+declare module "next-auth" {
+  interface User {
+    sessionVersion?: number;
+  }
+}
+
+type UserRow = { id: string; email: string; password_hash: string; session_version: number };
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -24,18 +31,34 @@ export const authOptions: NextAuthOptions = {
 
         const db = getDb();
         const user = db
-          .prepare("SELECT id, email, password_hash FROM users WHERE email = ?")
+          .prepare("SELECT id, email, password_hash, session_version FROM users WHERE email = ?")
           .get(credentials.email) as UserRow | undefined;
 
         if (!user) return null;
 
-        const valid = await bcrypt.compare(credentials.password, user.password_hash);
-        if (!valid) return null;
+        const valid = await compare(credentials.password, user.password_hash);
+        if (!valid || !getSessionUser({ sub: user.id, sessionVersion: user.session_version })) return null;
 
-        return { id: user.id, email: user.email };
+        return { id: user.id, email: user.email, sessionVersion: user.session_version };
       },
     }),
   ],
+  callbacks: {
+    async jwt({ token, user }) {
+      if (user) {
+        token.sub = user.id;
+        token.sessionVersion = user.sessionVersion;
+      }
+      if (!getSessionUser(token)) throw new Error("Session revoked");
+      return token;
+    },
+    async session({ session, token }) {
+      const user = getSessionUser(token);
+      if (!user) throw new Error("Session revoked");
+      session.user = { ...session.user, email: user.email };
+      return session;
+    },
+  },
   pages: {
     signIn: "/login",
   },

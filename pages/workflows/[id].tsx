@@ -1,5 +1,5 @@
 import Head from "next/head";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import Link from "next/link";
@@ -565,11 +565,16 @@ function Wizard({
   const isAddContacts = mode === "add-contacts";
   const [page, setPage] = useState<WizardPage>(isEditMode ? "linkedin-steps" : "prospects");
   const [campaignPrompt, setCampaignPrompt] = useState(initialPrompt);
-  const [listId, setListId] = useState("");
+  const [listId, setListId] = useState(isAddContacts ? activeRunListId ?? "" : "");
   const [accountId, setAccountId] = useState("");
   const [emailAccountIds, setEmailAccountIds] = useState<Set<string>>(new Set(activeRunEmailAccountIds));
-  const [conflicts, setConflicts] = useState<{ total: number; blocked: number } | null>(null);
-  const [conflictsLoading, setConflictsLoading] = useState(false);
+  const [listResult, setListResult] = useState<{
+    listId: string;
+    conflicts: { total: number; blocked: number } | null;
+    targets: ListTarget[];
+  } | null>(null);
+  const conflicts = listResult?.listId === listId ? listResult.conflicts : null;
+  const conflictsLoading = !!listId && listResult?.listId !== listId;
   const [wizardSteps, setWizardSteps] = useState<WizardStep[]>(() => buildWizardSteps(initialSteps));
   const [configIdx, setConfigIdx] = useState<number | null>(null); // which step is being configured
   const [launching, setLaunching] = useState(false);
@@ -584,8 +589,9 @@ function Wizard({
   const [testEmailAccountId, setTestEmailAccountId] = useState("");
   const [testEmailSending, setTestEmailSending] = useState(false);
 
-  const [listTargets, setListTargets] = useState<ListTarget[]>([]);
-  const [selectedTargetIds, setSelectedTargetIds] = useState<Set<string>>(new Set());
+  const listTargets = listResult?.listId === listId ? listResult.targets : [];
+  const [targetSelection, setSelectedTargetIds] = useState<Set<string> | null>(null);
+  const selectedTargetIds = targetSelection ?? new Set(listTargets.map((t) => t.id));
   const [prospectMode, setProspectMode] = useState<"all" | "manual">("all");
   const [listSearch, setListSearch] = useState("");
 
@@ -628,13 +634,29 @@ function Wizard({
       .catch(() => {});
   }, [hasPremium]);
 
-  // In add-contacts mode, auto-select the active run's list so the user only picks contacts.
   useEffect(() => {
-    if (isAddContacts && activeRunListId && !listId) {
-      selectList(activeRunListId);
+    if (!listId) return;
+    const controller = new AbortController();
+    async function loadList() {
+      try {
+        const [conflictsRes, targetsRes] = await Promise.all([
+          fetch(`/api/lists/${listId}/conflicts`, { signal: controller.signal }),
+          fetch(`/api/lists/${listId}`, { signal: controller.signal }),
+        ]);
+        const conflicts = conflictsRes.ok ? await conflictsRes.json() : null;
+        const data = targetsRes.ok ? await targetsRes.json() : null;
+        if (!controller.signal.aborted) {
+          setListResult({ listId, conflicts, targets: data?.targets ?? [] });
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setListResult({ listId, conflicts: null, targets: [] });
+        }
+      }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAddContacts, activeRunListId]);
+    void loadList();
+    return () => controller.abort();
+  }, [listId]);
 
   async function loadPreviewTargets(lId: string) {
     setPreviewListTargets([]);
@@ -690,26 +712,10 @@ function Wizard({
   const hasEmailStep = wizardSteps.some((s) => s.type === "email");
   const hasLinkedInStep = wizardSteps.some((s) => s.type === "visit" || s.type === "connect" || s.type === "message" || s.type === "sales_inmail");
 
-  async function selectList(id: string) {
+  function selectList(id: string) {
     setListId(id);
-    setConflicts(null);
-    setListTargets([]);
-    setSelectedTargetIds(new Set());
+    setSelectedTargetIds(null);
     setProspectMode("all");
-    if (!id) return;
-    setConflictsLoading(true);
-    const [conflictsRes, targetsRes] = await Promise.all([
-      fetch(`/api/lists/${id}/conflicts`),
-      fetch(`/api/lists/${id}`),
-    ]);
-    if (conflictsRes.ok) setConflicts(await conflictsRes.json());
-    if (targetsRes.ok) {
-      const data = await targetsRes.json();
-      const ts: ListTarget[] = data.targets ?? [];
-      setListTargets(ts);
-      setSelectedTargetIds(new Set(ts.map((t) => t.id)));
-    }
-    setConflictsLoading(false);
   }
 
   async function saveWorkflowName() {
@@ -732,7 +738,7 @@ function Wizard({
 
   function toggleTarget(id: string) {
     setSelectedTargetIds((prev) => {
-      const next = new Set(prev);
+      const next = new Set(prev ?? listTargets.map((t) => t.id));
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
@@ -1167,7 +1173,7 @@ function Wizard({
                             {/* Mode toggle — always at top of right column */}
                             <div className="flex gap-2 mb-3">
                               <button
-                                onClick={() => { setProspectMode("all"); setSelectedTargetIds(new Set(listTargets.map((t) => t.id))); }}
+                                onClick={() => { setProspectMode("all"); setSelectedTargetIds(null); }}
                                 className={`flex-1 px-4 py-2.5 rounded-xl border text-sm font-medium transition-colors ${prospectMode === "all" ? "bg-primary/10 border-primary/40 text-primary" : "bg-base-200 border-base-300/50 hover:border-base-300 text-base-content/60"}`}
                               >
                                 All contacts in list
@@ -1944,7 +1950,7 @@ function Wizard({
                           onClose={() => { setOrModelOpen(null); setOrModelSearch(""); }}
                           onSelect={(id) => { updateStep(idx, { aiModel: id }); setOrModelOpen(null); setOrModelSearch(""); }}
                           onSearch={setOrModelSearch}
-                          onToggleProvider={(p) => setCollapsedProviders(prev => { const n = new Set(prev); n.has(p) ? n.delete(p) : n.add(p); return n; })}
+                          onToggleProvider={(p) => setCollapsedProviders(prev => { const n = new Set(prev); if (n.has(p)) n.delete(p); else n.add(p); return n; })}
                         />
                         <div>
                           <label className="text-xs text-base-content/40 mb-1.5 block">Step instruction</label>
@@ -2035,7 +2041,7 @@ function Wizard({
                           onClose={() => { setOrModelOpen(null); setOrModelSearch(""); }}
                           onSelect={(id) => { updateStep(idx, { aiModel: id }); setOrModelOpen(null); setOrModelSearch(""); }}
                           onSearch={setOrModelSearch}
-                          onToggleProvider={(p) => setCollapsedProviders(prev => { const n = new Set(prev); n.has(p) ? n.delete(p) : n.add(p); return n; })}
+                          onToggleProvider={(p) => setCollapsedProviders(prev => { const n = new Set(prev); if (n.has(p)) n.delete(p); else n.add(p); return n; })}
                         />
                         <div>
                           <label className="text-xs text-base-content/40 mb-1.5 block">Step instruction</label>
@@ -2406,20 +2412,38 @@ const STEP_TYPE_LABEL: Record<string, string> = {
   visit: "Visit", connect: "Connect", message: "LI Message", sales_inmail: "InMail", email: "Email",
 };
 
+function FunnelBar({ label, value, color, total }: { label: string; value: number; color: string; total: number }) {
+  const pct = Math.max(2, (value / (total || 1)) * 100);
+  const rate = total > 0 ? Math.round((value / total) * 100) : 0;
+  return (
+    <div className="flex items-center gap-3 py-2">
+      <span className="text-xs text-base-content/50 w-28 shrink-0">{label}</span>
+      <div className="flex-1 h-1.5 bg-base-300/30 rounded-full overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${pct}%`, background: color }} />
+      </div>
+      <span className="text-sm font-semibold tabular-nums w-12 text-right" style={{ color }}>{value.toLocaleString()}</span>
+      <span className="text-xs text-base-content/30 w-8 text-right">{rate}%</span>
+    </div>
+  );
+}
+
 function AnalyticsPanel({ workflowId, days: initialDays }: { workflowId: string; days: number }) {
-  const [data, setData] = useState<AnalyticsData | null>(null);
+  const [result, setResult] = useState<{ key: string; data: AnalyticsData | null } | null>(null);
   const [days, setDays] = useState(initialDays);
-  const [loading, setLoading] = useState(true);
+  const key = `/api/workflows/${workflowId}/analytics?days=${days}`;
+  const loading = result?.key !== key;
+  const data = result?.key === key ? result.data : null;
 
   useEffect(() => {
-    setLoading(true);
-    fetch(`/api/workflows/${workflowId}/analytics?days=${days}`)
-      .then(r => r.json())
-      .then(d => { setData(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [workflowId, days]);
+    const controller = new AbortController();
+    fetch(key, { signal: controller.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (!controller.signal.aborted) setResult({ key, data }); })
+      .catch(() => { if (!controller.signal.aborted) setResult({ key, data: null }); });
+    return () => controller.abort();
+  }, [key]);
 
-  if (loading || !data) {
+  if (loading) {
     return (
       <div className="flex items-center gap-2 text-base-content/40 text-sm py-16 justify-center">
         <span className="loading loading-spinner loading-xs" /> Loading analytics…
@@ -2427,29 +2451,15 @@ function AnalyticsPanel({ workflowId, days: initialDays }: { workflowId: string;
     );
   }
 
+  if (!data) return <p className="text-sm text-base-content/40 py-16 text-center">Unable to load analytics.</p>;
+
   const { funnel, activity, aiDaily, aiByStep } = data;
-  const maxFunnel = funnel.total || 1;
   const maxActivity = Math.max(...activity.flatMap(d => ANALYTICS_SERIES.map(s => d[s.key])), 1);
   const maxAiCost = Math.max(...aiDaily.map(d => d.cost_usd ?? 0), 0.000001);
   const totalAiCost = aiDaily.reduce((s, d) => s + (d.cost_usd ?? 0), 0);
   const totalAiTokens = aiDaily.reduce((s, d) => s + (d.input_tokens ?? 0) + (d.output_tokens ?? 0), 0);
   const hasAiData = totalAiCost > 0;
   const labelEvery = days <= 7 ? 1 : days <= 14 ? 2 : days <= 30 ? 5 : 15;
-
-  function FunnelBar({ label, value, color }: { label: string; value: number; color: string }) {
-    const pct = Math.max(2, (value / maxFunnel) * 100);
-    const rate = funnel.total > 0 ? Math.round((value / funnel.total) * 100) : 0;
-    return (
-      <div className="flex items-center gap-3 py-2">
-        <span className="text-xs text-base-content/50 w-28 shrink-0">{label}</span>
-        <div className="flex-1 h-1.5 bg-base-300/30 rounded-full overflow-hidden">
-          <div className="h-full rounded-full transition-all duration-700" style={{ width: `${pct}%`, background: color }} />
-        </div>
-        <span className="text-sm font-semibold tabular-nums w-12 text-right" style={{ color }}>{value.toLocaleString()}</span>
-        <span className="text-xs text-base-content/30 w-8 text-right">{rate}%</span>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-5 pb-8">
@@ -2627,16 +2637,16 @@ function AnalyticsPanel({ workflowId, days: initialDays }: { workflowId: string;
               <span className="text-xs font-medium text-base-content/30 uppercase tracking-widest">Funnel</span>
             </div>
             <div className="space-y-0.5">
-              <FunnelBar label="Prospects" value={funnel.total} color="#808080" />
-              <FunnelBar label="Connections sent" value={funnel.connections_sent} color="#32d583" />
-              <FunnelBar label="Connected" value={funnel.connected} color="#32d583" />
-              <FunnelBar label="LI Messages" value={funnel.messages_sent} color="#f4b740" />
-              <FunnelBar label="InMails sent" value={funnel.inmails_sent} color="#e879f9" />
-              <FunnelBar label="LI Replies" value={funnel.li_replies} color="#c084fc" />
-              <FunnelBar label="Emails sent" value={funnel.emails_sent} color="#fb923c" />
-              <FunnelBar label="Email replies" value={funnel.email_replies} color="#32d583" />
+              <FunnelBar total={funnel.total} label="Prospects" value={funnel.total} color="#808080" />
+              <FunnelBar total={funnel.total} label="Connections sent" value={funnel.connections_sent} color="#32d583" />
+              <FunnelBar total={funnel.total} label="Connected" value={funnel.connected} color="#32d583" />
+              <FunnelBar total={funnel.total} label="LI Messages" value={funnel.messages_sent} color="#f4b740" />
+              <FunnelBar total={funnel.total} label="InMails sent" value={funnel.inmails_sent} color="#e879f9" />
+              <FunnelBar total={funnel.total} label="LI Replies" value={funnel.li_replies} color="#c084fc" />
+              <FunnelBar total={funnel.total} label="Emails sent" value={funnel.emails_sent} color="#fb923c" />
+              <FunnelBar total={funnel.total} label="Email replies" value={funnel.email_replies} color="#32d583" />
               <div className="pt-2 border-t border-base-300/30 mt-2">
-                <FunnelBar label="Completed" value={funnel.completed} color="#5aa2ff" />
+                <FunnelBar total={funnel.total} label="Completed" value={funnel.completed} color="#5aa2ff" />
               </div>
             </div>
           </div>
@@ -2669,8 +2679,9 @@ export default function WorkflowDetailPage({
   const [workflowName, setWorkflowName] = useState(initial.name);
   const [steps, setSteps] = useState<Step[]>(initial.steps);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [prospects, setProspects] = useState<Prospect[]>([]);
-  const [prospectsTotal, setProspectsTotal] = useState(0);
+  const [prospectsResult, setProspectsResult] = useState<{ key: string; prospects: Prospect[]; total: number } | null>(null);
+  const [statsVersion, setStatsVersion] = useState(0);
+  const [prospectsVersion, setProspectsVersion] = useState(0);
   const [prospectsPage, setProspectsPage] = useState(0);
   const PROSPECTS_PAGE_SIZE = 25;
   // selectedStep: { track, step_order } for a specific step, or a string sentinel for outcome filters
@@ -2686,10 +2697,14 @@ export default function WorkflowDetailPage({
   const [prospectFilters, setProspectFilters] = useState<ActiveFilter[]>([]);
   const router = useRouter();
 
+  const setupStrippedFor = useRef<string | null>(null);
+
   // Strip ?setup=1 from URL so refreshing doesn't re-open the wizard
   useEffect(() => {
-    if (autoSetup) router.replace(`/workflows/${initial.id}`, undefined, { shallow: true });
-  }, []);
+    if (!autoSetup || !router.isReady || router.query.setup !== "1" || setupStrippedFor.current === initial.id) return;
+    setupStrippedFor.current = initial.id;
+    void router.replace(`/workflows/${initial.id}`, undefined, { shallow: true });
+  }, [autoSetup, initial.id, router]);
 
   const activeRun = stats?.active_run ?? initial.active_run;
   const isRunning = activeRun?.status === "running";
@@ -2698,42 +2713,48 @@ export default function WorkflowDetailPage({
 
   const actionSteps = steps.filter((s) => s.step_type !== "delay");
 
-  const refreshStats = useCallback(async () => {
-    const res = await fetch(`/api/workflows/${initial.id}/stats`);
-    if (res.ok) setStats(await res.json());
-  }, [initial.id]);
-
-  const refreshProspects = useCallback(async () => {
-    const params = new URLSearchParams();
-    if (selectedStep !== null && selectedStep !== "completed" && selectedStep !== "failed") {
-      params.set("step", String(selectedStep.step_order));
-      params.set("track", selectedStep.track);
-    }
-    if (selectedStep === "completed") params.set("state", "completed");
-    if (selectedStep === "failed") params.set("state", "failed,skipped");
-    params.set("page", String(prospectsPage));
-    if (search.trim()) params.set("search", search.trim());
-    filtersToParams(prospectFilters).forEach((v, k) => params.set(k, v));
-    const res = await fetch(`/api/workflows/${initial.id}/prospects?${params}`);
-    if (res.ok) {
-      const data = await res.json();
-      setProspects(data.prospects);
-      setProspectsTotal(data.total);
-    }
-  }, [initial.id, selectedStep, prospectsPage, search, prospectFilters]);
+  const refreshStats = useCallback(() => setStatsVersion((version) => version + 1), []);
+  const refreshProspects = useCallback(() => setProspectsVersion((version) => version + 1), []);
+  const params = new URLSearchParams();
+  if (selectedStep !== null && selectedStep !== "completed" && selectedStep !== "failed") {
+    params.set("step", String(selectedStep.step_order));
+    params.set("track", selectedStep.track);
+  }
+  if (selectedStep === "completed") params.set("state", "completed");
+  if (selectedStep === "failed") params.set("state", "failed,skipped");
+  params.set("page", String(prospectsPage));
+  if (search.trim()) params.set("search", search.trim());
+  filtersToParams(prospectFilters).forEach((v, k) => params.set(k, v));
+  const prospectsKey = `/api/workflows/${initial.id}/prospects?${params}`;
+  const prospects = prospectsResult?.key === prospectsKey ? prospectsResult.prospects : [];
+  const prospectsTotal = prospectsResult?.key === prospectsKey ? prospectsResult.total : 0;
 
   const refreshSteps = useCallback(async () => {
     const res = await fetch(`/api/workflows/${initial.id}/steps`);
     if (res.ok) setSteps(await res.json());
   }, [initial.id]);
 
-  // Reset to page 0 when filter/search changes
-  useEffect(() => { setProspectsPage(0); }, [selectedStep, search, prospectFilters]);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/workflows/${initial.id}/stats`, { signal: controller.signal })
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => { if (data && !controller.signal.aborted) setStats(data); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [initial.id, statsVersion]);
 
   useEffect(() => {
-    refreshStats();
-    refreshProspects();
-  }, [refreshStats, refreshProspects]);
+    const controller = new AbortController();
+    fetch(prospectsKey, { signal: controller.signal })
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => {
+        if (data && !controller.signal.aborted) {
+          setProspectsResult({ key: prospectsKey, prospects: data.prospects, total: data.total });
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [prospectsKey, prospectsVersion]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -2793,8 +2814,7 @@ export default function WorkflowDetailPage({
     });
     if (res.ok) {
       toast.success("Unenrolled");
-      setProspects((prev) => prev.filter((p) => p.target_id !== targetId));
-      setProspectsTotal((prev) => prev - 1);
+      refreshProspects();
       refreshStats();
     } else {
       const err = await res.json();
@@ -2828,9 +2848,7 @@ export default function WorkflowDetailPage({
         return;
       }
       toast.success("Retrying");
-      setProspects((prev) =>
-        prev.map((p) => p.target_id === targetId ? { ...p, state: "in_progress", error_message: null } : p)
-      );
+      refreshProspects();
       refreshStats();
     } else {
       const err = await res.json().catch(() => ({}));
@@ -2846,8 +2864,7 @@ export default function WorkflowDetailPage({
     });
     if (res.ok) {
       toast.success("Removed from campaign");
-      setProspects((prev) => prev.filter((p) => p.target_id !== targetId));
-      setProspectsTotal((prev) => prev - 1);
+      refreshProspects();
       refreshStats();
     } else {
       const err = await res.json();
@@ -2903,11 +2920,10 @@ export default function WorkflowDetailPage({
         return;
       }
       toast.success(`Retried ${targetIds.length} prospect${targetIds.length !== 1 ? "s" : ""}`);
-      setProspects((prev) => prev.map((p) => targetIds.includes(p.target_id) ? { ...p, state: "in_progress", error_message: null } : p));
+      refreshProspects();
     } else {
       toast.success(`${action === "remove" ? "Removed" : "Unenrolled"} ${targetIds.length} prospect${targetIds.length !== 1 ? "s" : ""}`);
-      setProspects((prev) => prev.filter((p) => !targetIds.includes(p.target_id)));
-      setProspectsTotal((prev) => prev - targetIds.length);
+      refreshProspects();
     }
     setSelected(new Set());
     refreshStats();
@@ -3089,7 +3105,7 @@ export default function WorkflowDetailPage({
         <div className="w-52 shrink-0 overflow-y-auto">
           {/* All prospects */}
           <button
-            onClick={() => setSelectedStep(null)}
+            onClick={() => { setSelectedStep(null); setProspectsPage(0); }}
             className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors mb-4 flex items-center justify-between ${selectedStep === null ? "bg-primary/10 border border-primary/30 text-primary" : "hover:bg-base-200 text-base-content/60 border border-transparent"}`}
           >
             <span className="font-medium">All prospects</span>
@@ -3135,6 +3151,7 @@ export default function WorkflowDetailPage({
                               const delayKey = { track, step_order: delayStep!.step_order };
                               const isSel = typeof selectedStep === "object" && selectedStep !== null && selectedStep.track === track && selectedStep.step_order === delayStep!.step_order;
                               setSelectedStep(isSel ? null : delayKey);
+                              setProspectsPage(0);
                             }}
                             className={`w-full flex items-center gap-2 py-1 px-3 rounded-lg transition-colors ${typeof selectedStep === "object" && selectedStep !== null && selectedStep.track === track && selectedStep.step_order === delayStep?.step_order ? "bg-base-300/60 text-base-content/70" : "text-base-content/40 hover:text-base-content/70 hover:bg-base-200/60"}`}
                           >
@@ -3147,7 +3164,7 @@ export default function WorkflowDetailPage({
                         <div className="flex justify-center"><div className="w-px h-4 bg-base-content/20" /></div>
                       ) : null}
                       <button
-                        onClick={() => setSelectedStep(sel ? null : { track, step_order: s.step_order })}
+                        onClick={() => { setSelectedStep(sel ? null : { track, step_order: s.step_order }); setProspectsPage(0); }}
                         className={`w-full text-left px-3 py-3 rounded-xl transition-all flex items-center gap-3 border ${sel ? "bg-primary/10 border-primary/30" : "bg-base-200 border-base-300/40 hover:border-base-300/80"}`}
                       >
                         <span className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs border ${sel ? "bg-primary/20 border-primary/40 text-primary" : `${STEP_COLORS[s.step_type]}`}`}>
@@ -3175,7 +3192,7 @@ export default function WorkflowDetailPage({
               {displayStats.total_prospects > 0 && (
                 <div className="mt-4 pt-4 border-t border-base-300/30 flex flex-col gap-1.5">
                   <button
-                    onClick={() => setSelectedStep(selectedStep === "completed" ? null : "completed")}
+                    onClick={() => { setSelectedStep(selectedStep === "completed" ? null : "completed"); setProspectsPage(0); }}
                     className={`w-full text-left px-3 py-2.5 rounded-xl text-xs transition-all flex items-center gap-2.5 border ${selectedStep === "completed" ? "text-success bg-success/10 border-success/20" : "text-base-content/50 hover:text-success bg-base-200 border-base-300/40 hover:border-success/20"}`}
                   >
                     <span className="w-2 h-2 rounded-full bg-success shrink-0" />
@@ -3183,7 +3200,7 @@ export default function WorkflowDetailPage({
                   </button>
                   {displayStats.failed_prospects > 0 && (
                     <button
-                      onClick={() => setSelectedStep(selectedStep === "failed" ? null : "failed")}
+                      onClick={() => { setSelectedStep(selectedStep === "failed" ? null : "failed"); setProspectsPage(0); }}
                       className={`w-full text-left px-3 py-2.5 rounded-xl text-xs transition-all flex items-center gap-2.5 border ${selectedStep === "failed" ? "text-error bg-error/10 border-error/20" : "text-base-content/50 hover:text-error bg-base-200 border-base-300/40 hover:border-error/20"}`}
                     >
                       <span className="w-2 h-2 rounded-full bg-error shrink-0" />
@@ -3216,7 +3233,7 @@ export default function WorkflowDetailPage({
                         type="text"
                         placeholder="Search prospects…"
                         value={search}
-                        onChange={(e) => setSearch(e.target.value)}
+                        onChange={(e) => { setSearch(e.target.value); setProspectsPage(0); }}
                         className="w-48 pl-7 pr-3 py-1.5 text-xs bg-base-200 border border-base-300/50 rounded-lg outline-none focus:border-primary/50 placeholder:text-base-content/30"
                       />
                     </div>
@@ -3315,7 +3332,7 @@ export default function WorkflowDetailPage({
                             type="checkbox"
                             className="checkbox checkbox-xs"
                             checked={selected.has(p.target_id)}
-                            onChange={() => setSelected((prev) => { const n = new Set(prev); n.has(p.target_id) ? n.delete(p.target_id) : n.add(p.target_id); return n; })}
+                            onChange={() => setSelected((prev) => { const n = new Set(prev); if (n.has(p.target_id)) n.delete(p.target_id); else n.add(p.target_id); return n; })}
                           />
                         </td>
                         <td>

@@ -1,5 +1,5 @@
 import Head from "next/head";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import { getDb } from "@/lib/db";
@@ -78,21 +78,39 @@ function ConnectionIcon({ t }: { t: Contact }) {
 
 export default function ContactsPage({ lists, total: initialTotal }: { lists: ListOption[]; total: number }) {
   const router = useRouter();
-  const [contacts, setContacts] = useState<Contact[]>([]);
-  const [total, setTotal] = useState(initialTotal);
+  const [revision, setRevision] = useState(0);
   const [page, setPage] = useState(0);
   const [listId, setListId] = useState("");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [filters, setFilters] = useState<ActiveFilter[]>([]);
-  const [loading, setLoading] = useState(true);
+  const request = useMemo(() => {
+    const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+    if (listId) params.set("list_id", listId);
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    filtersToParams(filters).forEach((v, k) => params.set(k, v));
+    return { url: `/api/targets?${params}`, revision };
+  }, [page, listId, debouncedSearch, filters, revision]);
+  const [result, setResult] = useState<{
+    request: typeof request;
+    contacts: Contact[];
+    total: number;
+    error: boolean;
+  } | null>(null);
+  const loading = result?.request !== request;
+  const contacts = !loading && result ? result.contacts : [];
+  const total = result?.total ?? initialTotal;
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [showNewContact, setShowNewContact] = useState(false);
   const [newContactForm, setNewContactForm] = useState({ full_name: "", linkedin_url: "", title: "", company: "", location: "", email: "", phone: "", list_id: "" });
   const [newContactLoading, setNewContactLoading] = useState(false);
 
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selection, setSelection] = useState<{ request: typeof request; ids: Set<string> } | null>(null);
+  const selected = selection?.request === request ? selection.ids : new Set<string>();
+  function setSelected(ids: Set<string>) {
+    setSelection({ request, ids });
+  }
   const [showAddToList, setShowAddToList] = useState(false);
   const [addToListId, setAddToListId] = useState("");
   const [addToListLoading, setAddToListLoading] = useState(false);
@@ -108,26 +126,23 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [search]);
 
-  const fetch_ = useCallback(async (p: number, lid: string, q: string, activeFilters: ActiveFilter[]) => {
-    setLoading(true);
-    const params = new URLSearchParams({ page: String(p), limit: String(PAGE_SIZE) });
-    if (lid) params.set("list_id", lid);
-    if (q) params.set("search", q);
-    const filterParams = filtersToParams(activeFilters);
-    filterParams.forEach((v, k) => params.set(k, v));
-    const res = await fetch(`/api/targets?${params}`);
-    if (res.ok) {
-      const data = await res.json();
-      setContacts(data.contacts);
-      setTotal(data.total);
-    }
-    setLoading(false);
-  }, []);
-
   useEffect(() => {
-    fetch_(page, listId, debouncedSearch, filters);
-    setSelected(new Set());
-  }, [page, listId, debouncedSearch, filters, fetch_]);
+    const controller = new AbortController();
+    fetch(request.url, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Failed to load contacts");
+        const data = await res.json();
+        if (!controller.signal.aborted) {
+          setResult({ request, contacts: data.contacts, total: data.total, error: false });
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setResult({ request, contacts: [], total: 0, error: true });
+        }
+      });
+    return () => controller.abort();
+  }, [request]);
 
   function changeList(lid: string) { setListId(lid); setPage(0); }
   function changeSearch(q: string) { setSearch(q); setPage(0); }
@@ -144,7 +159,15 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
   }
 
   function toggleOne(id: string) {
-    setSelected((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setSelection((prev) => {
+      const ids = new Set(prev?.request === request ? prev.ids : []);
+      if (ids.has(id)) {
+        ids.delete(id);
+      } else {
+        ids.add(id);
+      }
+      return { request, ids };
+    });
   }
 
   async function addSelectedToList() {
@@ -183,7 +206,7 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
     toast.success(`Deleted ${data.deleted} contact${data.deleted !== 1 ? "s" : ""}`);
     setShowDeleteConfirm(false);
     setSelected(new Set());
-    fetch_(page, listId, debouncedSearch, filters);
+    setRevision((value) => value + 1);
   }
 
   async function createContact(e: React.FormEvent) {
@@ -203,7 +226,7 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
     toast.success("Contact created");
     setShowNewContact(false);
     setNewContactForm({ full_name: "", linkedin_url: "", title: "", company: "", location: "", email: "", phone: "", list_id: "" });
-    fetch_(0, listId, debouncedSearch, filters);
+    setRevision((value) => value + 1);
     setPage(0);
   }
 
@@ -299,6 +322,8 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
           <div className="flex items-center justify-center py-20 text-base-content/30 text-sm gap-2">
             <span className="loading loading-spinner loading-sm" /> Loading...
           </div>
+        ) : result?.error ? (
+          <div className="text-center py-20 text-error text-sm">Failed to load contacts.</div>
         ) : contacts.length === 0 ? (
           <div className="text-center py-20 text-base-content/30 text-sm">
             {hasActiveFilters ? "No contacts match these filters." : listId ? "No contacts in this list." : "No contacts yet. Import from a list."}

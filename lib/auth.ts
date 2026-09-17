@@ -1,5 +1,21 @@
 import { getToken } from "next-auth/jwt";
 import type { NextRequest } from "next/server";
+import { getDb } from "@/lib/db";
+
+export function getSessionUser(token: { sub?: unknown; sessionVersion?: unknown } | null) {
+  if (typeof token?.sub !== "string" || !token.sub ||
+      typeof token.sessionVersion !== "number" ||
+      !Number.isSafeInteger(token.sessionVersion) || token.sessionVersion < 0) return null;
+
+  try {
+    const user = getDb().prepare("SELECT id, email, session_version FROM users WHERE id = ?")
+      .get(token.sub) as { id: string; email: string; session_version: number } | undefined;
+    if (!user || user.session_version !== token.sessionVersion) return null;
+    return user;
+  } catch {
+    return null;
+  }
+}
 
 const INTERNAL_HEADER = "x-internal-secret";
 
@@ -19,8 +35,12 @@ const INTERNAL_HEADER = "x-internal-secret";
 export async function isAuthenticated(req: NextRequest): Promise<boolean> {
   if (await hasValidInternalSecret(req)) return true;
 
-  const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
-  return token !== null;
+  try {
+    const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
+    return getSessionUser(token) !== null;
+  } catch {
+    return false;
+  }
 }
 
 async function hasValidInternalSecret(req: NextRequest): Promise<boolean> {

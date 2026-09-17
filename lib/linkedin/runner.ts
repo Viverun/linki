@@ -875,7 +875,7 @@ async function ensureSalesNavEnriched(db: ReturnType<typeof getDb>, target: Targ
   }
 }
 
-async function ensureApolloEnriched(db: ReturnType<typeof getDb>, target: Target, runId: string): Promise<void> {
+async function ensureApolloEnriched(db: ReturnType<typeof getDb>, target: Target): Promise<void> {
   const fresh = db.prepare("SELECT apollo_enriched_at, email, linkedin_url, sales_nav_url FROM targets WHERE id = ?").get(target.id) as { apollo_enriched_at: string | null; email: string | null; linkedin_url: string | null; sales_nav_url: string | null } | undefined;
   if (!fresh || fresh.apollo_enriched_at || fresh.email) return;
   const apolloUrl = fresh.linkedin_url?.includes("/in/") ? fresh.linkedin_url : fresh.sales_nav_url;
@@ -1450,7 +1450,7 @@ export async function executeStep(
       return;
 
     } else if (step.step_type === "email") {
-      await ensureApolloEnriched(db, target, runId);
+      await ensureApolloEnriched(db, target);
 
       if (!emailAccountId || !emailAccountLimits) {
         log(db, runId, target.id, "warn", `Email step skipped — no email account configured on this run`);

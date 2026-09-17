@@ -64,16 +64,6 @@ export const getServerSideProps: GetServerSideProps = async (ctx) => {
   return { props: { company: { ...company, contacts } } };
 };
 
-function Field({ label, value }: { label: string; value: React.ReactNode }) {
-  if (!value) return null;
-  return (
-    <div>
-      <p className="text-[11px] text-base-content/40 uppercase tracking-wide mb-0.5">{label}</p>
-      <div className="text-sm text-base-content/80">{value}</div>
-    </div>
-  );
-}
-
 export default function CompanyDetailPage({ company }: { company: Company }) {
   return (
     <>

@@ -19,11 +19,18 @@ process.env.LINKI_DB_PATH = join(dbDir, "test.db");
 process.env.NEXTAUTH_SECRET ??= "test-secret-for-ssr-auth-tests";
 
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
-let tokenValue: { email?: string } | null = null;
+let tokenValue: { email?: string; sub?: string; sessionVersion?: number } | null = null;
+mockModule("@/lib/db", {
+  namedExports: {
+    getDb: () => ({
+      prepare: () => ({ get: () => ({ id: "owner", email: "owner@example.com", session_version: 0 }) }),
+    }),
+  },
+});
 mockModule("next-auth/jwt", {
-  exports: {
+  namedExports: {
     async getToken() {
       return tokenValue;
     },
@@ -45,7 +52,7 @@ test("requirePageSession: token without email redirects to /login", async () => 
 });
 
 test("requirePageSession: valid token returns null (page proceeds)", async () => {
-  tokenValue = { email: "owner@example.com" };
+  tokenValue = { email: "owner@example.com", sub: "owner", sessionVersion: 0 };
   const out = await requirePageSession({ req: {}, res: {} } as never);
   assert.equal(out, null);
 });

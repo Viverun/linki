@@ -36,19 +36,41 @@ function formatDateTime(ts: string) {
 }
 
 export default function EmailHealth() {
-  const [data, setData] = useState<Data | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [result, setResult] = useState<{
+    revision: number;
+    data: Data | null;
+    lastRefresh: Date | null;
+    error: boolean;
+  } | null>(null);
+  const data = result?.data ?? null;
+  const lastRefresh = result?.lastRefresh ?? null;
+  const loading = result?.revision !== revision;
 
-  const load = useCallback(() => {
-    setLoading(true);
-    fetch("/api/email-health")
-      .then(r => r.json())
-      .then(d => { setData(d); setLastRefresh(new Date()); })
-      .finally(() => setLoading(false));
-  }, []);
+  const load = useCallback(() => setRevision((value) => value + 1), []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/email-health", { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Failed to load email health");
+        const data: Data = await res.json();
+        if (!controller.signal.aborted) {
+          setResult({ revision, data, lastRefresh: new Date(), error: false });
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setResult((prev) => ({
+            revision,
+            data: prev?.data ?? null,
+            lastRefresh: prev?.lastRefresh ?? null,
+            error: true,
+          }));
+        }
+      });
+    return () => controller.abort();
+  }, [revision]);
 
   // Auto-refresh every 60s
   useEffect(() => {
@@ -89,6 +111,10 @@ export default function EmailHealth() {
             </button>
           </div>
         </div>
+
+        {!loading && result?.error && (
+          <p role="alert" className="text-sm text-error mb-4">Failed to refresh email health. Try again.</p>
+        )}
 
         {/* Summary pills */}
         <div className="flex items-center gap-4 mb-8">

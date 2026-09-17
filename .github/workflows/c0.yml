@@ -1,0 +1,32 @@
+name: C0 isolated verification
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: c0-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify without external network or production mounts
+        run: npm run verify:c0
+      - name: Retain verification logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: c0-evidence
+          path: |
+            /tmp/linki-c0-*/manifest.json
+            /tmp/linki-c0-*/image-id.txt
+            /tmp/linki-c0-*/prepare.log
+            /tmp/linki-c0-*/checks.log
+          retention-days: 14
+          if-no-files-found: warn

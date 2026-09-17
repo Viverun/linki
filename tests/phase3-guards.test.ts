@@ -129,7 +129,8 @@ test("apollo-enrich rejects a malformed target_ids", () => {
 
 test("email TLS verification is decided only in lib/email/tls.ts", async () => {
   const { emailTlsOptions, EMAIL_TLS_REJECT_UNAUTHORIZED } = await import("@/lib/email/tls");
-  assert.deepEqual(emailTlsOptions(), { rejectUnauthorized: EMAIL_TLS_REJECT_UNAUTHORIZED });
+  assert.equal(EMAIL_TLS_REJECT_UNAUTHORIZED, true);
+  assert.equal(emailTlsOptions("mail.fixture.test").rejectUnauthorized, true);
   // Tripwire (source-text-drift precedent): a new inline rejectUnauthorized
   // reintroduces a second decision point — route it through the helper instead.
   const hits = execFileSync("rg", ["-l", "rejectUnauthorized", "lib", "pages", "scripts"], { encoding: "utf8" })

@@ -28,8 +28,8 @@ export async function sendEmail(
       user: account.username,
       pass: account.password,
     },
-    // Allow self-signed certs (common in some corp SMTP setups)
-    tls: emailTlsOptions(),
+    requireTLS: true,
+    tls: emailTlsOptions(account.smtp_host),
   });
 
   const from = account.from_name
@@ -53,7 +53,8 @@ export async function testSmtpConnection(account: Omit<EmailAccount, "id">): Pro
       port: account.smtp_port,
       secure: account.smtp_secure === 1,
       auth: { user: account.username, pass: account.password },
-      tls: emailTlsOptions(),
+      requireTLS: true,
+      tls: emailTlsOptions(account.smtp_host),
       connectionTimeout: 10_000,
       greetingTimeout: 10_000,
     });
@@ -83,7 +84,7 @@ export async function testImapConnection(account: ImapTestAccount): Promise<stri
       host: account.imap_host,
       port: account.imap_port,
       tls: true,
-      tlsOptions: emailTlsOptions(),
+      tlsOptions: emailTlsOptions(account.imap_host),
       user: account.imap_username ?? account.username,
       password: account.imap_password ?? account.password,
       authTimeout: 10_000,

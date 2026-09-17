@@ -1,6 +1,7 @@
 import Papa from "papaparse";
 import type DatabaseType from "better-sqlite3";
 import { randomUUID } from "crypto";
+import { isAllowedSalesNavLeadUrl } from "@/lib/linkedin-url";
 
 type DB = DatabaseType.Database;
 
@@ -95,6 +96,10 @@ export function importCsv(db: DB, listId: string, csvText: string): CsvImportRes
     if (rawUrl && !linkedin_url) { errors.push(`Row ${rowNum}: "${rawUrl}" is not a valid linkedin.com/in/ URL`); return; }
 
     const sales_nav_url = get(raw, "sales_nav_url");
+    if (sales_nav_url && !isAllowedSalesNavLeadUrl(sales_nav_url)) {
+      errors.push(`Row ${rowNum}: sales_nav_url must be an HTTPS LinkedIn Sales Navigator lead URL (/sales/lead/...)`);
+      return;
+    }
 
     const rawEmail = get(raw, "email");
     let email: string | null = null;

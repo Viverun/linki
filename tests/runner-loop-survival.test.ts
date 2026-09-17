@@ -16,7 +16,7 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-loop-tests";
 // like X" without measurement.
 
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 const realDb = await import("@/lib/db");
 
@@ -26,7 +26,7 @@ let dbThrows = false;
 let getDbCalls = 0;
 
 mockModule("@/lib/db", {
-  exports: {
+  namedExports: {
     ...realDb,
     getDb: () => {
       getDbCalls++;

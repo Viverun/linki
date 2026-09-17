@@ -22,7 +22,7 @@ process.env.LINKI_DB_PATH = join(dbDir, "test.db");
 process.env.NEXTAUTH_SECRET ??= "test-secret-for-read-path-tests";
 
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 /** Records what the "browser" was handed, so we can tell a refusal from a load. */
 let contextsCreated: Array<{ storageState: unknown }> = [];
@@ -34,7 +34,7 @@ const fakeContext = {
 };
 
 mockModule("playwright-extra", {
-  exports: {
+  namedExports: {
     chromium: {
       use() { /* stealth plugin */ },
       async launch() {

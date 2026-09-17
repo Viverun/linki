@@ -16,7 +16,7 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-inmail-idempotency-tests";
 // exits early and the ledger would be untestable). Every send is recorded.
 
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 interface InmailRecord { salesNavUrl: string; subject: string; body: string }
 
@@ -28,7 +28,7 @@ let failFirstPreSend = false;
 let calls = 0;
 
 mockModule("@/lib/premium", {
-  exports: {
+  namedExports: {
     premium: {
       inmail: {
         sendInMail: async (_page: unknown, salesNavUrl: string, subject: string, body: string) => {
@@ -48,7 +48,7 @@ mockModule("@/lib/premium", {
 
 const realSession = await import("@/lib/linkedin/session");
 mockModule("@/lib/linkedin/session", {
-  exports: {
+  namedExports: {
     ...realSession,
     getSessionPage: async () => ({ close: async () => {} }),
     saveSessionState: async () => {},

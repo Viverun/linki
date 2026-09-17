@@ -131,7 +131,7 @@ async function fetchThread(cfg: ImapConfig, contactEmail: string): Promise<Email
   return new Promise((resolve, reject) => {
     const imap = new Imap({
       host: cfg.host, port: cfg.port, tls: true,
-      tlsOptions: emailTlsOptions(),
+      tlsOptions: emailTlsOptions(cfg.host),
       user: cfg.user, password: cfg.password,
       authTimeout: 10_000, connTimeout: 12_000,
     });

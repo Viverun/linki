@@ -18,12 +18,12 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-step-identity-tests";
 // rather than an absence of evidence — the whole point of P2-3.
 
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 const sends: { text: string }[] = [];
 const realMessage = await import("@/lib/linkedin/message");
 mockModule("@/lib/linkedin/message", {
-  exports: {
+  namedExports: {
     ...realMessage,
     sendMessage: async (_p: unknown, _n: string, text: string) => {
       sends.push({ text });
@@ -34,7 +34,7 @@ mockModule("@/lib/linkedin/message", {
 
 const realSession = await import("@/lib/linkedin/session");
 mockModule("@/lib/linkedin/session", {
-  exports: {
+  namedExports: {
     ...realSession,
     getSessionPage: async () => ({ close: async () => {} }),
     saveSessionState: async () => {},

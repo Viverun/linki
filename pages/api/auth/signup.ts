@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import bcrypt from "bcryptjs";
+import { hash } from "bcryptjs";
 import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
 import { isRateLimited } from "@/lib/rate-limit";
@@ -63,8 +63,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(409).json({ error: "An account with this email already exists." });
   }
 
-  const hash = await bcrypt.hash(password, 10);
-  db.prepare("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)").run(randomUUID(), email, hash);
+  const passwordHash = await hash(password, 10);
+  const result = db.prepare(
+    "INSERT INTO users (id, email, password_hash) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)"
+  ).run(randomUUID(), email, passwordHash);
+  if (result.changes !== 1) {
+    return res.status(403).json({ error: "Registration is closed — this instance already has an account." });
+  }
 
   return res.status(201).json({ ok: true });
 }

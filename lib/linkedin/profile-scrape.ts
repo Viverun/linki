@@ -12,6 +12,21 @@
  * Read-only. ~10-12s per profile (one Sales Nav page load + one Voyager fetch).
  */
 import type { BrowserContext } from "playwright";
+import { isAllowedSalesNavLeadUrl } from "@/lib/linkedin-url";
+
+export class InvalidSalesNavUrlError extends Error {
+  constructor() {
+    super("sales_nav_url must be an HTTPS LinkedIn Sales Navigator lead URL (/sales/lead/...)");
+    this.name = "InvalidSalesNavUrlError";
+  }
+}
+
+export class ProfileNavigationError extends Error {
+  constructor() {
+    super("Profile navigation left the approved Sales Navigator lead destination; verify the URL and LinkedIn session.");
+    this.name = "ProfileNavigationError";
+  }
+}
 
 export interface ProfilePost {
   activityUrn: string;
@@ -100,6 +115,7 @@ async function scrapeSalesCareer(
   ctx: BrowserContext,
   salesNavUrl: string
 ): Promise<Partial<ProfileScrape>> {
+  if (!isAllowedSalesNavLeadUrl(salesNavUrl)) throw new InvalidSalesNavUrlError();
   const page = await ctx.newPage();
   const responses: SalesProfileFlat[] = [];
   page.on("response", async (resp) => {
@@ -113,9 +129,25 @@ async function scrapeSalesCareer(
     } catch { /* ignore */ }
   });
 
+  let navigationBlocked = false;
   try {
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame() &&
+          !isAllowedSalesNavLeadUrl(request.url())) {
+        navigationBlocked = true;
+        await route.abort();
+        return;
+      }
+      await route.continue();
+    });
     await page.goto(salesNavUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+    if (navigationBlocked || !isAllowedSalesNavLeadUrl(page.url())) throw new ProfileNavigationError();
     await page.waitForTimeout(9000);
+    if (navigationBlocked || !isAllowedSalesNavLeadUrl(page.url())) throw new ProfileNavigationError();
+  } catch (err) {
+    if (navigationBlocked) throw new ProfileNavigationError();
+    throw err;
   } finally {
     await page.close();
   }
@@ -172,7 +204,19 @@ async function scrapePosts(
 ): Promise<ProfilePost[]> {
   const page = await ctx.newPage();
   try {
-    await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 25000 });
+    const feedUrl = "https://www.linkedin.com/feed/";
+    let navigationBlocked = false;
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame() && request.url() !== feedUrl) {
+        navigationBlocked = true;
+        await route.abort();
+        return;
+      }
+      await route.continue();
+    });
+    await page.goto(feedUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
+    if (navigationBlocked || page.url() !== feedUrl) return [];
     const cookies = await ctx.cookies();
     const csrf = (cookies.find((c) => c.name === "JSESSIONID")?.value || "").replace(/"/g, "");
     if (!csrf) return [];

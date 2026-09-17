@@ -13,7 +13,7 @@
  * salesApiProfiles per batch of 25 after scraping, using flagshipProfileUrl.
  * See docs/linkedin-api-learnings.md for the full investigation.
  */
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext } from "playwright";
 
 export interface ScrapedProfile {
   salesNavUrn: string;
@@ -75,13 +75,6 @@ interface FlatResponse {
   paging?: { total: number; count: number; start: number };
 }
 
-// salesApiProfiles single-profile response
-interface ProfileDetailResponse {
-  entityUrn?: string;
-  flagshipProfileUrl?: string;
-  fullName?: string;
-}
-
 function extractListId(url: string): string | null {
   const match = url.match(/\/sales\/lists\/people\/(\d+)/);
   return match ? match[1] : null;
@@ -96,16 +89,6 @@ function urnToSalesNavUrl(urn: string): string {
   const match = urn.match(/\(([^)]+)\)/);
   if (!match) return "";
   return `https://www.linkedin.com/sales/lead/${match[1]}`;
-}
-
-/**
- * Parse profileId, authType, authToken out of a salesProfile URN.
- * urn:li:fs_salesProfile:(ACwAAEIY-4YB25mKP6R5AKfkFjhO9isSbvsVlag,NAME_SEARCH,22wq)
- */
-function parseUrn(entityUrn: string): { profileId: string; authType: string; authToken: string } | null {
-  const match = entityUrn.match(/\(([^,]+),([^,]+),([^)]+)\)/);
-  if (!match) return null;
-  return { profileId: match[1], authType: match[2], authToken: match[3] };
 }
 
 function profileToResult(el: SalesProfile, linkedinUrl: string | null): ScrapedProfile {
@@ -141,96 +124,6 @@ function profileToResult(el: SalesProfile, linkedinUrl: string | null): ScrapedP
     tenureMonths,
     spotlightBadges: badges.length > 0 ? JSON.stringify(badges) : null,
   };
-}
-
-/**
- * Enrich profiles with their real /in/ URL via salesApiProfiles (flagshipProfileUrl).
- *
- * Uses page.evaluate fetch with JSESSIONID csrf-token. On 429 (rate limit),
- * backs off for 30s and retries. Delay between calls: 2s normally, 30s after 429.
- *
- * For 100 profiles at 2s/call = ~3.5 minutes. Happens once at import time.
- */
-async function enrichWithFlagshipUrls(
-  page: Page,
-  profiles: SalesProfile[],
-  onProgress?: (p: ImportProgress) => void
-): Promise<Map<string, string>> {
-  const urlMap = new Map<string, string>(); // entityUrn → flagshipProfileUrl
-
-  const cookies = await page.context().cookies("https://www.linkedin.com");
-  const jsessionid = cookies.find(c => c.name === "JSESSIONID")?.value?.replace(/"/g, "") ?? "";
-  if (!jsessionid) {
-    console.log("[scraper] JSESSIONID not found — skipping flagshipProfileUrl enrichment");
-    return urlMap;
-  }
-
-  let done = 0;
-  for (const el of profiles) {
-    const parts = parseUrn(el.entityUrn);
-    if (!parts) continue;
-
-    const { profileId, authType, authToken } = parts;
-    const apiUrl = `https://www.linkedin.com/sales-api/salesApiProfiles/(profileId:${profileId},authType:${authType},authToken:${authToken})?decoration=%28entityUrn%2CflagshipProfileUrl%29`;
-
-    let attempts = 0;
-    while (attempts < 3) {
-      const evaluatePromise = page.evaluate(async ({ url, csrfToken }: { url: string; csrfToken: string }) => {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 12000);
-          const resp = await fetch(url, {
-            credentials: "include",
-            signal: controller.signal,
-            headers: {
-              "csrf-token": csrfToken,
-              "x-restli-protocol-version": "2.0.0",
-              "accept": "application/json",
-            },
-          });
-          clearTimeout(timer);
-          return { status: resp.status, body: await resp.text() };
-        } catch (e: unknown) {
-          return { status: -1, body: (e as Error).message };
-        }
-      }, { url: apiUrl, csrfToken: jsessionid });
-
-      const timeoutPromise = new Promise<{ status: number; body: string }>((resolve) =>
-        setTimeout(() => resolve({ status: -1, body: 'timeout' }), 15000)
-      );
-      const result = await Promise.race([evaluatePromise, timeoutPromise]);
-
-      if (result.status === 200) {
-        try {
-          const data = JSON.parse(result.body) as ProfileDetailResponse;
-          if (data.flagshipProfileUrl) {
-            const normalized = data.flagshipProfileUrl.endsWith("/")
-              ? data.flagshipProfileUrl
-              : data.flagshipProfileUrl + "/";
-            urlMap.set(el.entityUrn, normalized);
-          }
-        } catch { /* ignore parse errors */ }
-        break;
-      } else if (result.status === 429) {
-        attempts++;
-        console.log(`[scraper] 429 rate limit — waiting 30s before retry (attempt ${attempts}/3)`);
-        await page.waitForTimeout(30000);
-      } else {
-        const reason = result.body === 'timeout' ? 'timeout' : result.status;
-        console.log(`[scraper] enrichment ${reason} for ${el.fullName ?? el.entityUrn.substring(0, 30)} — skipping`);
-        break;
-      }
-    }
-
-    // 2s between calls — slow enough to stay under rate limits
-    await page.waitForTimeout(2000);
-    done++;
-    console.log(`[scraper] flagship URLs: ${done}/${profiles.length} resolved`);
-    onProgress?.({ phase: 'enriching', count: done, total: profiles.length });
-  }
-
-  console.log(`[scraper] enrichment done: ${urlMap.size}/${profiles.length} profiles resolved`);
-  return urlMap;
 }
 
 export interface ImportProgress {

@@ -11,13 +11,13 @@ process.env.LINKI_DB_PATH = join(dbDir, "test.db");
 process.env.NEXTAUTH_SECRET ??= "test-secret-for-run-guards-tests";
 
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 // start.ts calls ensureGlobalRunnerStarted() on success, which parks a ref'd
 // 30s poll loop on the event loop — the test process would never exit.
 // Stub the boundary; the status transition (the part under test) happens first.
 mockModule("@/lib/linkedin/runner", {
-  exports: {
+  namedExports: {
     ensureGlobalRunnerStarted() { /* stubbed: no loop in tests */ },
   },
 });

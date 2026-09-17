@@ -23,7 +23,7 @@ process.env.LINKI_DB_PATH = join(dbDir, "test.db");
 process.env.NEXTAUTH_SECRET ??= "test-secret-for-host-tests";
 
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 /** Every browser acquisition the runner attempts. Must stay empty on refusal. */
 const pageRequests: string[] = [];
@@ -33,7 +33,7 @@ let salesNavPageFactory: (() => any) | null = null;
 const realSession = await import("@/lib/linkedin/session");
 
 mockModule("@/lib/linkedin/session", {
-  exports: {
+  namedExports: {
     ...realSession,
     getSessionPage: async (accountId: string) => {
       pageRequests.push(accountId);

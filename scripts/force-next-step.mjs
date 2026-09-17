@@ -4,9 +4,9 @@
 // on a single lead, without waiting hours for the real schedule.
 //
 // Usage:
-//   node scripts/force-next-step.js --run <run_id> --target <target_id> [--apply] [--skip-schedule]
-//   node scripts/force-next-step.js --run <run_id> --all-targets [--apply] [--skip-schedule]   (whole run — careful, real sends)
-//   node scripts/force-next-step.js --list                                  (list active runs)
+//   node scripts/force-next-step.mjs --run <run_id> --target <target_id> [--apply] [--skip-schedule]
+//   node scripts/force-next-step.mjs --run <run_id> --all-targets [--apply] [--skip-schedule]   (whole run — careful, real sends)
+//   node scripts/force-next-step.mjs --list                                  (list active runs)
 //
 // Without --apply this only PRINTS what would change (dry run). Pass --apply
 // to actually update the DB. DB path follows the same LINKI_DB_PATH env var
@@ -26,8 +26,8 @@
 // hours — note the printed "was" values and set them back in Settings when
 // you're done testing.
 
-const path = require("path");
-const Database = require("better-sqlite3");
+import path from "node:path";
+import Database from "better-sqlite3";
 
 const DB_PATH = process.env.LINKI_DB_PATH || path.join(process.cwd(), "linki.db");
 
@@ -75,9 +75,9 @@ function main() {
   }
 
   if (!args.run) {
-    console.error("Usage: node scripts/force-next-step.js --run <run_id> --target <target_id> [--apply]");
-    console.error("       node scripts/force-next-step.js --run <run_id> --all-targets [--apply]");
-    console.error("       node scripts/force-next-step.js --list");
+    console.error("Usage: node scripts/force-next-step.mjs --run <run_id> --target <target_id> [--apply]");
+    console.error("       node scripts/force-next-step.mjs --run <run_id> --all-targets [--apply]");
+    console.error("       node scripts/force-next-step.mjs --list");
     process.exit(1);
   }
 

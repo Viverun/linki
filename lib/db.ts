@@ -69,6 +69,12 @@ function initialiseConnection(db: Database.Database): void {
     // duplicate-message guard silently absent.
     db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
     initDb(db);
+    db.transaction(() => {
+      const columns = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+      if (!columns.some(column => column.name === "session_version")) {
+        db.exec("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0 CHECK(session_version >= 0)");
+      }
+    }).immediate();
     runMigrations(db);
 }
 
@@ -956,6 +962,7 @@ function initDb(db: Database.Database) {
       id TEXT PRIMARY KEY,
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
+      session_version INTEGER NOT NULL DEFAULT 0 CHECK(session_version >= 0),
       created_at TEXT DEFAULT (datetime('now'))
     );
 

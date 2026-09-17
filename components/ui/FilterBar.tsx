@@ -427,7 +427,6 @@ export default function FilterBar({ filters, onChange, fieldSubset }: FilterBarP
 
 // ─── Client-side filter logic (for list detail page) ─────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applyFiltersClient<T>(items: T[], filters: ActiveFilter[]): T[] {
   if (filters.length === 0) return items;
   return items.filter((item) => filters.every((f) => matchesFilter(item as Record<string, unknown>, f)));

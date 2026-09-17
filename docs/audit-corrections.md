@@ -22,17 +22,17 @@ node_modules/better-sqlite3/lib/database.js:34
 
 Observed on v12.6.2:
 
-| Connection | effective `busy_timeout` |
-|---|---|
-| `new Database(path)` | **5000** |
-| `new Database(path, { timeout: 0 })` | 0 |
-| `new Database(path, { timeout: 12345 })` | 12345 |
-| `new Database(path, { readonly: true })` | **5000** |
+| Connection                               | effective `busy_timeout` |
+| ---------------------------------------- | ------------------------ |
+| `new Database(path)`                     | **5000**                 |
+| `new Database(path, { timeout: 0 })`     | 0                        |
+| `new Database(path, { timeout: 12345 })` | 12345                    |
+| `new Database(path, { readonly: true })` | **5000**                 |
 
 Every connection in this repo, including read-only ones, has always had a 5 s
 busy timeout. **F3 does not reproduce.**
 
-**How it was caught:** not by review. The reproduction suite included a *control*
+**How it was caught:** not by review. The reproduction suite included a _control_
 test asserting that contention without the pragma throws immediately. The control
 failed — it waited 5 s instead. An assertion written to prove the lock was real
 is what exposed that the finding was not.
@@ -42,13 +42,13 @@ pinned to the library's own default, so it remains a provable no-op, plus
 regression tests. It is a guard against a future `{ timeout: 0 }` on a connection
 opened elsewhere or a library default change — not a fix. Two mutations
 demonstrate exactly that: removing the pragma alone changes no behaviour (the
-library default still applies); removing it *and* passing `{ timeout: 0 }` fails
+library default still applies); removing it _and_ passing `{ timeout: 0 }` fails
 the guard test.
 
 ### Failure-matrix row corrected
 
-| Row | Audit said | Correct |
-|---|---|---|
+| Row       | Audit said                                   | Correct                                                                                                   |
+| --------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | DB locked | "immediate `SQLITE_BUSY` throw 🔴, no retry" | Contention **under 5 s waits and succeeds**. Only contention exceeding 5 s raises, and it raises cleanly. |
 
 ### F1's trigger narrowed
@@ -86,7 +86,7 @@ is not in the source, therefore the behaviour is not present." Neither measured
 the behaviour. One of them survived two audit passes.
 
 **Rule adopted for the remainder of Phase 1:** a finding must be reproduced by a
-test that fails against unmodified code, *for the reason the finding claims*,
+test that fails against unmodified code, _for the reason the finding claims_,
 before any fix is written. If the reproduction passes, the finding is retracted
 rather than fixed. This is why N4, N5 and F8 each carry a reproduction step.
 
@@ -107,11 +107,11 @@ so an unexpected throw anywhere kills it while HTTP keeps serving.
 
 **Measured.** Every `await` inside `while (true)` is already guarded:
 
-| line | await | guarded? |
-|---|---|---|
-| `runner.ts:1279` | `tick(db)` | `try/catch`, logs and continues |
-| `runner.ts:1284-5` | `import` + `processScheduledImports` | own `try/catch` |
-| `runner.ts:1289` | `sleep(POLL_INTERVAL_MS)` | a `setTimeout` promise; cannot reject |
+| line               | await                                | guarded?                              |
+| ------------------ | ------------------------------------ | ------------------------------------- |
+| `runner.ts:1279`   | `tick(db)`                           | `try/catch`, logs and continues       |
+| `runner.ts:1284-5` | `import` + `processScheduledImports` | own `try/catch`                       |
+| `runner.ts:1289`   | `sleep(POLL_INTERVAL_MS)`            | a `setTimeout` promise; cannot reject |
 
 **A throw from inside `tick` does not stop the loop.** The audit's mechanism was
 wrong.
@@ -121,7 +121,7 @@ The one reachable fatal path is `getDb()` at `runner.ts:1275` — inside
 file, or a missing `NEXTAUTH_SECRET` surfacing while migrating stored secrets.
 
 **And the severity is worse than claimed in one respect:**
-`g.__linkiGlobalRunnerStarted` is set *before* the failure and never reset, so
+`g.__linkiGlobalRunnerStarted` is set _before_ the failure and never reset, so
 `ensureGlobalRunnerStarted()` is a permanent no-op afterwards. Verified: after
 the fault is cleared, a second call performs zero `getDb()` calls. The runner
 cannot be revived in-process by `POST /api/runs/[id]/start` or anything else —
@@ -132,7 +132,7 @@ claimed on recoverability.
 
 ## NF-4 — a permanently-throwing `tick` is invisible (not in the audit)
 
-Because `tick` is wrapped inside `while (true)`, a tick that throws on *every*
+Because `tick` is wrapped inside `while (true)`, a tick that throws on _every_
 iteration — persistent `SQLITE_CANTOPEN` inside tick, a browser that will not
 launch, a plain code bug — leaves the loop spinning forever, logging, and
 accomplishing nothing. Nothing surfaces it: the process is alive, HTTP serves,
@@ -140,7 +140,7 @@ and a loop-start heartbeat advances the whole time.
 
 This is the real "wedged but alive" runner. The guard reset does nothing for it.
 It is the failure the heartbeat actually earns its keep against, and it requires
-distinguishing *loop liveness* from *tick completion* — one marker cannot express
+distinguishing _loop liveness_ from _tick completion_ — one marker cannot express
 it.
 
 ---
@@ -149,7 +149,7 @@ it.
 
 The runner's single-loop guard (`g.__linkiRunner`) is a **per-process** global.
 Before Phase 2 that was a latent limitation: a second process meant a second loop
-only if something started one. The P2-1 watchdog *actively re-establishes* loops
+only if something started one. The P2-1 watchdog _actively re-establishes_ loops
 on a timer, so two processes now produce two loops **by default** — two Chromium
 stacks on one LinkedIn account, duplicate outreach, and the deployment matrix's
 "container duplication" row arriving by accident rather than by mistake.
@@ -173,9 +173,9 @@ while `runLoopWithRecovery` never resolves. Defence in depth, not a mechanism.
 
 Callers of `ensureGlobalRunnerStarted()` in the process:
 
-| Caller | When |
-|---|---|
-| `instrumentation.ts:6` | once per process, at boot |
+| Caller                            | When                              |
+| --------------------------------- | --------------------------------- |
+| `instrumentation.ts:6`            | once per process, at boot         |
 | `pages/api/runs/[id]/start.ts:19` | whenever an operator starts a run |
 
 So revival after a hard loop exit **is** possible in-process — but only if an
@@ -212,7 +212,7 @@ limit 30, sentToday 28  ->  planned admits exactly 2 of N due connect tracks
 ```
 
 **Midnight straddle — stated explicitly.** A tick that begins at 23:58 UTC
-allocates against the *old* day's count, and sends land after 00:00 on the new
+allocates against the _old_ day's count, and sends land after 00:00 on the new
 day. Those sends are therefore not counted against the new day either, because
 the next tick re-reads `logs` filtered by `date(created_at) = date('now')` and
 the rows carry the new date. Net effect: a straddling tick can overshoot by at
@@ -291,10 +291,10 @@ Reachability is now demonstrated. The severity is corrected to **P0**.
 Two claims were merged in an early report of this work. They are not the same
 claim and only one of them was proved by the reproduction.
 
-| Claim | Status | Means |
-|---|---|---|
-| 1. The code path accepts a vanity-less URL and selects a **bystander's** CTA, clicking Send | **PROVED** | `FakePage` harness. `sendClicked = true` against a CTA whose href carried `vanityName=somebody-else` |
-| 2. LinkedIn itself emits a `flagshipProfileUrl` lacking `/in/<vanity>` | **NOT PROVED** | the URL used was **synthesised** for the test |
+| Claim                                                                                       | Status         | Means                                                                                                |
+| ------------------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------- |
+| 1. The code path accepts a vanity-less URL and selects a **bystander's** CTA, clicking Send | **PROVED**     | `FakePage` harness. `sendClicked = true` against a CTA whose href carried `vanityName=somebody-else` |
+| 2. LinkedIn itself emits a `flagshipProfileUrl` lacking `/in/<vanity>`                      | **NOT PROVED** | the URL used was **synthesised** for the test                                                        |
 
 **No LinkedIn interaction occurred at any point.** `FakePage` is an in-memory
 object; the `playwright` import in that test file is `import type` and is erased
@@ -342,7 +342,7 @@ triggered, and the severity reflects the former.
 
 ### Unknown #1 — STILL OPEN
 
-*Can `flagshipProfileUrl` lack `/in/`?* Unresolved. It requires real observed
+_Can `flagshipProfileUrl` lack `/in/`?_ Unresolved. It requires real observed
 data and none was gathered. It stays listed as **structurally possible, not
 demonstrated**, and nothing in this correction should be read as answering it.
 N7's severity no longer depends on it.
@@ -351,13 +351,13 @@ N7's severity no longer depends on it.
 
 This is the **fourth** correction to the audit and the **first that runs
 upward**. The previous three — F3 retracted, the transaction claim retracted,
-F8 recharacterised — all *overstated*, and a habit had formed of expecting
+F8 recharacterised — all _overstated_, and a habit had formed of expecting
 corrections to deflate findings.
 
 "NOT VERIFIED" was read as "probably not reachable". It means **nobody looked**.
 Those are different statements, and an unverified-reachability finding is exactly
 as likely to be under-rated as over-rated. Where the consequence is irreversible
-and lands on a third party, the asymmetry in *cost* is severe: over-rating buys
+and lands on a third party, the asymmetry in _cost_ is severe: over-rating buys
 an unnecessary guard, under-rating sends a stranger an invitation.
 
 The rule this yields: an unverified reachability claim is not evidence of low
@@ -366,21 +366,21 @@ severity. Either look, or rate it as if it is reachable.
 ## N7b — the null-vanity CLASS, audited consumer by consumer
 
 N7 closed the invitation path. The class stayed open: every consumer that treats
-a vanity as present-or-absent has to decide what absence *means*, and the answers
+a vanity as present-or-absent has to decide what absence _means_, and the answers
 were inconsistent.
 
 ### The consumer audit
 
-| # | Site | Behaviour with a null vanity | Fails |
-|---|---|---|---|
-| 1 | `runner.ts` `resolveLinkedinUrl` (stored URL) | gated on `includes("/in/")` — a **substring** test — and returned the URL unvalidated | **open** → now guarded |
-| 2 | `runner.ts` `resolveLinkedinUrl` (`flagshipProfileUrl`) | built and returned with no shape check at all | **open** → now guarded |
-| 3 | `connect.ts` `openInviteDialog` case 1 | unscoped selector; could pick a bystander's CTA | **open** → closed by N7 |
-| 4 | `connect.ts` `openInviteDialog` case 2 | already threw `InviteUiError` | closed |
-| 5 | `connect.ts` `verifyInvitationSent` signal 2 | `vanity ? … : 0` would read as "not pending" | **unreachable** — see below |
-| 6 | `sync-accepted.ts` add pass (`:119`) | `if (!c.vanity) continue` | closed |
-| 7 | `sync-accepted.ts` **unmark pass** (`:151`) | `!v \|\| !seen.has(v)` — un-marked the contact | **open, destructive** → now guarded |
-| 8 | `pages/api/accounts/[id]/sync-accepted.ts:39` | `if (!match) continue` | **already closed** |
+| #   | Site                                                    | Behaviour with a null vanity                                                          | Fails                               |
+| --- | ------------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------- |
+| 1   | `runner.ts` `resolveLinkedinUrl` (stored URL)           | gated on `includes("/in/")` — a **substring** test — and returned the URL unvalidated | **open** → now guarded              |
+| 2   | `runner.ts` `resolveLinkedinUrl` (`flagshipProfileUrl`) | built and returned with no shape check at all                                         | **open** → now guarded              |
+| 3   | `connect.ts` `openInviteDialog` case 1                  | unscoped selector; could pick a bystander's CTA                                       | **open** → closed by N7             |
+| 4   | `connect.ts` `openInviteDialog` case 2                  | already threw `InviteUiError`                                                         | closed                              |
+| 5   | `connect.ts` `verifyInvitationSent` signal 2            | `vanity ? … : 0` would read as "not pending"                                          | **unreachable** — see below         |
+| 6   | `sync-accepted.ts` add pass (`:119`)                    | `if (!c.vanity) continue`                                                             | closed                              |
+| 7   | `sync-accepted.ts` **unmark pass** (`:151`)             | `!v \|\| !seen.has(v)` — un-marked the contact                                        | **open, destructive** → now guarded |
+| 8   | `pages/api/accounts/[id]/sync-accepted.ts:39`           | `if (!match) continue`                                                                | **already closed**                  |
 
 ### #7 is the real one, and it is the mirror image of N7
 
@@ -472,7 +472,7 @@ because a vanity was parsed. Verified by execution, not by reading.
 
 ### Why this outranks the null case
 
-A null vanity wastes a step, or invites a bystander — *on LinkedIn*. A foreign
+A null vanity wastes a step, or invites a bystander — _on LinkedIn_. A foreign
 host points the **authenticated browser** at attacker-chosen content. Cookies are
 domain-scoped so the session itself does not leak, but the page loads in the same
 browser as a live LinkedIn session, and the automation then interacts with
@@ -484,13 +484,13 @@ is already loaded.
 
 ### Where host validation did and did not exist
 
-| Site | Before |
-|---|---|
-| `vanityNameOf` (connect.ts:90) | none — a regex on `/in/` |
+| Site                                      | Before                                                                                                      |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `vanityNameOf` (connect.ts:90)            | none — a regex on `/in/`                                                                                    |
 | `normalizeLinkedinUrl` (csv-import.ts:57) | `includes("linkedin.com/in/")` — refuses `example.com`, accepts `evil.tld/?x=linkedin.com/in/bob`. CSV only |
-| `gotoAuthenticated` (connect.ts:113) | none — `page.goto(url)` runs first, unconditionally |
-| `resolveLinkedinUrl` | none |
-| `isLoggedInAppUrl` (session.ts:514) | **a correct check** — but post-navigation, answering "did we land on the app?" |
+| `gotoAuthenticated` (connect.ts:113)      | none — `page.goto(url)` runs first, unconditionally                                                         |
+| `resolveLinkedinUrl`                      | none                                                                                                        |
+| `isLoggedInAppUrl` (session.ts:514)       | **a correct check** — but post-navigation, answering "did we land on the app?"                              |
 
 The correct expression already existed, one module away, doing a different job
 too late to help.
@@ -548,21 +548,21 @@ not parse.
 
 ### What survives of F5
 
-The API endpoint's *"not in the pending list any more -> accepted (or expired,
-but treat as accepted)"* inference is a **separate claim from the COALESCE one,
+The API endpoint's _"not in the pending list any more -> accepted (or expired,
+but treat as accepted)"_ inference is a **separate claim from the COALESCE one,
 and it still stands on its own terms**: a withdrawn or expired invitation leaves
 the pending list exactly as an accepted one does, so that endpoint will record a
 connection that was never made — untouched here, and still owed a fix.
 
 ### The tally, and what these five share
 
-| # | Finding | Correction |
-|---|---|---|
-| 1 | F3 — "SQLite has no `busy_timeout`" | **RETRACTED** — the constructor already defaults it to 5000 |
-| 2 | "Transaction held open across network work" | **RETRACTED** |
-| 3 | F8 — the loop's outer `.catch()` | **RECHARACTERISED** — reachable only via `getDb()`, and it latched |
-| 4 | N7 — unscoped invite fallback | **SEVERITY RAISED**, P2 -> P0 |
-| 5 | F5 — missing `COALESCE` | **MIS-LOCATED** — right mechanism, wrong file |
+| #   | Finding                                     | Correction                                                         |
+| --- | ------------------------------------------- | ------------------------------------------------------------------ |
+| 1   | F3 — "SQLite has no `busy_timeout`"         | **RETRACTED** — the constructor already defaults it to 5000        |
+| 2   | "Transaction held open across network work" | **RETRACTED**                                                      |
+| 3   | F8 — the loop's outer `.catch()`            | **RECHARACTERISED** — reachable only via `getDb()`, and it latched |
+| 4   | N7 — unscoped invite fallback               | **SEVERITY RAISED**, P2 -> P0                                      |
+| 5   | F5 — missing `COALESCE`                     | **MIS-LOCATED** — right mechanism, wrong file                      |
 
 Two retractions, one recharacterisation, one increase, one mis-location.
 
@@ -580,16 +580,16 @@ lives in `lib/linkedin/session.ts:514` inside `isLoggedInAppUrl`.
 **Decision: keep the duplicate, record it, and guard against a third.**
 
 Delegating is not a one-line import swap. `isLoggedInAppUrl` needs the host
-decision *and* the pathname, so it cannot call the leaf and return — the URL
+decision _and_ the pathname, so it cannot call the leaf and return — the URL
 parse and the try/catch both move, which is a body rewrite of a Ground Rule 5
 component for a refactor. That is the edit the rule exists to prevent.
 
 The two also differ in job:
 
-| | Question | When |
-|---|---|---|
-| `isAllowedLinkedinUrl` | may the runner navigate here? | **before** navigation, a trust gate |
-| `isLoggedInAppUrl` | did the browser land on the app? | **after** navigation, a classification |
+|                        | Question                         | When                                   |
+| ---------------------- | -------------------------------- | -------------------------------------- |
+| `isAllowedLinkedinUrl` | may the runner navigate here?    | **before** navigation, a trust gate    |
+| `isLoggedInAppUrl`     | did the browser land on the app? | **after** navigation, a classification |
 
 And the drift direction is benign. If the leaf gains a host `isLoggedInAppUrl`
 lacks, the runner navigates and then decides it is not on the app — an
@@ -644,11 +644,11 @@ corrections and two new coverage gaps came out of it, all below.
 `docs/phase2-baseline.md`'s table was recomputed from `git show` of every
 commit's test files, and every recorded row matches:
 
-| Point | Recorded | Derived from git |
-|---|---|---|
+| Point                      | Recorded                  | Derived from git                  |
+| -------------------------- | ------------------------- | --------------------------------- |
 | Phase 1 baseline `85934ab` | 151 published / 177 local | 140 + 11 = **151**, +26 = **177** |
-| Phase 2 baseline `4af831c` | 264 = 238 + 26 | 227 + 11 = **238**, +26 = **264** |
-| HEAD `ca35aaf` | 367 | 330 + 11 = **341**, +26 = **367** |
+| Phase 2 baseline `4af831c` | 264 = 238 + 26            | 227 + 11 = **238**, +26 = **264** |
+| HEAD `ca35aaf`             | 367                       | 330 + 11 = **341**, +26 = **367** |
 
 The `+11` is the part no `grep -c '^test('` can see: **three parameterised
 `test()` calls declared inside `for` loops**, which a column-anchored count reads
@@ -703,18 +703,18 @@ next person can disagree with it.
 Bounded sample, prioritising the mutations that stand between a duplicate message
 and a real person. Attributed kills only.
 
-| Mutation | Reconstruction | Result |
-|---|---|---|
-| M2 in-flight refusal | `if (prior?.status === "in_flight")` → `if (false && …)` | ✅ KILLED by "3 an in_flight ledger row refuses to send and fails closed" |
-| M3 Layer-2 fingerprint | `conflictingFingerprint` returns `undefined` unconditionally | ✅ KILLED by "13 position shift: same body under a renumbered step_ref is refused" |
-| M11 post-click → abandoned | `if (isPreSendFailure(err))` → `if (true)` | ✅ KILLED by "19 an unrecognised error fails CLOSED — in_flight, not abandoned" |
-| M13 upsert → plain INSERT | strip `ON CONFLICT…` from the `step_side_effects` insert | ✅ KILLED by "18 a throw BEFORE the send click abandons the intent so retry can proceed" |
-| M5 retry in-flight block | `if (ledger?.status === "in_flight")` → `if (false && …)` | ✅ KILLED by "8 a failed track whose message is in_flight is NOT re-armed" |
-| resend one-shot | resend branch skipped for `confirmed` rows (the original bug) | ✅ KILLED by "R1 resend twice in a row yields two sends, not a wedge" |
-| mark_delivered zero-send | `advance.run(…)` → `rearm.run(…)` in the mark_delivered branch | ✅ KILLED by "1b mark_delivered confirms the ledger, stamps the target and advances — with zero sends" |
-| NF-9 host anchor | `LINKEDIN_HOST.test(hostname)` → `hostname.includes("linkedin.com")` | ✅ KILLED by "NF-9: the allowlist accepts linkedin.com and its subdomains, and nothing else" |
+| Mutation                   | Reconstruction                                                       | Result                                                                                                 |
+| -------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| M2 in-flight refusal       | `if (prior?.status === "in_flight")` → `if (false && …)`             | ✅ KILLED by "3 an in_flight ledger row refuses to send and fails closed"                              |
+| M3 Layer-2 fingerprint     | `conflictingFingerprint` returns `undefined` unconditionally         | ✅ KILLED by "13 position shift: same body under a renumbered step_ref is refused"                     |
+| M11 post-click → abandoned | `if (isPreSendFailure(err))` → `if (true)`                           | ✅ KILLED by "19 an unrecognised error fails CLOSED — in_flight, not abandoned"                        |
+| M13 upsert → plain INSERT  | strip `ON CONFLICT…` from the `step_side_effects` insert             | ✅ KILLED by "18 a throw BEFORE the send click abandons the intent so retry can proceed"               |
+| M5 retry in-flight block   | `if (ledger?.status === "in_flight")` → `if (false && …)`            | ✅ KILLED by "8 a failed track whose message is in_flight is NOT re-armed"                             |
+| resend one-shot            | resend branch skipped for `confirmed` rows (the original bug)        | ✅ KILLED by "R1 resend twice in a row yields two sends, not a wedge"                                  |
+| mark_delivered zero-send   | `advance.run(…)` → `rearm.run(…)` in the mark_delivered branch       | ✅ KILLED by "1b mark_delivered confirms the ledger, stamps the target and advances — with zero sends" |
+| NF-9 host anchor           | `LINKEDIN_HOST.test(hostname)` → `hostname.includes("linkedin.com")` | ✅ KILLED by "NF-9: the allowlist accepts linkedin.com and its subdomains, and nothing else"           |
 
-Kill *counts* differ from the recorded table (M2 killed 3 here, 7 there) because
+Kill _counts_ differ from the recorded table (M2 killed 3 here, 7 there) because
 each run targets one test file rather than the suite. `generation-audit.md`
 already notes the counts drift as files grow; the durable claim is the attributed
 kill, not the tally.
@@ -755,12 +755,12 @@ turned out to contain a live defect, not only a coverage gap.
 Live observations leave no artifact. Mapping where the evidence base is thin,
 honestly, rather than implying it is uniform:
 
-| Claim | Surviving artifact | Re-runnable? | Anything depends on it? |
-|---|---|---|---|
-| Phase 1 mid-workflow restart recovery | none — the run rows were the artifact and were deleted by authorisation; `prodqa-rf-provenance-20260810T100615Z.json` holds the exported rows | no, not without a live workflow | no downstream claim rests on it |
-| "the restart performs no LinkedIn navigation" | none of the run itself, but the **structural argument is re-checkable and was re-checked**: `runner.ts:1652` `if (activeRuns.length === 0) return;` precedes every LinkedIn call (`shouldSyncAccepted` at `:1664`); live DB has 0 running runs and `list_imports` = 0 | **yes — re-verified 2026-08-15** | yes: the restart safety case, and it holds |
-| RTO boot measurement (2.94 s, ≈3 s end to end) | `docs/backup-restore.md` prose; the two drill snapshots `linki-auto-20260810T1503*.db` exist and verify `integrity_check: ok` | the drill is re-runnable; **the number is not re-derivable** from anything stored | no gate depends on the figure; it is informational |
-| Live predicate demonstrations | `tests/health-predicate.test.ts` reproduces the logic against a local server | yes, as a test — **not** as a demonstration against the live container | the tested behaviour is covered; NF-11 is the hole in it |
+| Claim                                          | Surviving artifact                                                                                                                                                                                                                                                    | Re-runnable?                                                                      | Anything depends on it?                                  |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Phase 1 mid-workflow restart recovery          | none — the run rows were the artifact and were deleted by authorisation; `prodqa-rf-provenance-20260810T100615Z.json` holds the exported rows                                                                                                                         | no, not without a live workflow                                                   | no downstream claim rests on it                          |
+| "the restart performs no LinkedIn navigation"  | none of the run itself, but the **structural argument is re-checkable and was re-checked**: `runner.ts:1652` `if (activeRuns.length === 0) return;` precedes every LinkedIn call (`shouldSyncAccepted` at `:1664`); live DB has 0 running runs and `list_imports` = 0 | **yes — re-verified 2026-08-15**                                                  | yes: the restart safety case, and it holds               |
+| RTO boot measurement (2.94 s, ≈3 s end to end) | `docs/backup-restore.md` prose; the two drill snapshots `linki-auto-20260810T1503*.db` exist and verify `integrity_check: ok`                                                                                                                                         | the drill is re-runnable; **the number is not re-derivable** from anything stored | no gate depends on the figure; it is informational       |
+| Live predicate demonstrations                  | `tests/health-predicate.test.ts` reproduces the logic against a local server                                                                                                                                                                                          | yes, as a test — **not** as a demonstration against the live container            | the tested behaviour is covered; NF-11 is the hole in it |
 
 The pattern: where a live observation matters, the durable evidence is the
 **structural argument** behind it, and that is re-checkable. The bare
@@ -813,7 +813,7 @@ behind an exit code (0) indistinguishable from a healthy instance, on a server
 that answers normally. Nothing restarts it and nothing says so.
 
 Fixed at `scripts/health-predicate.js:60` with a distinct diagnostic —
-deliberately *not* reusing `SUPERVISOR INACTIVE`, because the supervisor is
+deliberately _not_ reusing `SUPERVISOR INACTIVE`, because the supervisor is
 working correctly; it is the runner that needs a person.
 
 ### NF-12 — a coverage gap only; all four new tests passed unmodified
@@ -828,7 +828,7 @@ the assertion still holds. A threshold can only be pinned by numbers chosen
 **independently of it** — the new tests use absolute ages (11 min, 9 min).
 
 The same shape existed on the health side: `"dead: stale marker → 503"` pins the
-firing direction absolutely, but nothing pinned the other, so a *narrowed*
+firing direction absolutely, but nothing pinned the other, so a _narrowed_
 `LIVENESS_THRESHOLD_MS` would have reported a working runner dead and handed the
 supervisor a permanent restart loop. Now covered.
 
@@ -840,13 +840,13 @@ test's precondition changed.
 
 ### Mutations — 5 applied, 5 attributed kills
 
-| Mutation | Killed by |
-|---|---|
+| Mutation                                 | Killed by                                                                 |
+| ---------------------------------------- | ------------------------------------------------------------------------- |
 | delete `&& b.restart_will_help === true` | NF-11: restart_will_help gates a DEAD runner — both sides of the conjunct |
-| silence the new diagnostic | NF-11: declining to restart a DEAD runner is never silent |
-| `WATCHDOG_STALE_MS` ×1000 | NF-12: a marker OLDER than the threshold fires the watchdog |
-| `WATCHDOG_STALE_MS` ÷1000 | NF-12: a marker just under the threshold does not fire |
-| `LIVENESS_THRESHOLD_MS` ÷1000 | NF-12: a marker just under the liveness threshold is still healthy |
+| silence the new diagnostic               | NF-11: declining to restart a DEAD runner is never silent                 |
+| `WATCHDOG_STALE_MS` ×1000                | NF-12: a marker OLDER than the threshold fires the watchdog               |
+| `WATCHDOG_STALE_MS` ÷1000                | NF-12: a marker just under the threshold does not fire                    |
+| `LIVENESS_THRESHOLD_MS` ÷1000            | NF-12: a marker just under the liveness threshold is still healthy        |
 
 Both directions are mutated on purpose. A single-direction test leaves the
 constant droppable the other way — the same reason NF-11's two cases are asserted
@@ -870,14 +870,14 @@ and was fooled by a quote inside a regex literal, which is the bug under audit.
 
 ### What the OLD helper corrupted — 3 files
 
-| File | Region | Trigger | Damage |
-|---|---|---|---|
-| `lib/linkedin/session.ts` | line 399 → 441 | `/*` inside the glob `"**/feed/**"` | **1905 chars**, 25 code lines, 27 quotes swallowed; quote balance −19, so `stripStrings` mispaired across the remainder |
-| `lib/linkedin/sync-accepted.ts` | 2 lines | `//` inside the regex `/\/login\|\/authwall\|\/uas\//` | line truncated mid-guard — the authwall check deleted |
-| `lib/linkedin/connect.ts` | line 23 | `//` inside `/\/authwall\b\|\/checkpoint\//` | `const HARD_WALL_RE = …` truncated |
+| File                            | Region         | Trigger                                                | Damage                                                                                                                  |
+| ------------------------------- | -------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `lib/linkedin/session.ts`       | line 399 → 441 | `/*` inside the glob `"**/feed/**"`                    | **1905 chars**, 25 code lines, 27 quotes swallowed; quote balance −19, so `stripStrings` mispaired across the remainder |
+| `lib/linkedin/sync-accepted.ts` | 2 lines        | `//` inside the regex `/\/login\|\/authwall\|\/uas\//` | line truncated mid-guard — the authwall check deleted                                                                   |
+| `lib/linkedin/connect.ts`       | line 23        | `//` inside `/\/authwall\b\|\/checkpoint\//`           | `const HARD_WALL_RE = …` truncated                                                                                      |
 
 Only the first was previously known. The other two are a **second trigger shape**
-the original write-up did not identify: `//` inside a *regex literal*, defeated by
+the original write-up did not identify: `//` inside a _regex literal_, defeated by
 the old `[^:]` lookbehind hack, which only ever protected `://` in URLs.
 
 ### What the NEW walker corrupted — 4 files, introduced by the fix
@@ -887,15 +887,15 @@ The fix had the original defect mirrored. A **quote inside a regex literal** —
 open a phantom STRING on the `"`. From that point every quote is mispaired and
 real comments survive as "string contents".
 
-| File | Trigger | Effect |
-|---|---|---|
-| `lib/linkedin/scraper.ts:162` | `.replace(/"/g, "")` | 16 comment lines left in the "code" |
-| `lib/linkedin/profile-scrape.ts:177` | `.replace(/"/g, "")` | 5 comment lines |
-| `scripts/demo-connect-message.ts` | same shape | 5 comment lines |
-| `pages/settings.tsx` | URL literal in JSX | 1 line |
+| File                                 | Trigger              | Effect                              |
+| ------------------------------------ | -------------------- | ----------------------------------- |
+| `lib/linkedin/scraper.ts:162`        | `.replace(/"/g, "")` | 16 comment lines left in the "code" |
+| `lib/linkedin/profile-scrape.ts:177` | `.replace(/"/g, "")` | 5 comment lines                     |
+| `scripts/demo-connect-message.ts`    | same shape           | 5 comment lines                     |
+| `pages/settings.tsx`                 | URL literal in JSX   | 1 line                              |
 
-`source-text.ts`'s own comment asserted this was safe: *"a `/*` or `//` inside
-[a regex] cannot occur without an escape, so the practical hazard is closed."*
+`source-text.ts`'s own comment asserted this was safe: _"a `/*` or `//` inside
+[a regex] cannot occur without an escape, so the practical hazard is closed."_
 The reasoning is sound and the hazard was misidentified — it is a **quote** inside
 a regex, not a comment marker. Fixed by adding regex-literal awareness
 (`opensRegex`), using the standard "a `/` begins a regex only where a value may
@@ -904,7 +904,7 @@ begin" heuristic. `pages/api/lists/[id]/{apollo-enrich,enrich}.ts` and
 
 **Direction of harm differs between the two defects, and it matters.** The old one
 DELETED code: a negative assertion over a deleted region passes vacuously. The new
-one KEPT comments: a *positive* assertion can then be satisfied by prose. Both are
+one KEPT comments: a _positive_ assertion can then be satisfied by prose. Both are
 unsafe, in opposite assertion polarities — which is why the anchor rule below is
 not sufficient on its own and the helper itself needs tests.
 
@@ -913,11 +913,11 @@ not sufficient on its own and the helper itself needs tests.
 The blast radius was never only about the shared helper. Three files carried their
 own copy of the old regex, none of which received the `ca35aaf` fix:
 
-| Copy | State | Actually corrupting? |
-|---|---|---|
-| `lib/linkedin/connect.test.ts:459` `codeOnlyConnect()` | old regex verbatim | **yes** — truncating `connect.ts`'s `HARD_WALL_RE`, in the very file whose call ORDER its assertions protect |
-| `tests/health-isolation.test.ts:36` `stripCommentsAndStrings()` | old block+line regex | truncation possible; import lines unaffected in practice |
-| `tests/degraded-alerting.test.ts:200` | old regex **with no `[^:]` guard at all** — the worst copy | no lines eaten from its input, by luck |
+| Copy                                                            | State                                                      | Actually corrupting?                                                                                         |
+| --------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `lib/linkedin/connect.test.ts:459` `codeOnlyConnect()`          | old regex verbatim                                         | **yes** — truncating `connect.ts`'s `HARD_WALL_RE`, in the very file whose call ORDER its assertions protect |
+| `tests/health-isolation.test.ts:36` `stripCommentsAndStrings()` | old block+line regex                                       | truncation possible; import lines unaffected in practice                                                     |
+| `tests/degraded-alerting.test.ts:200`                           | old regex **with no `[^:]` guard at all** — the worst copy | no lines eaten from its input, by luck                                                                       |
 
 All three now delegate to the shared helper. `health-isolation`'s was additionally
 **misnamed**: `stripCommentsAndStrings` never stripped strings — and must not,
@@ -978,7 +978,7 @@ under audit:
    corrupted. All false. Verified by hand on `lib/health-contract.ts`, whose
    output was perfectly correct.
 2. `getChildren()` surfaces JSDoc as real nodes, so every documented file
-   "diverged" — correctly, since JSDoc *is* a comment.
+   "diverged" — correctly, since JSDoc _is_ a comment.
 
 Both fixed by delegating the checker to the parser too. The third run found a
 **real** defect the enumeration had missed: `stripStrings`, untouched by either
@@ -1070,20 +1070,20 @@ lib/linkedin/runner.ts:1736   console.log(`[runner] Tick — ${activeRuns.length
 
 Two lines apart, and that relationship has held in every committed version:
 
-| commit | early return | `Tick —` |
-|---|---|---|
-| `85934ab` | :1094 | :1096 |
-| `4af831c` | :1428 | :1430 |
-| `8bc6aaa` | :1578 | **:1580** |
-| `ca35aaf` | :1652 | :1654 |
-| `HEAD` | :1734 | :1736 |
+| commit    | early return | `Tick —`  |
+| --------- | ------------ | --------- |
+| `85934ab` | :1094        | :1096     |
+| `4af831c` | :1428        | :1430     |
+| `8bc6aaa` | :1578        | **:1580** |
+| `ca35aaf` | :1652        | :1654     |
+| `HEAD`    | :1734        | :1736     |
 
 **The Phase 1 line number was correct.** At `8bc6aaa` the line really was at
 :1580 — the citation was accurate when written, and the file has since grown by
 ~160 lines.
 
 **What was wrong in Phase 1 was the attribution.** With zero running runs the
-early return fires and `Tick —` never executes, so a count of zero is *guaranteed*
+early return fires and `Tick —` never executes, so a count of zero is _guaranteed_
 and cannot distinguish "the loop ran and had no work" from "the loop is dead". The
 evidence for the loop being alive came entirely from `runner_progress_at`
 advancing — which the same sentence mentioned, and then credited to the wrong
@@ -1092,12 +1092,12 @@ mechanism. **The conclusion was right; the reasoning attached to it was not.**
 **What was wrong in GA-0 was mine, and it was a factual error.** I searched with
 `grep -n 'Tick\|console.log' … | grep -iE 'tick' | head -5`. That returns **8**
 matches; `head -5` discarded three, including :1736. I read "not in the first five"
-as "not in the file" and wrote *does not exist* as a statement of fact. The
+as "not in the file" and wrote _does not exist_ as a statement of fact. The
 operational conclusion still holds — the container-log grep is not a valid anchor
 for the idle state — but the stated reason was false.
 
 **A wrong record propagated into a later instruction.** The GA prompt proposed the
-`Tick —` count as an anchor *on the strength of the Phase 1 sentence*. It is not a
+`Tick —` count as an anchor _on the strength of the Phase 1 sentence_. It is not a
 usable anchor while idle, for the reason above. This is the second measurable cost
 of an unverified figure reaching the docs — see the 8.6-pages/tick note, which had
 no derivation in the repo and turned out not to hold. **A number or citation that
@@ -1111,11 +1111,11 @@ The container log is 11 startup lines and never grows while idle, so
 rested on it was vacuous. Enumerated, with what survives when re-anchored on
 evidence that actually moves:
 
-| # | Claim | Vacuous evidence | Surviving evidence | Verdict |
-|---|---|---|---|---|
-| 1 | Phase 1 mid-workflow restart performed no LinkedIn navigation | container-log grep | `logs` table still 38 rows, newest **2026-08-08 15:46:19**; `runs` 7 completed + 1 paused, **0 running**; 4 invitation rows, newest `connection_requested_at` **2026-08-09**; `tick()` early-returns at `:1734` before every LinkedIn call | **SURVIVES** |
-| 2 | The P2-4 RTO drill's restored instance performed no navigation | container-log grep | the drill ran against a snapshot with **0 running runs**, so the early return fires; scratch DB row counts unchanged after; no chromium process observed | **SURVIVES** |
-| 3 | The Phase 2 deploy performed no navigation | container-log grep | same `logs`/`runs`/invitation evidence as #1, plus **0 chromium processes** sampled directly, plus the `verify-deploy.mjs` baseline comparison showing all 8 table counts unchanged | **SURVIVES, and is now re-anchored in the tool** |
+| #   | Claim                                                          | Vacuous evidence   | Surviving evidence                                                                                                                                                                                                                         | Verdict                                          |
+| --- | -------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| 1   | Phase 1 mid-workflow restart performed no LinkedIn navigation  | container-log grep | `logs` table still 38 rows, newest **2026-08-08 15:46:19**; `runs` 7 completed + 1 paused, **0 running**; 4 invitation rows, newest `connection_requested_at` **2026-08-09**; `tick()` early-returns at `:1734` before every LinkedIn call | **SURVIVES**                                     |
+| 2   | The P2-4 RTO drill's restored instance performed no navigation | container-log grep | the drill ran against a snapshot with **0 running runs**, so the early return fires; scratch DB row counts unchanged after; no chromium process observed                                                                                   | **SURVIVES**                                     |
+| 3   | The Phase 2 deploy performed no navigation                     | container-log grep | same `logs`/`runs`/invitation evidence as #1, plus **0 chromium processes** sampled directly, plus the `verify-deploy.mjs` baseline comparison showing all 8 table counts unchanged                                                        | **SURVIVES, and is now re-anchored in the tool** |
 
 All three conclusions hold. **This is the third time in this project that "the
 conclusion stands, the reasoning did not"** — after the X2 enumeration and the
@@ -1144,3 +1144,33 @@ passes five runs in a row at the hour that used to break it.
 one encoded "a later day" as "at least 6 hours", which is true for most of the day
 and false in the evening. When the property is expressible directly, assert it
 directly.
+
+---
+
+## C0 — Node 22 runtime baseline and environment hardening (2026-09-17)
+
+Production deployment uses digest-pinned `node:22-slim` (resolving to Node v22.23.0), whereas local developer environments ran Node v24.19.0. Measuring gates inside an isolated Node 22 verification container revealed critical runtime-differential behaviors.
+
+### C0-F1 — `mock.module({ exports })` silently ignored on Node 22
+
+**Claimed:** Test suite passes with 432 green tests on Node 24.
+**Measured:** On Node 22, `mock.module(specifier, { exports: ... })` is silently ignored. Mocks never bind, and test suites run against unmodified real modules. 11 mock-heavy suites were vacuous on the deployment runtime while green on host Node 24.
+**What shipped:** Switched all 13 test files to `namedExports`, which is supported across both Node 22 and 24. Updated `pages/api/auth/signup.ts` to `import { hash } from "bcryptjs"` because Node 22's mock shim cannot emit a default binding. All 432 tests confirmed genuinely passing on both Node 22.23.0 and Node 24.19.0.
+
+### C0-F2 — `next build` child process under `npm run` wrapper
+
+**Claimed:** `npm run build` fails during prerender with `TypeError: Cannot read properties of null (reading 'useState')` in containerized Node 22.
+**Measured:** Root cause isolated via controlled A/B matrix: failure occurs only when `next build` is spawned through `npm run` under a Node parent process in a containerized cgroup. Direct execution (`node node_modules/next/dist/bin/next build`) succeeds 100% of the time in identical workspace conditions.
+**What shipped:** Verification harness runs `scripts/mirror-ee.mjs` explicitly followed by direct binary invocation of `next build`, matching `Dockerfile` production behavior.
+
+### C0-F3 — Verification container tmpfs execution rights
+
+**Claimed:** Containerized checks failed with "failed to map segment" when executing native bindings (`better-sqlite3`).
+**Measured:** Default `/tmp` tmpfs is mounted `noexec`. Native `.node` modules and `.bin` shims require execution memory mapping (`PROT_EXEC`).
+**What shipped:** Configured dedicated executable `/work` tmpfs (`rw,exec,mode=1777`) for workspace execution while keeping scratch data on noexec `/tmp`. Configured `git config --global --add safe.directory /work` for non-root uid 1000.
+
+### C0-L1 — Complete elimination of residual lint debt
+
+**Claimed:** 21 errors / 13 warnings residual lint debt carried from Phases 0–5 as risky churn.
+**Measured:** Systematic remediation of React hook dependencies, unhandled Promise/state lifecycles in UI pages (`pages/workflows/[id].tsx`, `pages/contacts/index.tsx`, `pages/email-health.tsx`, `pages/settings.tsx`, `pages/lists/[id].tsx`), and unused parameters (`lib/linkedin/runner.ts`, `lib/linkedin/scraper.ts`, `pages/companies/[id].tsx`, `pages/contacts/[id].tsx`).
+**What shipped:** Reached **0 errors / 0 warnings** under `eslint --max-warnings=0`. All 432 tests continue to pass and Next.js production build succeeds with zero prerender defects.

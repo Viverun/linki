@@ -69,6 +69,20 @@ export function isAllowedLinkedinUrl(raw: string | null | undefined): boolean {
   return LINKEDIN_HOST.test(url.hostname);
 }
 
+export function isAllowedSalesNavLeadUrl(raw: string | null | undefined): boolean {
+  if (!raw || /[\s\\]/.test(raw)) return false;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || !LINKEDIN_HOST.test(url.hostname)) return false;
+    if (url.username || url.password || url.port) return false;
+    const path = raw.match(/^https:\/\/[^/?#@]+([^?#]*)/i)?.[1];
+    if (path !== url.pathname) return false;
+    return /^\/sales\/lead\/[A-Za-z0-9_-]+(?:(?:,|%2[cC])[A-Za-z0-9_-]*){0,2}\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 const VANITY_RE = /\/in\/([^/?#]+)/;
 
 /**

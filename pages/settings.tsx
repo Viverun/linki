@@ -1,8 +1,8 @@
 import Head from "next/head";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useSyncExternalStore } from "react";
 import { useRouter } from "next/router";
 import { GetServerSideProps } from "next";
-import { useSession } from "next-auth/react";
+import { signOut, useSession } from "next-auth/react";
 import { getDb } from "@/lib/db";
 import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
@@ -1575,16 +1575,23 @@ function IntegrationsTab({ hasPremium }: { hasPremium: boolean }) {
 // it's built from the browser's own origin) and copy the one-liner to connect an
 // AI agent. Premium-only (ee/mcp) — hidden entirely when hasPremium is false.
 
+function subscribeToOrigin() {
+  return () => {};
+}
+
+function getOriginSnapshot() {
+  return window.location.origin;
+}
+
+function getServerOriginSnapshot() {
+  return "";
+}
+
 function McpCard() {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [mcpUrl, setMcpUrl] = useState("");
-
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      setMcpUrl(`${window.location.origin}/api/mcp`);
-    }
-  }, []);
+  const origin = useSyncExternalStore(subscribeToOrigin, getOriginSnapshot, getServerOriginSnapshot);
+  const mcpUrl = origin ? `${origin}/api/mcp` : "";
 
   async function copy(text: string) {
     try {
@@ -1696,8 +1703,9 @@ function GeneralTab({ hasPremium }: { hasPremium: boolean }) {
     });
     setLoading(false);
     if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
-    toast.success("Password changed");
+    toast.success("Password changed. All sessions revoked; sign in again.");
     setForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    await signOut({ callbackUrl: "/login" });
   }
 
   return (

@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /*
- * scripts/strip-mirrored-pages.js <targetDir>
+ * scripts/strip-mirrored-pages.mjs <targetDir>
  *
- * Removes the premium pages that scripts/mirror-ee.js copied into pages/**, using the
+ * Removes the premium pages that scripts/mirror-ee.mjs copied into pages/**, using the
  * manifest it wrote. Also removes the generated pages/.gitignore and prunes any now-empty
  * directories left behind (e.g. pages/api/oauth/ after all its routes are stripped).
  *
  * Used by .publish/publish.sh and .publish/dry-run.sh so the public tree contains only
  * genuinely open-core routes. Idempotent; no-op if there's no manifest. See docs/OPEN_CORE.md.
  */
-const fs = require("fs");
-const path = require("path");
+import fs from "node:fs";
+import path from "node:path";
 
 const root = process.argv[2] || process.cwd();
 const pagesDir = path.join(root, "pages");

@@ -15,12 +15,13 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-connect-idempotence-tests";
 // account. getLinkedinUrl short-circuits on a /in/ URL, so no other module is
 // involved once these two are mocked.
 
-// @types/node is pinned at v20, which still types mock.module's old
-// `namedExports` option. Node 24 deprecates that in favour of `exports`, so
-// call the runtime-correct shape through a locally narrowed type.
+// mock.module must use the `namedExports` option: on Node 22 (the deployment
+// runtime) the newer `exports` option is SILENTLY IGNORED — the mock does not
+// apply, the real module stays live, and sendCalls stays 0. `namedExports`
+// works on both Node 22 and 24 (deprecated on 24, warnings disabled).
 // Bound, not detached — mock.module reads private state off `mock`.
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 const realConnect = await import("@/lib/linkedin/connect");
 const { PendingInviteError, InviteNotSentError, SessionExpiredError, InviteUiError } = realConnect;
@@ -30,7 +31,7 @@ let sendBehaviour: () => void | never = () => {};
 let sendCalls = 0;
 
 mockModule("@/lib/linkedin/connect", {
-  exports: {
+  namedExports: {
     ...realConnect,
     sendConnectionRequest: async () => { sendCalls++; sendBehaviour(); },
   },
@@ -39,7 +40,7 @@ mockModule("@/lib/linkedin/connect", {
 const realSession = await import("@/lib/linkedin/session");
 let pagesClosed = 0;
 mockModule("@/lib/linkedin/session", {
-  exports: {
+  namedExports: {
     ...realSession,
     getSessionPage: async () => ({ close: async () => { pagesClosed++; } }),
     saveSessionState: async () => {},

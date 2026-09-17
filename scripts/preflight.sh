@@ -150,9 +150,14 @@ fi
 # response is to bypass or delete the gate — a worse outcome than 40 lint errors.
 # A gate should catch regression and never block progress. Same principle as the
 # test-count tripwire. Lower the baseline here when errors are genuinely fixed.
-ESLINT_BASELINE="${ESLINT_BASELINE:-40}"
+ESLINT_BASELINE="${ESLINT_BASELINE:-0}"
 step "eslint <= baseline (${ESLINT_BASELINE})"
-n=$(npx eslint . 2>&1 | grep -oE '[0-9]+ problems' | head -1 | grep -oE '^[0-9]+' | head -1)
+# A clean run prints nothing and exits 0 — there is no "0 problems" line to
+# parse. The old parser called that "unknown" and failed the gate the first time
+# lint was actually clean (C1). Exit 0 with no summary line is zero problems.
+eslint_out=$(npx eslint . 2>&1); eslint_rc=$?
+n=$(printf '%s\n' "${eslint_out}" | grep -oE '[0-9]+ problems?' | head -1 | grep -oE '^[0-9]+' | head -1)
+if [ -z "${n}" ] && [ "${eslint_rc}" -eq 0 ]; then n=0; fi
 n=${n:-unknown}
 if [ "${n}" = "unknown" ]; then
   bad "could not parse eslint output"

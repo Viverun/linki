@@ -20,7 +20,7 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-message-idempotency-tests";
 // @types/node is pinned at v20, which still types mock.module's old
 // `namedExports` option. Node 24 deprecates that in favour of `exports`.
 const mockModule = mock.module.bind(mock) as unknown as
-  (specifier: string, options: { exports: Record<string, unknown> }) => void;
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
 
 interface SendRecord { fullName: string; text: string; url: string; cachedUrn: string | null }
 
@@ -34,7 +34,7 @@ let saveBehaviour: () => void = () => {};
 
 const realMessage = await import("@/lib/linkedin/message");
 mockModule("@/lib/linkedin/message", {
-  exports: {
+  namedExports: {
     ...realMessage,
     sendMessage: async (_page: unknown, fullName: string, text: string, url: string, cachedUrn: string | null) => {
       // preSendBehaviour throws BEFORE the click is recorded (nothing delivered).
@@ -50,7 +50,7 @@ mockModule("@/lib/linkedin/message", {
 
 const realSession = await import("@/lib/linkedin/session");
 mockModule("@/lib/linkedin/session", {
-  exports: {
+  namedExports: {
     ...realSession,
     getSessionPage: async () => ({ close: async () => {} }),
     saveSessionState: async () => { saveBehaviour(); },
