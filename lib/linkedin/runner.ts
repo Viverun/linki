@@ -196,7 +196,7 @@ function nextScheduledSlot(account: ScheduleConfig): string {
   return new Date(Date.now() + 86_400_000).toISOString();
 }
 
-interface WorkflowStep {
+export interface WorkflowStep {
   id: string;
   step_order: number;
   track: "linkedin" | "email";
@@ -608,7 +608,10 @@ export type StepResolution =
   | { kind: "deleted" }
   | { kind: "done" };
 
-export function resolveStep(tr: TrackRun, steps: WorkflowStep[]): StepResolution {
+export function resolveStep(
+  tr: Pick<TrackRun, "current_step" | "current_step_id"> & { id?: string },
+  steps: WorkflowStep[]
+): StepResolution {
   if (tr.current_step_id) {
     const index = steps.findIndex(s => s.id === tr.current_step_id);
     if (index === -1) return { kind: "deleted" };
@@ -617,7 +620,7 @@ export function resolveStep(tr: TrackRun, steps: WorkflowStep[]): StepResolution
       // saying out loud, because before P2-3 this is precisely where the wrong
       // step would have run.
       console.warn(
-        `[runner] track ${tr.id}: current_step index ${tr.current_step} disagrees with ` +
+        `[runner] track ${tr.id ?? "?"}: current_step index ${tr.current_step} disagrees with ` +
         `current_step_id (now at index ${index}) — resolving by id, as designed`
       );
     }

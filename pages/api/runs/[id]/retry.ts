@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
-import { stepRefOf, legacyStepRefOf } from "@/lib/linkedin/runner";
+import { stepRefOf, legacyStepRefOf, resolveStep } from "@/lib/linkedin/runner";
+import type { WorkflowStep } from "@/lib/linkedin/runner";
 import { methodNotAllowed } from "@/lib/api-validate";
 
 /**
@@ -100,11 +101,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   const stepsFor = (workflowId: string, track: string) =>
     db.prepare(
-      "SELECT id, step_type, message_position FROM workflow_steps WHERE workflow_id = ? AND track = ? ORDER BY step_order"
-    ).all(workflowId, track) as Array<{ id: string; step_type: string; message_position: number | null }>;
+      "SELECT * FROM workflow_steps WHERE workflow_id = ? AND track = ? ORDER BY step_order"
+    ).all(workflowId, track) as WorkflowStep[];
 
   const rearm = db.prepare(
-    `UPDATE run_profile_tracks SET state = 'in_progress', error_message = NULL, next_step_at = NULL WHERE id = ?`
+    `UPDATE run_profile_tracks SET state = 'in_progress', error_message = NULL, next_step_at = NULL, current_step = ?, current_step_id = ? WHERE id = ?`
   );
   // P2-3 census. Both callers of `advance` (the confirmed branch and
   // mark_delivered) move a track PAST a step, so both must move the pinned id
@@ -122,29 +123,38 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   db.transaction(() => {
     for (const c of candidates) {
       const steps = stepsFor(c.workflow_id, c.track);
-      // P2-3: by id where the track has one. Retry decides whether a step already
-      // ran; resolving that against a reordered list is how a delivered message
-      // gets re-sent.
-      const step = (c.current_step_id && steps.find(x => x.id === c.current_step_id)) || steps[c.current_step];
+      // PR-12: the runner's resolver is the single source of truth. Retry can
+      // never act on a step the runner would not run.
+      const resolved = resolveStep({ current_step: c.current_step, current_step_id: c.current_step_id }, steps);
+      if (resolved.kind === "deleted") {
+        outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "blocked",
+          reason: `the step this track was pinned to (${c.current_step_id}) no longer exists — edit the campaign to restore it, or unenroll` });
+        continue;
+      }
+      if (resolved.kind === "done") {
+        outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "blocked", reason: "track is past the last step" });
+        continue;
+      }
+      const { step, index } = resolved;
 
       // Message, InMail and email steps have an irreversible-action ledger.
       // Anything else (connect, visit, delay) re-arms exactly as before.
       const action =
-        step?.step_type === "message" ? "message" :
-        step?.step_type === "sales_inmail" ? "inmail" :
-        step?.step_type === "email" ? "email" : null;
-      if (!step || !action) {
+        step.step_type === "message" ? "message" :
+        step.step_type === "sales_inmail" ? "inmail" :
+        step.step_type === "email" ? "email" : null;
+      if (!action) {
         // mark_delivered means "record that it happened, do not act". Falling
         // through to a plain re-arm here would turn that into a real retry — on
         // a connect step, an actual invitation attempt. Refuse instead.
         if (resolution === "mark_delivered") {
           outcomes.push({
             track_id: c.id, target_id: c.target_id, outcome: "blocked",
-            reason: `mark_delivered applies to message/InMail/email steps only, not ${step?.step_type ?? "an unknown step"}`,
+            reason: `mark_delivered applies to message/InMail/email steps only, not ${step.step_type}`,
           });
           continue;
         }
-        rearm.run(c.id);
+        rearm.run(index, step.id, c.id);
         outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "rearmed" });
         continue;
       }
@@ -170,7 +180,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
           `UPDATE step_side_effects SET status = 'abandoned', error_message = ?
            WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
         ).run(OPERATOR_FORCED_RESEND, c.run_profile_id, c.track, ledger.step_ref, action);
-        rearm.run(c.id);
+        rearm.run(index, step.id, c.id);
         console.warn(`[retry] run=${runId} track=${c.id} operator FORCED resend of a ${ledger.status} ${action}`);
         outcomes.push({
           track_id: c.id, target_id: c.target_id, outcome: "rearmed",
@@ -181,7 +191,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
       if (ledger?.status === "confirmed") {
         // Already delivered. Re-arming in place would re-send, so move past it.
-        advance.run(c.current_step + 1, stepIdAt(c.workflow_id, c.track, c.current_step + 1), c.id);
+        advance.run(index + 1, stepIdAt(c.workflow_id, c.track, index + 1), c.id);
         outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "advanced", reason: `${action} already delivered at ${ledger.step_ref} — advanced past it` });
         continue;
       }
@@ -211,7 +221,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
             db.prepare("UPDATE targets SET inmail_sent_at = COALESCE(inmail_sent_at, ?) WHERE id = ?")
               .run(new Date().toISOString(), c.target_id);
           }
-          advance.run(c.current_step + 1, stepIdAt(c.workflow_id, c.track, c.current_step + 1), c.id);
+          advance.run(index + 1, stepIdAt(c.workflow_id, c.track, index + 1), c.id);
           console.warn(`[retry] run=${runId} track=${c.id} operator MARKED a possibly-delivered ${action} as delivered (no send performed)`);
           outcomes.push({
             track_id: c.id, target_id: c.target_id, outcome: "marked_delivered",
@@ -235,7 +245,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         });
         continue;
       }
-      rearm.run(c.id);
+      rearm.run(index, step.id, c.id);
       outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "rearmed" });
     }
   })();
