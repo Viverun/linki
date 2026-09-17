@@ -12,7 +12,8 @@ import { visitProfile, type VisitResult } from "@/lib/linkedin/visit";
 import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError, vanityNameOf } from "@/lib/linkedin/connect";
 import { sendMessage, NotConnectedError, MessagingUrnUnresolvedError } from "@/lib/linkedin/message";
 import { shouldSyncAccepted, syncAcceptedConnections } from "@/lib/linkedin/sync-accepted";
-import { sendEmail } from "@/lib/email/sender";
+import { sendEmail, classifySmtpFailure } from "@/lib/email/sender";
+import type { SendResult } from "@/lib/email/sender";
 import { shouldSyncEmailInbox, syncEmailInbox } from "@/lib/email/inbox";
 import { enrichProfile } from "@/lib/linkedin/enrich";
 import { matchPerson } from "@/lib/apollo";
@@ -438,7 +439,7 @@ export function recordTickOutcome(db: ReturnType<typeof getDb>, err: unknown): v
  */
 export class UnresolvedSideEffectError extends Error {}
 
-export type SideEffectAction = "message" | "inmail";
+export type SideEffectAction = "message" | "inmail" | "email";
 
 export interface SideEffectRow {
   id: string;
@@ -1582,12 +1583,82 @@ export async function executeStep(
       // Step-level signature takes precedence; null means fall back to email account default
       const sig = (step.email_signature !== null ? step.email_signature : emailAccount.signature)?.trim();
       const finalEmailBody = sig ? `${emailBody}\n\n--\n${sig}` : emailBody;
+
+      // ── Side-effect ledger (C2-A / PR-02) — same shape as the message step ──
+      // Layer 1 keys on the step id (legacy pos: readable); Layer 2 is the
+      // subject+body fingerprint, which catches a re-saved campaign renumbering
+      // an already-sent email. Both refuse rather than guess.
+      const emailStepRef = stepRefOf(step);
+      const emailLegacyRef = legacyStepRefOf(step);
+      const emailFingerprint = bodyFingerprint(`${emailSubject}\n\n${finalEmailBody}`);
+      const priorEmail = sideEffectFor(db, tr.run_profile_id, tr.track, emailStepRef, "email", emailLegacyRef);
+
+      if (priorEmail?.status === "confirmed") {
+        trRecordContext(db, tr, { emailSubject, emailBody });
+        trAdvance(db, tr, steps);
+        log(db, runId, target.id, "info", `Email to ${name} was already accepted by the server — skipping send and advancing`);
+        return;
+      }
+      if (priorEmail?.status === "in_flight") {
+        throw new UnresolvedSideEffectError(
+          `A previous attempt to email ${name} may already have been delivered (ledger ${emailStepRef} still in flight). ` +
+          `Refusing to send again — resolve this manually before retrying.`
+        );
+      }
+      const emailCollision = conflictingFingerprint(db, tr.run_profile_id, tr.target_id, emailStepRef, emailFingerprint);
+      if (emailCollision) {
+        throw new UnresolvedSideEffectError(
+          `This exact email was already sent to ${name} at step ${emailCollision.step_ref} (now ${emailStepRef}) — ` +
+          `the campaign was likely re-saved and the step renumbered. Refusing to send a duplicate.`
+        );
+      }
+      // Commit the intent. If this insert fails, nothing is sent.
+      sideEffectBegin(db, tr, emailStepRef, "email", emailFingerprint);
+
       db.prepare("UPDATE run_profile_tracks SET last_step_at = datetime('now') WHERE id = ?").run(tr.id);
       log(db, runId, target.id, "info", `Sending email to ${name} <${freshTarget.email}>`);
-      await sendEmail({ ...emailAccount, password: decryptSecret(emailAccount.password)! }, freshTarget.email, emailSubject, finalEmailBody);
-      trRecordContext(db, tr, { emailSubject, emailBody });
-      trAdvance(db, tr, steps);
-      log(db, runId, target.id, "info", `Email sent to ${name}`);
+      const setEmailLedger = db.prepare(
+        "UPDATE step_side_effects SET status = ?, error_message = ?, confirmed_at = ? WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = 'email'"
+      );
+      let sendResult: SendResult;
+      try {
+        sendResult = await sendEmail({ ...emailAccount, password: decryptSecret(emailAccount.password)! }, freshTarget.email, emailSubject, finalEmailBody);
+      } catch (err) {
+        const failure = classifySmtpFailure(err);
+        const detail = err instanceof Error ? err.message.slice(0, 400) : String(err);
+        if (failure === "ambiguous") {
+          // Socket died at/after DATA, or an error we cannot place: the message
+          // may be on its way. Leave the intent armed so nothing re-sends it.
+          setEmailLedger.run("in_flight", `left in_flight — may have been delivered: ${detail}`, null, tr.run_profile_id, tr.track, emailStepRef);
+          log(db, runId, target.id, "warn", `${name}: email send failed after the body was transmitted — leaving the ledger in flight because delivery cannot be ruled out`);
+          throw new UnresolvedSideEffectError(
+            `Email to ${name} may already have been delivered (${failure}: ${detail}). Refusing to retry automatically — resolve this manually.`
+          );
+        }
+        // pre_send / rejected: the server never accepted the body. Safe to retract.
+        setEmailLedger.run("abandoned", `${failure}: ${detail}`, null, tr.run_profile_id, tr.track, emailStepRef);
+        throw err;
+      }
+
+      if (!sendResult.accepted.includes(freshTarget.email)) {
+        // Resolved without a throw but the recipient was not accepted (all rejected).
+        setEmailLedger.run("abandoned", `rejected: server did not accept ${freshTarget.email}`, null, tr.run_profile_id, tr.track, emailStepRef);
+        trFail(db, tr, `Email rejected by server for ${freshTarget.email}`);
+        log(db, runId, target.id, "error", `Email to ${name} was rejected by the server — not delivered`);
+        return;
+      }
+
+      // ── past this line the server HAS accepted the message ─────────────────
+      // Everything below is bookkeeping. None of it may throw out of this branch.
+      try {
+        setEmailLedger.run("confirmed", null, nowIso(), tr.run_profile_id, tr.track, emailStepRef);
+        trRecordContext(db, tr, { emailSubject, emailBody });
+        trAdvance(db, tr, steps);
+        log(db, runId, target.id, "info", `Email sent to ${name}`);
+      } catch (bookkeepingErr) {
+        log(db, runId, target.id, "error",
+          `Email to ${name} WAS accepted by the server but bookkeeping failed: ${bookkeepingErr instanceof Error ? bookkeepingErr.message : bookkeepingErr}`);
+      }
     }
 
   } catch (err) {

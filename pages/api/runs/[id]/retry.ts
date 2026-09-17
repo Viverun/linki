@@ -44,7 +44,7 @@ const OPERATOR_ASSERTION = "operator-asserted delivery (not system-confirmed)";
  * what the SYSTEM may now do — not a claim that nothing was delivered — which is
  * exactly why the operator's override is written into error_message beside it.
  */
-const OPERATOR_FORCED_RESEND = "operator forced a resend of a possibly-delivered message";
+const OPERATOR_FORCED_RESEND = "operator forced a resend of a possibly-delivered message/email";
 
 /**
  * - "skip"           default. A possibly-delivered message is left alone and the
@@ -127,9 +127,12 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       // gets re-sent.
       const step = (c.current_step_id && steps.find(x => x.id === c.current_step_id)) || steps[c.current_step];
 
-      // Only message/inmail steps have an irreversible-action ledger. Anything
-      // else (connect, visit, delay, email) re-arms exactly as before.
-      const action = step?.step_type === "message" ? "message" : step?.step_type === "sales_inmail" ? "inmail" : null;
+      // Message, InMail and email steps have an irreversible-action ledger.
+      // Anything else (connect, visit, delay) re-arms exactly as before.
+      const action =
+        step?.step_type === "message" ? "message" :
+        step?.step_type === "sales_inmail" ? "inmail" :
+        step?.step_type === "email" ? "email" : null;
       if (!step || !action) {
         // mark_delivered means "record that it happened, do not act". Falling
         // through to a plain re-arm here would turn that into a real retry — on
@@ -137,7 +140,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         if (resolution === "mark_delivered") {
           outcomes.push({
             track_id: c.id, target_id: c.target_id, outcome: "blocked",
-            reason: `mark_delivered applies to message/InMail steps only, not ${step?.step_type ?? "an unknown step"}`,
+            reason: `mark_delivered applies to message/InMail/email steps only, not ${step?.step_type ?? "an unknown step"}`,
           });
           continue;
         }
@@ -185,23 +188,25 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
       if (ledger?.status === "in_flight") {
         if (resolution === "mark_delivered") {
-          if (action !== "message" && action !== "inmail") {
+          if (action !== "message" && action !== "inmail" && action !== "email") {
             outcomes.push({
               track_id: c.id, target_id: c.target_id, outcome: "blocked",
-              reason: `mark_delivered applies to message/InMail steps only, not ${action}`,
+              reason: `mark_delivered applies to message/InMail/email steps only, not ${action}`,
             });
             continue;
           }
-          // Operator asserts they checked LinkedIn and the message arrived.
-          // Records the assertion, advances past the step. No send, no browser.
-          // Phase 5: extended to InMail (operator checks the Sent folder) —
-          // the F2 note's symmetric stamp for connect's self-heal.
+          // Operator asserts they checked LinkedIn (or their mailbox) and the
+          // message arrived. Records the assertion, advances past the step. No
+          // send, no browser. Phase 5: extended to InMail (operator checks the
+          // Sent folder) — the F2 note's symmetric stamp for connect's self-heal.
           db.prepare(
             `UPDATE step_side_effects SET status = 'confirmed', confirmed_at = ?, error_message = ?
              WHERE run_profile_id = ? AND track = ? AND step_ref = ? AND action = ?`
           ).run(new Date().toISOString(), OPERATOR_ASSERTION, c.run_profile_id, c.track, ledger.step_ref, action);
-          db.prepare("UPDATE targets SET message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?")
-            .run(new Date().toISOString(), c.target_id);
+          if (action !== "email") {
+            db.prepare("UPDATE targets SET message_sent_at = COALESCE(message_sent_at, ?) WHERE id = ?")
+              .run(new Date().toISOString(), c.target_id);
+          }
           if (action === "inmail") {
             db.prepare("UPDATE targets SET inmail_sent_at = COALESCE(inmail_sent_at, ?) WHERE id = ?")
               .run(new Date().toISOString(), c.target_id);
