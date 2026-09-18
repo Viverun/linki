@@ -1097,6 +1097,12 @@ function Wizard({
           <div className="flex-1 overflow-y-auto pt-10 px-10 pb-6">
             <div className={`w-full mx-auto ${page === "prospects" ? "max-w-5xl" : "max-w-2xl"}`}>
 
+              {!hasPremium && (
+                <p className="text-xs text-base-content/50 border border-base-300 rounded-lg px-3 py-2 mb-4">
+                  LinkedIn replies are not detected in this build. LinkedIn follow-ups stop only when you unenroll the contact or an email reply is received.
+                </p>
+              )}
+
               {/* ── Page: Prospects ── */}
               {page === "prospects" && (() => {
                 const filteredLists = lists.filter((l) =>

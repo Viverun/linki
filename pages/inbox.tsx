@@ -48,13 +48,14 @@ const VERDICT_BADGES: Record<string, { label: string; cls: string }> = {
   substitute: { label: "Substitute", cls: "bg-secondary/15 text-secondary" },
   call_task: { label: "Call task", cls: "bg-success/15 text-success" },
   human_reply: { label: "Human reply", cls: "bg-info/15 text-info" },
+  out_of_office: { label: "Out of office", cls: "bg-warning/15 text-warning" },
   not_interested: { label: "Not interested", cls: "bg-error/15 text-error" },
   cancelled: { label: "Cancelled", cls: "bg-base-300/60 text-base-content/50" },
 };
 
 function verdictBadge(reply: InboxReply): { label: string; cls: string } {
   if (reply.classification_error) return { label: "Failed", cls: "bg-error/15 text-error" };
-  if (reply.reply_id && !reply.classified_at) return { label: "Pending", cls: "bg-base-300/60 text-base-content/50" };
+  if (reply.reply_id && !reply.dispatched_at) return { label: "Awaiting decision", cls: "bg-base-300/60 text-base-content/50" };
   if (reply.reply_kind && VERDICT_BADGES[reply.reply_kind]) return VERDICT_BADGES[reply.reply_kind];
   return { label: "—", cls: "bg-base-300/40 text-base-content/30" };
 }
@@ -62,7 +63,7 @@ function verdictBadge(reply: InboxReply): { label: string; cls: string } {
 // Stable key for filtering — matches the categories the badge renders.
 function verdictKey(reply: InboxReply): string {
   if (reply.classification_error) return "failed";
-  if (reply.reply_id && !reply.classified_at) return "pending";
+  if (reply.reply_id && !reply.dispatched_at) return "pending";
   if (reply.reply_kind && VERDICT_BADGES[reply.reply_kind]) return reply.reply_kind;
   return "none";
 }
@@ -94,7 +95,7 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
   const [replyText, setReplyText] = useState("");
   const [replySubject, setReplySubject] = useState("");
   const [sending, setSending] = useState(false);
-  const [acting, setActing] = useState<"reclassify" | "cancel" | null>(null);
+  const [acting, setActing] = useState<"reclassify" | "cancel" | "resume" | null>(null);
   const threadEndRef = useRef<HTMLDivElement>(null);
 
   const verdict = verdictBadge(reply);
@@ -133,6 +134,23 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
       onClose();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Cancel failed");
+    } finally {
+      setActing(null);
+    }
+  }
+
+  async function handleResumeFollowup() {
+    if (!reply.reply_id) return;
+    setActing("resume");
+    try {
+      const r = await fetch(`/api/inbox/${reply.reply_id}/resume-followup`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error ?? "Resume failed");
+      toast.success(`Follow-ups resumed (${d.rearmed} track${d.rearmed === 1 ? "" : "s"})`);
+      onActionDone();
+      onClose();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Resume failed");
     } finally {
       setActing(null);
     }
@@ -247,6 +265,14 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
               </div>
             )}
 
+            {dispatch?.source === "open-core" && (
+              <p className="text-xs text-base-content/50">
+                {dispatch.decision === "ooo_continue" && `Out of office (p=${Number(dispatch.p_ooo).toFixed(2)}) — follow-ups continue${dispatch.return_date ? ` after ${dispatch.return_date}` : ""}`}
+                {dispatch.decision === "human_reply" && `Person replied${dispatch.p_ooo != null ? ` (p_ooo=${Number(dispatch.p_ooo).toFixed(2)})` : ""} — follow-ups stopped${dispatch.reason ? ` · ${dispatch.reason}` : ""}`}
+                {dispatch.decision === "operator_continue" && "Operator resumed follow-ups"}
+              </p>
+            )}
+
             <div className="flex items-center gap-2 pt-0.5">
               {hasPremium && (
                 <button
@@ -266,6 +292,16 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
                 >
                   {acting === "cancel" ? <RiLoader4Line size={12} className="animate-spin" /> : null}
                   Cancel follow-up
+                </button>
+              )}
+              {reply.reply_id && (reply.email_replied_at || dispatch?.decision === "human_reply") && (
+                <button
+                  onClick={handleResumeFollowup}
+                  disabled={acting !== null}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-success/10 text-success hover:bg-success/20 disabled:opacity-50"
+                >
+                  {acting === "resume" ? <RiLoader4Line size={12} className="animate-spin" /> : null}
+                  Resume follow-ups
                 </button>
               )}
             </div>
@@ -441,6 +477,12 @@ export default function InboxPage() {
           onActionDone={load}
           hasPremium={hasPremium}
         />
+      )}
+
+      {!hasPremium && (
+        <p className="text-xs text-base-content/50 border border-base-300 rounded-lg px-3 py-2 mb-4">
+          LinkedIn replies are not detected in this build. LinkedIn follow-ups stop only when you unenroll the contact or an email reply is received.
+        </p>
       )}
 
       {/* Header */}

@@ -1,7 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import { randomUUID } from "crypto";
 import { getDb } from "@/lib/db";
 import { ensureGlobalRunnerStarted } from "@/lib/linkedin/runner";
 import { methodNotAllowed } from "@/lib/api-validate";
+import { hasPremium } from "@/lib/premium";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return methodNotAllowed(res, ["POST"]);
@@ -25,6 +27,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   db.prepare(
     "UPDATE runs SET status = 'running', started_at = COALESCE(started_at, datetime('now')) WHERE id = ?"
   ).run(id);
+
+  if (!hasPremium) {
+    db.prepare("INSERT INTO logs (id, run_id, target_id, level, message) VALUES (?, ?, NULL, 'warn', ?)")
+      .run(randomUUID(), id, "LinkedIn reply detection unavailable in this build — LinkedIn follow-ups are not auto-stopped; email replies hold both channels");
+  }
 
   ensureGlobalRunnerStarted();
 

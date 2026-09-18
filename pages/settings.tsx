@@ -1426,6 +1426,15 @@ const INTEGRATIONS: IntegrationDef[] = [
     placeholder: "Apollo API key",
   },
   {
+    key: "typesafe",
+    name: "TypeSafe (Jev)",
+    description: "Out-of-office detection for email replies in the open-core build",
+    badge: "TS",
+    badgeColor: "#16a34a",
+    accentColor: "#16a34a",
+    placeholder: "TypeSafe API key",
+  },
+  {
     key: "openrouter",
     name: "OpenRouter",
     description: "Route AI requests across models (GPT-4, Claude, Llama…)",
@@ -1674,9 +1683,12 @@ function GeneralTab({ hasPremium }: { hasPremium: boolean }) {
   const [loading, setLoading] = useState(false);
   const [importCap, setImportCap] = useState<number | "">("");
   const [capSaving, setCapSaving] = useState(false);
+  const [oooThreshold, setOooThreshold] = useState<number | "">("");
+  const [thrSaving, setThrSaving] = useState(false);
 
   useEffect(() => {
     fetch("/api/settings/import-cap").then((r) => r.json()).then((d) => setImportCap(d.cap ?? 1500)).catch(() => {});
+    fetch("/api/settings/reply-policy").then((r) => r.json()).then((d) => setOooThreshold(d.ooo_threshold ?? 0.9)).catch(() => {});
   }, []);
 
   async function saveImportCap(e: React.FormEvent) {
@@ -1690,6 +1702,19 @@ function GeneralTab({ hasPremium }: { hasPremium: boolean }) {
     setCapSaving(false);
     if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
     toast.success("Daily import limit saved");
+  }
+
+  async function saveOooThreshold(e: React.FormEvent) {
+    e.preventDefault();
+    setThrSaving(true);
+    const res = await fetch("/api/settings/reply-policy", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ooo_threshold: Number(oooThreshold) }),
+    });
+    setThrSaving(false);
+    if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
+    toast.success("Reply policy saved");
   }
 
   async function handleChangePassword(e: React.FormEvent) {
@@ -1733,6 +1758,22 @@ function GeneralTab({ hasPremium }: { hasPremium: boolean }) {
           </div>
           <button type="submit" disabled={capSaving} className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-medium bg-primary text-primary-content hover:bg-primary/90 transition-colors disabled:opacity-50">
             {capSaving ? <span className="loading loading-spinner loading-xs" /> : "Save"}
+          </button>
+        </form>
+      </div>
+
+      {/* Out-of-office threshold */}
+      <div className="bg-base-200 border border-base-300/50 rounded-xl p-4">
+        <p className="text-xs font-medium text-base-content/40 uppercase tracking-wide">Out-of-office threshold</p>
+        <p className="text-xs text-base-content/50 mb-3">
+          A captured email reply pauses follow-ups until it is judged. Replies judged to be automatic out-of-office notices with at least this probability keep the sequence going; everything else stops it. Requires a TypeSafe key under Integrations.
+        </p>
+        <form onSubmit={saveOooThreshold} className="flex items-end gap-2">
+          <div className="flex-1">
+            <input type="number" min={0.5} max={0.99} step={0.01} className="input input-bordered input-sm w-full bg-base-300/50" placeholder="0.90" value={oooThreshold} onChange={(e) => setOooThreshold(e.target.value === "" ? "" : Number(e.target.value))} required />
+          </div>
+          <button type="submit" disabled={thrSaving} className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-medium bg-primary text-primary-content hover:bg-primary/90 transition-colors disabled:opacity-50">
+            {thrSaving ? <span className="loading loading-spinner loading-xs" /> : "Save"}
           </button>
         </form>
       </div>
