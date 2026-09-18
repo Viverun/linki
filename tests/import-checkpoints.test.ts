@@ -51,6 +51,7 @@ function row(id: string) {
   return db().prepare("SELECT * FROM list_imports WHERE id = ?").get(id) as {
     status: string; owner: string | null; page: number; imported: number; skipped: number;
     stall_reason: string | null; recovery_count: number; error: string | null; cancel_requested: number;
+    total: number;
   };
 }
 function listTargetCount(listId: string): number {
@@ -119,7 +120,7 @@ test("I2 a missing page ends the window without advancing; continuation from pag
   await importJobs.runBatch(id, { scrape });
   const r = row(id);
   assert.equal(r.page, 1);
-  assert.equal(r.stall_reason, "no data intercepted after retry");
+  assert.equal(r.stall_reason, "no data intercepted after retry at page 2");
   assert.equal(r.status, "done");
   const cont = db().prepare("SELECT start_page FROM list_imports WHERE list_id = ? AND id != ?").get(listId, id) as { start_page: number } | undefined;
   assert.ok(cont, "continuation row scheduled");
@@ -157,17 +158,21 @@ test("I3 a crash between pages leaves a stale running row; recovery reschedules 
   assert.equal(recovered.recovery_count, 1);
   assert.equal(recovered.owner, null);
 
-  assert.equal(importJobs.claimScheduledImport(db(), id), true);
+  const token = importJobs.claimScheduledImport(db(), id);
+  assert.ok(token, "reschedule is claimable again");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const scrape = async (owner: any, url: string, opts: any) => {
+    assert.equal(opts.startPage, 2, "resumes from page+1, never re-fetching the durably checkpointed page 1");
     await opts.onPage(2, makeProfiles(2));
     await opts.onPage(3, makeProfiles(3));
     return { profiles: [], lastPage: 3, knownTotal: 75, exhausted: true };
   };
-  await importJobs.runBatch(id, { scrape });
+  await importJobs.runBatch(id, { scrape, owner: token! });
   const r = row(id);
   assert.equal(r.status, "done");
   assert.equal(r.page, 3);
+  assert.equal(r.imported, 75, "25 from the crash-simulated page 1 + 25 + 25 from the re-run");
+  assert.equal(r.skipped, 0);
   assert.equal(listTargetCount(listId), 75, "no duplicate insert of page 1");
 });
 
@@ -212,4 +217,51 @@ test("I6 owner fence: an onPage for a row whose owner changed inserts nothing an
   const r = row(id);
   assert.equal(r.owner, "someone-else", "runBatch must not touch a row it no longer owns");
   assert.equal(r.status, "running");
+});
+
+test("I7 owner fence at the terminal write: ownership lost right after the last onPage leaves the row untouched", async () => {
+  lease.acquireRunnerLease(db());
+  const { id, listId } = seedRunningImport({ owner: "me" });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const scrape = async (owner: any, url: string, opts: any) => {
+    await opts.onPage(1, makeProfiles(1, 25, "i7"));
+    // Ownership changes AFTER the last durable checkpoint but BEFORE the
+    // terminal 'done' write — the row is still (falsely, from this run's
+    // point of view) 'running'.
+    db().prepare("UPDATE list_imports SET owner = 'someone-else' WHERE id = ?").run(id);
+    return { profiles: [], lastPage: 1, knownTotal: 75, exhausted: true };
+  };
+  await importJobs.runBatch(id, { scrape, owner: "me" });
+  const r = row(id);
+  assert.equal(r.status, "running", "the done write must not have landed");
+  assert.equal(r.owner, "someone-else");
+  assert.equal(listTargetCount(listId), 25, "the durable page-1 checkpoint made before the ownership change stands");
+  const continuation = db().prepare("SELECT id FROM list_imports WHERE list_id = ? AND id != ?").get(listId, id);
+  assert.equal(continuation, undefined, "no continuation row inserted for a done write that never landed");
+});
+
+test("I8 recovery finishes a stale row whose window was already fully checkpointed (crash between last onPage and done)", () => {
+  lease.acquireRunnerLease(db());
+  const { id } = seedRunningImport({ heartbeatAt: "2020-01-01 00:00:00" });
+  // 75 total → ceil(75/25) = 3 pages; page 3 (the last) is already durably checkpointed.
+  db().prepare("UPDATE list_imports SET page = 3, imported = 75, total = 75 WHERE id = ?").run(id);
+  const result = importJobs.recoverInterruptedImports(db(), T0);
+  assert.deepEqual(result.recovered, [id]);
+  assert.deepEqual(result.quarantined, []);
+  const r = row(id);
+  assert.equal(r.status, "done");
+  assert.equal(r.owner, null);
+  assert.equal(r.error, null);
+});
+
+test("I9 recovery cancels a stale row that was already flagged for cancellation, instead of rescheduling it", () => {
+  lease.acquireRunnerLease(db());
+  const { id } = seedRunningImport({ heartbeatAt: "2020-01-01 00:00:00" });
+  db().prepare("UPDATE list_imports SET cancel_requested = 1 WHERE id = ?").run(id);
+  const result = importJobs.recoverInterruptedImports(db(), T0);
+  assert.deepEqual(result.recovered, [id]);
+  assert.deepEqual(result.quarantined, []);
+  const r = row(id);
+  assert.equal(r.status, "canceled");
+  assert.equal(r.owner, null);
 });

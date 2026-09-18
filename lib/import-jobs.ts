@@ -58,12 +58,20 @@ export function setDailyImportCap(db: DB, n: number): void {
 
 // ─── quota ───────────────────────────────────────────────────────────────────
 
-/** Contacts imported across ALL lists today (the global daily budget). */
+/**
+ * Contacts imported across ALL lists today (the global daily budget).
+ *
+ * Ruling I-3 (C2-B1/PR-06 review): a still-`running` row counts regardless of
+ * when it started — its `imported` counter only grows via durable, owner-fenced
+ * per-page checkpoints, so it is always truthful budget already spent, even if
+ * it started yesterday and is still going. A TERMINAL row (done/canceled/error)
+ * counts by `finished_at`'s date — the day the budget was actually consumed.
+ */
 export function importedToday(db: DB): number {
   const row = db
     .prepare(
       `SELECT COALESCE(SUM(imported), 0) c FROM list_imports
-       WHERE status IN ('done', 'running') AND date(COALESCE(finished_at, started_at)) = date('now')`
+       WHERE status = 'running' OR (status IN ('done', 'canceled', 'error') AND date(finished_at) = date('now'))`
     )
     .get() as { c: number };
   return row.c;
@@ -127,16 +135,25 @@ export const IMPORT_STALE_MS = 600_000;
 /** Thrown by onPage when the row's owner has changed mid-scrape (another process claimed it). */
 export class ImportOwnershipLostError extends Error {}
 
-/** Atomically claims a scheduled, non-cancelled row for `owner`. True iff this call won the claim. */
-export function claimScheduledImport(db: DB, importId: string, owner: string = RUNNER_OWNER): boolean {
-  return (
-    db
-      .prepare(
-        `UPDATE list_imports SET status = 'running', owner = ?, heartbeat_at = datetime('now'), started_at = COALESCE(started_at, datetime('now'))
-         WHERE id = ? AND status = 'scheduled' AND cancel_requested = 0`
-      )
-      .run(owner, importId).changes === 1
-  );
+/**
+ * Atomically claims a scheduled, non-cancelled row.
+ *
+ * Ruling I-4 (C2-B1/PR-06 review): `owner` alone is not a fine-enough fence —
+ * two claims by the SAME process identity (e.g. a retried claim after a
+ * transient error) must not be able to fence each other's writes as "still
+ * mine". Every claim mints a fresh per-claim TOKEN (`<owner>:<uuid>`), writes
+ * it to `owner`, and returns it; every fenced write in runBatch uses this
+ * token, not the bare process identity. Returns null if the claim lost.
+ */
+export function claimScheduledImport(db: DB, importId: string, owner: string = RUNNER_OWNER): string | null {
+  const token = `${owner}:${randomUUID()}`;
+  const changes = db
+    .prepare(
+      `UPDATE list_imports SET status = 'running', owner = ?, heartbeat_at = datetime('now'), started_at = COALESCE(started_at, datetime('now'))
+       WHERE id = ? AND status = 'scheduled' AND cancel_requested = 0`
+    )
+    .run(token, importId).changes;
+  return changes === 1 ? token : null;
 }
 
 /** Runner hook (called each tick): start the next due batch if none is running. */
@@ -152,8 +169,9 @@ export async function processScheduledImports(db: DB): Promise<void> {
     )
     .get() as ImportRow | undefined;
   if (!due) return;
-  if (!claimScheduledImport(db, due.id)) return;
-  runBatch(due.id).catch((e) => console.error("[import] batch crashed:", e));
+  const token = claimScheduledImport(db, due.id);
+  if (!token) return;
+  runBatch(due.id, { owner: token }).catch((e) => console.error("[import] batch crashed:", e));
 }
 
 export async function runBatch(
@@ -187,14 +205,23 @@ export async function runBatch(
 
   console.log(`[import] batch ${importId} (b${job.batch_index}) start_page=${job.start_page} maxPages=${maxPages} cap=${cap}`);
 
+  // page and count are owned exclusively by onPage's fenced checkpoint —
+  // onProgress only ever reports phase/total_pages/total.
   const updateProgress = db.prepare(
-    "UPDATE list_imports SET phase = ?, page = ?, total_pages = ?, count = ?, total = ? WHERE id = ? AND owner = ?"
+    "UPDATE list_imports SET phase = ?, total_pages = ?, total = ? WHERE id = ? AND owner = ?"
   );
   const isCanceled = () => {
     const r = db.prepare("SELECT cancel_requested FROM list_imports WHERE id = ?").get(importId) as
       | { cancel_requested: number }
       | undefined;
     return !r || r.cancel_requested === 1; // row deleted (list cascade) or explicit cancel
+  };
+  const giveUpIfNotOwned = (r: { changes: number }): boolean => {
+    if (r.changes === 0) {
+      console.warn(`[import] import ${importId} no longer owned — leaving the row to its new owner`);
+      return true;
+    }
+    return false;
   };
 
   // Every verified page is inserted and checkpointed together, inside one
@@ -213,23 +240,33 @@ export async function runBatch(
            WHERE id = ? AND status = 'running' AND owner = ?`
         )
         .run(pageNum, imported, skipped, pageProfiles.length, importId, owner);
-      if (r.changes === 0) throw new ImportOwnershipLostError(`import ${importId} is no longer owned by ${owner}`);
+      if (r.changes === 0) throw new ImportOwnershipLostError(`import ${importId} no longer owned`);
     }).immediate();
   };
 
   try {
-    const result = await withBrowserOwner(job.account_id, "import", { maxHoldMs: 3 * 3_600_000 }, (bo) =>
-      scrape(bo, job.sales_nav_url!, {
+    const result = await withBrowserOwner(job.account_id, "import", { maxHoldMs: 3 * 3_600_000 }, async (bo) => {
+      // Fenced heartbeat the moment we actually hold the browser — before the
+      // (possibly long) scrape starts — so a slow queue wait never counts
+      // against IMPORT_STALE_MS, and a lost fence is caught before any work.
+      const hb = db
+        .prepare(`UPDATE list_imports SET heartbeat_at = datetime('now') WHERE id = ? AND status = 'running' AND owner = ?`)
+        .run(importId, owner);
+      if (hb.changes === 0) throw new ImportOwnershipLostError(`import ${importId} no longer owned`);
+      return scrape(bo, job.sales_nav_url!, {
         startPage: job.start_page,
         maxPages,
-        onProgress: (p) => updateProgress.run(p.phase, p.page ?? 0, p.totalPages ?? 0, p.count, p.total, importId, owner),
+        onProgress: (p) => updateProgress.run(p.phase, p.totalPages ?? 0, p.total, importId, owner),
         isCanceled: () => isCanceled() || bo.signal.aborted,
         onPage,
-      })
-    );
+      });
+    });
 
     if (isCanceled()) {
-      db.prepare("UPDATE list_imports SET status = 'canceled', finished_at = datetime('now'), owner = NULL WHERE id = ?").run(importId);
+      const r = db
+        .prepare("UPDATE list_imports SET status = 'canceled', finished_at = datetime('now'), owner = NULL WHERE id = ? AND status = 'running' AND owner = ?")
+        .run(importId, owner);
+      giveUpIfNotOwned(r);
       return;
     }
 
@@ -238,10 +275,12 @@ export async function runBatch(
     // Stalled with nothing verified this window (the very first page failed) —
     // truthfully an error, not a done-with-zero-progress row.
     if (stalled && lastPage < job.start_page) {
-      db.prepare("UPDATE list_imports SET status = 'error', error = ?, owner = NULL, finished_at = datetime('now') WHERE id = ?").run(
-        stalled.reason,
-        importId
-      );
+      const r = db
+        .prepare(
+          "UPDATE list_imports SET status = 'error', error = ?, owner = NULL, finished_at = datetime('now') WHERE id = ? AND status = 'running' AND owner = ?"
+        )
+        .run(stalled.reason, importId, owner);
+      if (giveUpIfNotOwned(r)) return;
       if (/re-authentication|No data intercepted/i.test(stalled.reason) && job.account_id) {
         try {
           const { markNeedsReauth } = await import("@/lib/linkedin/session");
@@ -252,9 +291,19 @@ export async function runBatch(
     }
 
     db.transaction(() => {
-      db.prepare(
-        `UPDATE list_imports SET status = 'done', total = ?, total_pages = ?, finished_at = datetime('now'), owner = NULL, stall_reason = ? WHERE id = ?`
-      ).run(knownTotal, Math.ceil(knownTotal / PAGE_SIZE), stalled?.reason ?? null, importId);
+      const r = db
+        .prepare(
+          `UPDATE list_imports SET status = 'done', total = ?, total_pages = ?, finished_at = datetime('now'), owner = NULL, error = NULL, stall_reason = ?
+           WHERE id = ? AND status = 'running' AND owner = ?`
+        )
+        .run(
+          knownTotal,
+          Math.ceil(knownTotal / PAGE_SIZE),
+          stalled ? `${stalled.reason} at page ${stalled.page}` : null,
+          importId,
+          owner
+        );
+      if (r.changes === 0) throw new ImportOwnershipLostError(`import ${importId} no longer owned`);
 
       // More of the list left → chain the remainder to the next day
       if (!exhausted) {
@@ -283,19 +332,19 @@ export async function runBatch(
       return;
     }
     if (err instanceof BrowserBusyError) {
-      db.prepare("UPDATE list_imports SET status = 'scheduled', owner = NULL, error = ? WHERE id = ?").run(
-        "browser busy — will retry",
-        importId
-      );
+      const r = db
+        .prepare("UPDATE list_imports SET status = 'scheduled', owner = NULL, error = ? WHERE id = ? AND status = 'running' AND owner = ?")
+        .run("browser busy — will retry", importId, owner);
+      giveUpIfNotOwned(r);
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
     console.error("[import] FAILED:", message);
     if (db.prepare("SELECT id FROM list_imports WHERE id = ?").get(importId)) {
-      db.prepare("UPDATE list_imports SET status = 'error', error = ?, owner = NULL, finished_at = datetime('now') WHERE id = ?").run(
-        message,
-        importId
-      );
+      const r = db
+        .prepare("UPDATE list_imports SET status = 'error', error = ?, owner = NULL, finished_at = datetime('now') WHERE id = ? AND status = 'running' AND owner = ?")
+        .run(message, importId, owner);
+      if (giveUpIfNotOwned(r)) return;
     }
     // A "no data intercepted / re-authentication" failure means the session died.
     if (/re-authentication|No data intercepted/i.test(message) && job.account_id) {
@@ -317,11 +366,34 @@ export function recoverInterruptedImports(db: DB, now: number = Date.now()): { r
   const cutoff = new Date(now - IMPORT_STALE_MS).toISOString().slice(0, 19).replace("T", " ");
   return withLease(db, () => {
     const stale = db
-      .prepare(`SELECT id, page, start_page, recovery_count FROM list_imports WHERE status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < ?)`)
-      .all(cutoff) as Array<{ id: string; page: number | null; start_page: number; recovery_count: number }>;
+      .prepare(
+        `SELECT id, page, start_page, recovery_count, total, cancel_requested
+         FROM list_imports WHERE status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < ?)`
+      )
+      .all(cutoff) as Array<{
+        id: string; page: number | null; start_page: number; recovery_count: number;
+        total: number | null; cancel_requested: number;
+      }>;
     const recovered: string[] = [];
     const quarantined: string[] = [];
     for (const r of stale) {
+      // Ruling I-5: a stale row already flagged for cancellation is truthfully
+      // canceled, not rescheduled — nobody is coming back to finish it.
+      if (r.cancel_requested) {
+        db.prepare(`UPDATE list_imports SET status = 'canceled', finished_at = datetime('now'), owner = NULL WHERE id = ?`).run(r.id);
+        recovered.push(r.id);
+        continue;
+      }
+      // Ruling I-2: the crash happened between the last onPage checkpoint and
+      // the final 'done' write — every page of this window is already
+      // durably verified, so finish it truthfully instead of rescheduling a
+      // window with nothing left to fetch.
+      const totalPages = r.total && r.total > 0 ? Math.ceil(r.total / PAGE_SIZE) : 0;
+      if (totalPages > 0 && r.page !== null && r.page >= totalPages) {
+        db.prepare(`UPDATE list_imports SET status = 'done', finished_at = datetime('now'), owner = NULL, error = NULL WHERE id = ?`).run(r.id);
+        recovered.push(r.id);
+        continue;
+      }
       if (r.recovery_count >= 2) {
         db.prepare(
           `UPDATE list_imports SET status = 'error', owner = NULL, finished_at = datetime('now'), recovery_count = recovery_count + 1,
