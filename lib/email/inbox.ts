@@ -3,8 +3,10 @@ import { simpleParser } from "mailparser";
 import { randomUUID } from "crypto";
 import { getDb } from "@/lib/db";
 import { premium } from "@/lib/premium";
+import type { PremiumSurface } from "@/lib/premium";
 import { decryptSecret } from "@/lib/crypto";
 import { emailTlsOptions } from "@/lib/email/tls";
+import { decideReplyOpenCore, retryUndecidedReplies } from "@/lib/email/reply-policy";
 
 const IMAP_POLL_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
 // Jul 2026 incident: all email accounts became "due" in the same tick and synced
@@ -137,6 +139,17 @@ export function captureReplyBody(
   });
 }
 
+/**
+ * Who decides what a captured reply means. Premium (ee/) owns classification
+ * and dispatch when present; otherwise the open-core policy makes the one
+ * decision it knows how to make (C2-B2 / PR-03). Until a decision exists the
+ * runner holds the contact.
+ */
+export async function dispatchCapturedReply(db: ReturnType<typeof getDb>, replyId: string, surface: PremiumSurface | null = premium): Promise<void> {
+  if (surface?.replies) await surface.replies.classifyAndDispatch(replyId);
+  else await decideReplyOpenCore(db, replyId);
+}
+
 export function shouldSyncEmailInbox(emailAccountId: string): boolean {
   const db = getDb();
   const account = db
@@ -237,11 +250,10 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
                 try {
                   const latestUid = uids[uids.length - 1];
                   const replyId = await captureReplyBody(imap, db, target.id, target.email, latestUid);
-                  // The reply is always STORED (open-core). AI classification + auto-followup
-                  // is a premium feature — skipped cleanly when ee/ is absent.
-                  if (replyId && premium?.replies) {
-                    await premium.replies.classifyAndDispatch(replyId);
-                  }
+                  // The reply is always STORED (open-core). Premium classifies and dispatches;
+                  // without it the open-core policy decides (reply-policy.ts). Either way the
+                  // runner holds the contact until a decision exists.
+                  if (replyId) await dispatchCapturedReply(db, replyId);
                 } catch (err) {
                   console.warn(`[email-inbox] Failed to capture/dispatch reply for ${target.email}:`, err);
                 }
@@ -362,6 +374,12 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
 
     imap.connect();
   });
+
+  // Open-core only: replies whose judgment failed earlier are retried here so a
+  // transient TypeSafe/network error does not hold a contact forever.
+  if (!premium?.replies) {
+    try { await retryUndecidedReplies(db); } catch (err) { console.warn("[email-inbox] retryUndecidedReplies failed:", err instanceof Error ? err.message : err); }
+  }
 
   db.prepare("UPDATE email_accounts SET inbox_synced_at = datetime('now') WHERE id = ?").run(emailAccountId);
   return { replies, bounces };
