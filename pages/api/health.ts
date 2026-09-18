@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { DEGRADED_AFTER_FAILURES, classifyError } from "@/lib/health-contract";
 import { methodNotAllowed } from "@/lib/api-validate";
+import { RUNNER_OWNER, parseRunnerLease } from "@/lib/runner-identity";
 
 /**
  * Liveness endpoint. Unauthenticated by design (see proxy.ts), therefore:
@@ -86,13 +87,20 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     const settings = db.prepare(
-      "SELECT key, value FROM app_settings WHERE key IN ('runner_progress_at','runner_progress_phase','runner_tick_failures','runner_last_error_class','runner_revivals')"
+      "SELECT key, value FROM app_settings WHERE key IN ('runner_progress_at','runner_progress_phase','runner_tick_failures','runner_last_error_class','runner_revivals','runner_lease')"
     ).all() as Array<{ key: string; value: string }>;
     const get = (k: string) => settings.find(s => s.key === k)?.value ?? null;
 
     const progressAt = get("runner_progress_at");
     const failures = parseInt(get("runner_tick_failures") ?? "0", 10) || 0;
     const secondsSince = progressAt ? Math.round((Date.now() - new Date(progressAt).getTime()) / 1000) : null;
+
+    const lease = parseRunnerLease(get("runner_lease"));
+    const leaseInfo = {
+      owner: lease?.owner ?? null,
+      mine: !!lease && lease.owner === RUNNER_OWNER && Date.parse(lease.expires_at) > Date.now(),
+      expires_in_s: lease ? Math.max(0, Math.round((Date.parse(lease.expires_at) - Date.now()) / 1000)) : null,
+    };
 
     const dead = secondsSince === null || secondsSince * 1000 > LIVENESS_THRESHOLD_MS;
     if (dead) {
@@ -105,6 +113,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         runner: {
           state: "dead", last_progress_at: progressAt, seconds_since_progress: secondsSince,
           revivals: parseInt(get("runner_revivals") ?? "0", 10) || 0,
+          lease: leaseInfo,
         },
       });
     }
@@ -123,6 +132,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
         revivals: parseInt(get("runner_revivals") ?? "0", 10) || 0,
         // Class only, never a message — messages carry profile URLs (I9).
         last_error_class: degraded ? (get("runner_last_error_class") || null) : null,
+        lease: leaseInfo,
       },
     });
   } catch (err) {

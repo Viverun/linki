@@ -1,6 +1,7 @@
 import { getDb } from "@/lib/db";
 import { DEGRADED_AFTER_FAILURES, classifyError, UNKNOWN_ERROR_CLASS } from "@/lib/health-contract";
 import { isAllowedLinkedinUrl } from "@/lib/linkedin-url";
+import { acquireRunnerLease, readRunnerLease, releaseRunnerLease, withLease, LeaseLostError, RUNNER_OWNER } from "@/lib/linkedin/lease";
 
 // Re-exported so callers that already depend on the runner need not learn about
 // a second module; lib/health-contract.ts remains the single definition.
@@ -635,21 +636,25 @@ function trAdvance(db: ReturnType<typeof getDb>, tr: TrackRun, steps: WorkflowSt
   // Advance from where the track ACTUALLY is, not from the stale index (P2-3).
   const here = resolveStep(tr, steps);
   const nextIndex = (here.kind === "resolved" ? here.index : tr.current_step) + 1;
-  if (nextIndex >= steps.length) {
-    db.prepare(
-      "UPDATE run_profile_tracks SET state = 'completed', current_step = ?, current_step_id = NULL, last_step_at = datetime('now'), next_step_at = NULL WHERE id = ?"
-    ).run(nextIndex, tr.id);
-  } else {
-    const nextStep = steps[nextIndex];
-    const nextAt = nextStep.delay_seconds > 0 ? new Date(Date.now() + nextStep.delay_seconds * 1000).toISOString() : null;
-    db.prepare(
-      "UPDATE run_profile_tracks SET current_step = ?, current_step_id = ?, last_step_at = datetime('now'), next_step_at = ? WHERE id = ?"
-    ).run(nextIndex, nextStep.id, nextAt, tr.id);
-  }
+  withLease(db, () => {
+    if (nextIndex >= steps.length) {
+      db.prepare(
+        "UPDATE run_profile_tracks SET state = 'completed', current_step = ?, current_step_id = NULL, last_step_at = datetime('now'), next_step_at = NULL WHERE id = ?"
+      ).run(nextIndex, tr.id);
+    } else {
+      const nextStep = steps[nextIndex];
+      const nextAt = nextStep.delay_seconds > 0 ? new Date(Date.now() + nextStep.delay_seconds * 1000).toISOString() : null;
+      db.prepare(
+        "UPDATE run_profile_tracks SET current_step = ?, current_step_id = ?, last_step_at = datetime('now'), next_step_at = ? WHERE id = ?"
+      ).run(nextIndex, nextStep.id, nextAt, tr.id);
+    }
+  });
 }
 
 function trWait(db: ReturnType<typeof getDb>, tr: TrackRun, hours: number) {
-  db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(addHours(hours), tr.id);
+  withLease(db, () => {
+    db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(addHours(hours), tr.id);
+  });
 }
 
 /**
@@ -672,24 +677,32 @@ function trWait(db: ReturnType<typeof getDb>, tr: TrackRun, hours: number) {
 export function trClaim(db: ReturnType<typeof getDb>, trackId: string): boolean {
   // ISO-UTC via toISOString(), matching every other next_step_at write here.
   const leaseUntil = new Date(Date.now() + CLAIM_LEASE_MINUTES * 60_000).toISOString();
-  const claimed = db.prepare(
-    `UPDATE run_profile_tracks SET next_step_at = ?
-     WHERE id = ? AND state = 'in_progress'
-       AND (next_step_at IS NULL OR datetime(next_step_at) <= datetime('now'))`
-  ).run(leaseUntil, trackId);
-  return claimed.changes === 1;
+  return withLease(db, () => {
+    const claimed = db.prepare(
+      `UPDATE run_profile_tracks SET next_step_at = ?
+       WHERE id = ? AND state = 'in_progress'
+         AND (next_step_at IS NULL OR datetime(next_step_at) <= datetime('now'))`
+    ).run(leaseUntil, trackId);
+    return claimed.changes === 1;
+  });
 }
 
 function trReschedule(db: ReturnType<typeof getDb>, tr: TrackRun, isoTimestamp: string) {
-  db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(isoTimestamp, tr.id);
+  withLease(db, () => {
+    db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(isoTimestamp, tr.id);
+  });
 }
 
 function trSkip(db: ReturnType<typeof getDb>, tr: TrackRun, reason: string) {
-  db.prepare("UPDATE run_profile_tracks SET state = 'skipped', error_message = ? WHERE id = ?").run(reason, tr.id);
+  withLease(db, () => {
+    db.prepare("UPDATE run_profile_tracks SET state = 'skipped', error_message = ? WHERE id = ?").run(reason, tr.id);
+  });
 }
 
 function trFail(db: ReturnType<typeof getDb>, tr: TrackRun, reason: string) {
-  db.prepare("UPDATE run_profile_tracks SET state = 'failed', error_message = ? WHERE id = ?").run(reason, tr.id);
+  withLease(db, () => {
+    db.prepare("UPDATE run_profile_tracks SET state = 'failed', error_message = ? WHERE id = ?").run(reason, tr.id);
+  });
 }
 
 function trRecordContext(db: ReturnType<typeof getDb>, tr: TrackRun, ctx: { linkedinMessage?: string; emailSubject?: string; emailBody?: string }) {
@@ -994,7 +1007,9 @@ export async function executeStep(
 ): Promise<void> {
   const resolution = resolveStep(tr, steps);
   if (resolution.kind === "done") {
-    db.prepare("UPDATE run_profile_tracks SET state = 'completed', current_step_id = NULL, last_step_at = datetime('now') WHERE id = ?").run(tr.id);
+    withLease(db, () => {
+      db.prepare("UPDATE run_profile_tracks SET state = 'completed', current_step_id = NULL, last_step_at = datetime('now') WHERE id = ?").run(tr.id);
+    });
     return;
   }
   if (resolution.kind === "deleted") {
@@ -1004,9 +1019,11 @@ export async function executeStep(
     // track; an operator who deletes a step mid-run needs to see that, and a
     // silent `completed` is what let it pass unnoticed before.
     const gone = tr.current_step_id;
-    db.prepare(
-      "UPDATE run_profile_tracks SET state = 'completed', current_step_id = NULL, error_message = ?, last_step_at = datetime('now'), next_step_at = NULL WHERE id = ?"
-    ).run(`step ${gone} was deleted from the workflow while this track was on it`, tr.id);
+    withLease(db, () => {
+      db.prepare(
+        "UPDATE run_profile_tracks SET state = 'completed', current_step_id = NULL, error_message = ?, last_step_at = datetime('now'), next_step_at = NULL WHERE id = ?"
+      ).run(`step ${gone} was deleted from the workflow while this track was on it`, tr.id);
+    });
     log(db, runId, target.id, "warn",
       `${target.full_name ?? target.linkedin_url}: the step this track was on (${gone}) no longer exists — ` +
       `stopping this track rather than running whatever took its place`);
@@ -1018,9 +1035,11 @@ export async function executeStep(
   if (replyCheck?.last_replied_at || replyCheck?.email_replied_at) {
     const channel = replyCheck.email_replied_at ? "email" : "LinkedIn";
     log(db, runId, target.id, "info", `${target.full_name ?? target.linkedin_url} replied via ${channel} — unenrolling from workflow`);
-    db.prepare(
-      "UPDATE run_profile_tracks SET state = 'skipped', error_message = 'Lead replied' WHERE run_profile_id = ? AND state NOT IN ('completed', 'failed', 'skipped')"
-    ).run(tr.run_profile_id);
+    withLease(db, () => {
+      db.prepare(
+        "UPDATE run_profile_tracks SET state = 'skipped', error_message = 'Lead replied' WHERE run_profile_id = ? AND state NOT IN ('completed', 'failed', 'skipped')"
+      ).run(tr.run_profile_id);
+    });
     return;
   }
 
@@ -1691,6 +1710,10 @@ export async function executeStep(
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (err instanceof LeaseLostError) {
+      log(db, runId, target.id, "warn", "lease lost mid-step — no state written");
+      return;
+    }
     if (err instanceof WeeklyLimitError) {
       log(db, runId, target.id, "error", `Weekly connection limit reached — pausing run`);
       db.prepare("UPDATE runs SET status = 'paused' WHERE id = ?").run(runId);
@@ -1756,7 +1779,15 @@ const g = global as typeof global & { __linkiRunner?: { loop: Promise<void> | nu
  * a concurrent caller both observe the same non-null `loop`, so exactly one loop
  * can exist however many callers race.
  */
+const gs = global as typeof global & { __linkiLeaseSignalsRegistered?: boolean };
+
 export function ensureGlobalRunnerStarted(): void {
+  if (!gs.__linkiLeaseSignalsRegistered) {
+    gs.__linkiLeaseSignalsRegistered = true;
+    const releaseOnExit = () => { try { releaseRunnerLease(getDb()); } catch { /* best effort */ } };
+    process.once("SIGTERM", releaseOnExit);
+    process.once("SIGINT", releaseOnExit);
+  }
   const state = (g.__linkiRunner ??= { loop: null, attempts: 0 });
   if (state.loop) return;
   state.loop = runLoopWithRecovery().finally(() => { state.loop = null; });
@@ -1797,6 +1828,8 @@ const WATCHDOG_INTERVAL_MS = 60_000;
 export function runnerWatchdogTick(db: ReturnType<typeof getDb>): boolean {
   try {
     if (runnerState().running) return false;          // a loop (or its retry) is alive
+    const foreign = readRunnerLease(db);
+    if (foreign && foreign.owner !== RUNNER_OWNER && Date.parse(foreign.expires_at) > Date.now()) return false; // another process is the runner
     const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(HEARTBEAT_KEYS.progressAt) as { value: string } | undefined;
     const ageMs = row?.value ? Date.now() - new Date(row.value).getTime() : Infinity;
     if (ageMs <= WATCHDOG_STALE_MS) return false;     // progressing — never intervene
@@ -1870,8 +1903,20 @@ async function runLoopWithRecovery(): Promise<void> {
 async function globalLoop(): Promise<void> {
   console.log("[runner] Global loop started");
   const db = getDb();
+  let standbyLogged = false;
 
   while (true) {
+    if (!acquireRunnerLease(db)) {
+      const holder = readRunnerLease(db);
+      if (!standbyLogged) {
+        console.warn(`[runner] standby — lease held by ${holder?.owner ?? "?"} until ${holder?.expires_at ?? "?"}; this process does no runner work`);
+        standbyLogged = true;
+      }
+      putSetting(db, HEARTBEAT_KEYS.progressPhase, "standby");
+      await sleepUnref(POLL_INTERVAL_MS);
+      continue;
+    }
+    if (standbyLogged) { console.log(`[runner] resumed — lease acquired by ${RUNNER_OWNER}`); standbyLogged = false; }
     recordProgress(db, "loop");
     try {
       await tick(db);

@@ -1,4 +1,4 @@
-import test, { after } from "node:test";
+import test, { after, mock } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +11,20 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-runner-lease-tests";
 const lease = await import("@/lib/linkedin/lease");
 const { getDb } = await import("@/lib/db");
 after(() => { try { getDb().close(); } catch { /* never opened */ } rmSync(dbDir, { recursive: true, force: true }); });
+
+// Same @/lib/db mock as runner-watchdog.test.ts: a revived loop must land in its
+// unref'd recovery backoff, never in a real tick() with a non-unref'd sleep — or
+// the watchdog/verb tests below (which exercise revive paths) would hang the run.
+const mockModule = mock.module.bind(mock) as unknown as
+  (specifier: string, options: { namedExports: Record<string, unknown> }) => void;
+const realDb = await import("@/lib/db");
+const dbThrows = true;
+mockModule("@/lib/db", {
+  namedExports: {
+    ...realDb,
+    getDb: () => { if (dbThrows) throw new Error("SQLITE_CANTOPEN"); return realDb.getDb(); },
+  },
+});
 
 const clear = () => getDb().prepare("DELETE FROM app_settings WHERE key = 'runner_lease'").run();
 const T0 = Date.parse("2026-09-18T10:00:00Z");
@@ -66,4 +80,32 @@ test("L7 a malformed stored value is treated as absent", () => {
   getDb().prepare("INSERT INTO app_settings (key, value, updated_at) VALUES ('runner_lease', 'not-json', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run();
   assert.equal(lease.readRunnerLease(getDb()), null);
   assert.equal(lease.acquireRunnerLease(getDb(), "A", 120_000), true);
+});
+
+// ── watchdog + verbs (runner loaded with browser modules mocked, as in runner-watchdog.test.ts)
+const runner = await import("@/lib/linkedin/runner");
+const setMarker = (iso: string) => getDb().prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES ('runner_progress_at', ?, datetime('now'))
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(iso);
+const stale = () => new Date(Date.now() - 11 * 60_000).toISOString();
+
+test("L8 the watchdog does not revive while another owner holds a fresh lease", () => {
+  clear(); setMarker(stale());
+  lease.acquireRunnerLease(getDb(), "other-process", 120_000);
+  assert.equal(runner.runnerWatchdogTick(getDb()), false);
+  assert.equal(runner.runnerState().running, false);
+});
+
+test("L9 trClaim under a foreign lease throws LeaseLostError and claims nothing", () => {
+  clear();
+  lease.acquireRunnerLease(getDb(), "other-process", 120_000);
+  const db = getDb();
+  db.prepare("INSERT INTO workflows (id, name) VALUES ('wf-l9', 'x')").run();
+  db.prepare("INSERT INTO runs (id, workflow_id, status) VALUES ('run-l9', 'wf-l9', 'running')").run();
+  db.prepare("INSERT INTO targets (id, linkedin_url) VALUES ('t-l9', 'https://www.linkedin.com/in/l9/')").run();
+  db.prepare("INSERT INTO run_profiles (id, run_id, target_id) VALUES ('rp-l9', 'run-l9', 't-l9')").run();
+  db.prepare("INSERT INTO run_profile_tracks (id, run_profile_id, track, state, current_step) VALUES ('tr-l9', 'rp-l9', 'linkedin', 'in_progress', 0)").run();
+  assert.throws(() => runner.trClaim(db, "tr-l9"), lease.LeaseLostError);
+  assert.equal((db.prepare("SELECT next_step_at FROM run_profile_tracks WHERE id = 'tr-l9'").get() as { next_step_at: string | null }).next_step_at, null);
+  lease.acquireRunnerLease(getDb(), lease.RUNNER_OWNER, 120_000, Date.now() + 200_000); // hand over (expired) so later tests can claim
+  assert.equal(runner.trClaim(db, "tr-l9"), true);
 });

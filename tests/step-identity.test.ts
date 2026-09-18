@@ -46,6 +46,8 @@ const { executeStep, stepRefOf } = await import("@/lib/linkedin/runner");
 const { stripComments } = await import("@/tests/support/source-text");
 const { default: retryHandler } = await import(routeUrl("pages/api/runs/[id]/retry.ts"));
 const { getDb } = await import("@/lib/db");
+const lease = await import("@/lib/linkedin/lease");
+lease.acquireRunnerLease(getDb()); // R1: verbs now require the lease
 // Imported by URL, not by specifier. `@/pages/api/workflows/[id]/steps` resolves
 // to the steps/ DIRECTORY (ERR_UNSUPPORTED_DIR_IMPORT) because a route file and a
 // route directory share the name, and a literal ".ts" specifier is rejected by

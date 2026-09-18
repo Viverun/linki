@@ -27,6 +27,8 @@ mockModule("@/lib/linkedin/session", {
 
 const { executeStep } = await import("@/lib/linkedin/runner");
 const { getDb } = await import("@/lib/db");
+const lease = await import("@/lib/linkedin/lease");
+lease.acquireRunnerLease(getDb()); // R1: verbs now require the lease
 after(() => { try { getDb().close(); } catch { /* never opened */ } rmSync(dbDir, { recursive: true, force: true }); });
 
 const LIMITS = { active_hours_start: 0, active_hours_end: 24, timezone: "UTC", working_days: "1,2,3,4,5,6,7", daily_connection_limit: 20, daily_message_limit: 50, daily_inmail_limit: 15 };

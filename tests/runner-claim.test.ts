@@ -11,6 +11,8 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-runner-claim-tests";
 
 const { trClaim } = await import("@/lib/linkedin/runner");
 const { getDb } = await import("@/lib/db");
+const lease = await import("@/lib/linkedin/lease");
+lease.acquireRunnerLease(getDb()); // R1: verbs now require the lease
 
 after(() => {
   try { getDb().close(); } catch { /* never opened, or already closed */ }

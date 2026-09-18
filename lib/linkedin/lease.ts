@@ -1,6 +1,11 @@
-import { hostname } from "node:os";
-import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
+import { RUNNER_OWNER, parseRunnerLease } from "@/lib/runner-identity";
+
+// RUNNER_OWNER lives in lib/runner-identity.ts — a dependency-free leaf that
+// pages/api/health.ts can import without reaching into lib/linkedin/ (see the
+// ISOLATION INVARIANT in tests/health-isolation.test.ts). Re-exported here so
+// every existing `import { RUNNER_OWNER } from "@/lib/linkedin/lease"` keeps working.
+export { RUNNER_OWNER };
 
 /**
  * Runner lease (C2-B1 / PR-09).
@@ -14,7 +19,6 @@ import type Database from "better-sqlite3";
  */
 export const LEASE_KEY = "runner_lease";
 export const LEASE_TTL_MS = 120_000;
-export const RUNNER_OWNER = `${hostname()}:${process.pid}:${randomBytes(4).toString("hex")}`;
 
 export class LeaseLostError extends Error {
   constructor(owner: string, holder: string | null) {
@@ -24,12 +28,7 @@ export class LeaseLostError extends Error {
 
 export function readRunnerLease(db: Database.Database): { owner: string; expires_at: string } | null {
   const row = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(LEASE_KEY) as { value: string } | undefined;
-  if (!row?.value) return null;
-  try {
-    const v = JSON.parse(row.value) as { owner?: unknown; expires_at?: unknown };
-    if (typeof v.owner !== "string" || typeof v.expires_at !== "string" || Number.isNaN(Date.parse(v.expires_at))) return null;
-    return { owner: v.owner, expires_at: v.expires_at };
-  } catch { return null; }
+  return parseRunnerLease(row?.value);
 }
 
 function write(db: Database.Database, owner: string, expiresAtMs: number) {

@@ -58,6 +58,8 @@ mockModule("@/lib/linkedin/session", {
 const { executeStep, stepRefOf, bodyFingerprint, UnresolvedSideEffectError } = await import("@/lib/linkedin/runner");
 const { NotConnectedError } = await import("@/lib/linkedin/message");
 const { getDb } = await import("@/lib/db");
+const lease = await import("@/lib/linkedin/lease");
+lease.acquireRunnerLease(getDb()); // R1: verbs now require the lease
 
 after(() => {
   try { getDb().close(); } catch { /* never opened */ }
