@@ -72,3 +72,27 @@ test("S4 runOpenCoreSweep swallows a throw from retryUndecidedReplies instead of
 // observes the module's snapshot-time value here, not premiumBox.premium as
 // set by an individual test. The premium/no-premium branch itself is exercised
 // directly in dispatchCapturedReply's S1/S2 above.
+
+// R7 (C2-B2 final review): the two early returns in syncEmailInbox — no IMAP
+// config, and no pending targets — must still run the open-core sweep, or a
+// single-account install could leave undecided replies without an automatic
+// path to a decision. Neither path touches IMAP, so they are drivable here.
+const { syncEmailInbox } = await import("@/lib/email/inbox");
+
+test("S5 an account without IMAP config still runs the sweep once", async () => {
+  calls.length = 0; premiumBox.premium = null;
+  retryBehaviour = async () => { calls.push("retry"); return 0; };
+  getDb().prepare("INSERT INTO email_accounts (id, name, from_email, smtp_host, username, password) VALUES ('ea-noimap', 'No IMAP', 'a@b.test', 'smtp.test', 'u', 'p')").run();
+  const r = await syncEmailInbox("ea-noimap");
+  assert.deepEqual(r, { replies: 0, bounces: 0 });
+  assert.deepEqual(calls, ["retry"]);
+});
+
+test("S6 an account with IMAP config but no pending targets still runs the sweep once", async () => {
+  calls.length = 0; premiumBox.premium = null;
+  retryBehaviour = async () => { calls.push("retry"); return 0; };
+  getDb().prepare("INSERT INTO email_accounts (id, name, from_email, smtp_host, imap_host, username, password) VALUES ('ea-idle', 'Idle', 'a@b.test', 'smtp.test', 'imap.test', 'u', 'p')").run();
+  const r = await syncEmailInbox("ea-idle");
+  assert.deepEqual(r, { replies: 0, bounces: 0 });
+  assert.deepEqual(calls, ["retry"]);
+});

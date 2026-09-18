@@ -176,6 +176,9 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
 
   if (!account?.imap_host) {
     console.warn(`[email-inbox] Account ${emailAccountId} has no IMAP config — skipping`);
+    // R7: the open-core sweep must not depend on this account's mailbox —
+    // undecided replies captured through another account still need a decision.
+    await runOpenCoreSweep(db);
     return { replies: 0, bounces: 0 };
   }
 
@@ -195,6 +198,7 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
 
   if (pendingTargets.length === 0) {
     db.prepare("UPDATE email_accounts SET inbox_synced_at = datetime('now') WHERE id = ?").run(emailAccountId);
+    await runOpenCoreSweep(db); // R7: same reason as above
     return { replies: 0, bounces: 0 };
   }
 
