@@ -1,9 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
-import { getSessionContext } from "@/lib/linkedin/session";
 import { InvalidSalesNavUrlError, ProfileNavigationError, scrapeProfile } from "@/lib/linkedin/profile-scrape";
 import { isAllowedSalesNavLeadUrl } from "@/lib/linkedin-url";
 import { resolveLinkedInAccount } from "@/lib/linkedin/resolve-account";
+import { withBrowserOwner, BrowserBusyError } from "@/lib/linkedin/ownership";
 
 // POST /api/targets/[id]/profile-scrape
 // Live-scrapes a lead's LinkedIn profile (Sales Nav career + recent posts) and
@@ -31,8 +31,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!account) return res.status(400).json({ error: "No authenticated LinkedIn account could be resolved." });
 
   try {
-    const ctx = await getSessionContext(account.id);
-    const profile = await scrapeProfile(ctx, target);
+    const profile = await withBrowserOwner(account.id, "profile-scrape", { maxHoldMs: 600_000, waitMs: 30_000 }, (o) => scrapeProfile(o.context, target));
 
     // Persist what we scraped so it isn't thrown away: posts + the career fields
     // we already have columns for (headline/summary/positions). Cheap and lets the
@@ -57,6 +56,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.json({ contact_id: id, account_id: account.id, profile });
   } catch (err) {
+    if (err instanceof BrowserBusyError) return res.status(409).json({ error: "browser_busy", held_by: err.heldBy });
     if (err instanceof InvalidSalesNavUrlError) return res.status(400).json({ error: err.message });
     if (err instanceof ProfileNavigationError) return res.status(502).json({ error: err.message });
     const message = err instanceof Error ? err.message : String(err);

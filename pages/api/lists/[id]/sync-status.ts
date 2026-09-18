@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { withBrowserOwner, BrowserBusyError } from "@/lib/linkedin/ownership";
 
 // POST /api/lists/[id]/sync-status  body: { account_id: number }
 // Re-fetches the Sales Nav list and updates degree for non-connected targets.
@@ -29,12 +30,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!account) return res.status(404).json({ error: "Account not found" });
   if (!account.is_authenticated) return res.status(400).json({ error: "Account not authenticated" });
 
-  const { getSessionContext } = await import("@/lib/linkedin/session");
   const { scrapeNavigatorList } = await import("@/lib/linkedin/scraper");
 
   try {
-    const ctx = await getSessionContext(account_id);
-    const { profiles } = await scrapeNavigatorList(ctx, list.sales_nav_url, { maxPages: 300 });
+    const { profiles } = await withBrowserOwner(account_id, "sync-status", { maxHoldMs: 600_000, waitMs: 30_000 }, (o) =>
+      scrapeNavigatorList(o.context, list.sales_nav_url!, { maxPages: 300 })
+    );
 
     const updateDegree = db.prepare("UPDATE targets SET degree = ? WHERE linkedin_url = ?");
     const markConnected = db.prepare(
@@ -59,6 +60,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.json({ updated, total: profiles.length });
   } catch (err: unknown) {
+    if (err instanceof BrowserBusyError) return res.status(409).json({ error: "browser_busy", held_by: err.heldBy });
     const message = err instanceof Error ? err.message : String(err);
     return res.status(500).json({ error: message });
   }

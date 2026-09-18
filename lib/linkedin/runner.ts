@@ -8,7 +8,8 @@ import { acquireRunnerLease, readRunnerLease, releaseRunnerLease, withLease, Lea
 export { classifyError, UNKNOWN_ERROR_CLASS };
 import { randomUUID, createHash } from "crypto";
 import { setInterval as nodeSetInterval } from "node:timers";
-import { getSessionPage, saveSessionState, getSessionContext } from "@/lib/linkedin/session";
+import { getSessionPage, saveSessionState } from "@/lib/linkedin/session";
+import { browserOwnerState, tryWithBrowserOwner, BrowserBusyError } from "@/lib/linkedin/ownership";
 import { visitProfile, type VisitResult } from "@/lib/linkedin/visit";
 import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError, vanityNameOf } from "@/lib/linkedin/connect";
 import { sendMessage, NotConnectedError, MessagingUrnUnresolvedError } from "@/lib/linkedin/message";
@@ -806,7 +807,7 @@ export async function resolveLinkedinUrl(db: ReturnType<typeof getDb>, target: T
   const leadMatch = salesNavUrl.match(/\/sales\/lead\/(.+)/);
   if (!leadMatch) throw new Error(`${target.full_name ?? target.id} has no Sales Nav lead URL — cannot resolve LinkedIn URL`);
 
-  const page = await getSessionPage(accountId);
+  const page = await getSessionPage(accountId, { waitMs: 60_000 });
   let profileJson: Record<string, unknown> | null = null;
   try {
     page.on("response", async (response) => {
@@ -885,8 +886,10 @@ async function ensureSalesNavEnriched(db: ReturnType<typeof getDb>, target: Targ
   if (Date.now() - last < SALES_NAV_ENRICH_MIN_GAP_MS) return;
   try {
     lastSalesNavEnrichAt[accountId] = Date.now();
-    const ctx = await getSessionContext(accountId);
-    await enrichProfile(ctx, { id: target.id, sales_nav_url: fresh.sales_nav_url, full_name: fresh.full_name ?? target.full_name ?? target.id });
+    const r = await tryWithBrowserOwner(accountId, "salesnav-enrich", { maxHoldMs: 180_000 }, (o) =>
+      enrichProfile(o.context, { id: target.id, sales_nav_url: fresh.sales_nav_url!, full_name: fresh.full_name ?? target.full_name ?? target.id })
+    );
+    if (!r.ok) console.log(`[runner] Sales Nav enrichment skipped — browser owned by ${r.heldBy}`);
   } catch (e) {
     console.warn(`[runner] Sales Nav enrichment failed for ${target.full_name ?? target.id}:`, e instanceof Error ? e.message : e);
   }
@@ -1061,6 +1064,15 @@ export async function executeStep(
   const step = resolution.step;
   const name = target.full_name ?? target.linkedin_url;
 
+  if (step.step_type === "visit" || step.step_type === "connect" || step.step_type === "message" || step.step_type === "sales_inmail") {
+    const heldBy = browserOwnerState(accountId)?.heldBy;
+    if (heldBy && heldBy !== "step") {
+      log(db, runId, target.id, "info", `browser owned by ${heldBy} — rescheduling ${name} 5 minutes out`);
+      trReschedule(db, tr, new Date(Date.now() + 5 * 60_000).toISOString());
+      return;
+    }
+  }
+
   try {
     if (step.step_type === "delay") {
       trAdvance(db, tr, steps);
@@ -1072,7 +1084,7 @@ export async function executeStep(
       db.prepare("UPDATE run_profile_tracks SET last_step_at = datetime('now') WHERE id = ?").run(tr.id);
       log(db, runId, target.id, "info", `Visiting ${name}`);
       const linkedinUrl = await getLinkedinUrl(db, target, accountId);
-      const page = await getSessionPage(accountId);
+      const page = await getSessionPage(accountId, { waitMs: 60_000 });
       let visitResult: VisitResult;
       try { visitResult = await visitProfile(page, linkedinUrl); } finally { await page.close(); }
       await saveSessionState(accountId);
@@ -1125,7 +1137,7 @@ export async function executeStep(
       db.prepare("UPDATE run_profile_tracks SET last_step_at = datetime('now') WHERE id = ?").run(tr.id);
       log(db, runId, target.id, "info", `Sending connection request to ${name}`);
       const linkedinUrl = await getLinkedinUrl(db, target, accountId);
-      const page = await getSessionPage(accountId);
+      const page = await getSessionPage(accountId, { waitMs: 60_000 });
       try { await sendConnectionRequest(page, linkedinUrl); } finally { await page.close().catch(() => { /* page already gone */ }); }
       // Best-effort: sendConnectionRequest only returns once verifyInvitationSent
       // has confirmed the invite is pending, so the invitation already exists. A
@@ -1252,7 +1264,7 @@ export async function executeStep(
       db.prepare("UPDATE run_profile_tracks SET last_step_at = datetime('now') WHERE id = ?").run(tr.id);
       log(db, runId, target.id, "info", `Sending message to ${name}`);
       const messageLinkedinUrl = await getLinkedinUrl(db, target, accountId);
-      const page = await getSessionPage(accountId);
+      const page = await getSessionPage(accountId, { waitMs: 60_000 });
       let messagingUrnResult: string | null = null;
       try {
         if (!target.full_name) throw new Error(`Target ${target.id} has no full_name — cannot search messaging`);
@@ -1442,7 +1454,7 @@ export async function executeStep(
 
       db.prepare("UPDATE run_profile_tracks SET last_step_at = datetime('now') WHERE id = ?").run(tr.id);
       log(db, runId, target.id, "info", `Sending InMail to ${name}`);
-      const page = await getSessionPage(accountId);
+      const page = await getSessionPage(accountId, { waitMs: 60_000 });
       try {
         await premium.inmail.sendInMail(page, freshTarget.sales_nav_url, inmailSubject, inmailBody);
       } catch (err) {
@@ -1712,6 +1724,11 @@ export async function executeStep(
     const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof LeaseLostError) {
       log(db, runId, target.id, "warn", "lease lost mid-step — no state written");
+      return;
+    }
+    if (err instanceof BrowserBusyError) {
+      log(db, runId, target.id, "info", `browser owned by ${err.heldBy} — rescheduling ${name} 5 minutes out`);
+      trReschedule(db, tr, new Date(Date.now() + 5 * 60_000).toISOString());
       return;
     }
     if (err instanceof WeeklyLimitError) {

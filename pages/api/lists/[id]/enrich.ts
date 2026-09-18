@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { browserOwnerState, withBrowserOwner, BrowserBusyError } from "@/lib/linkedin/ownership";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") {
@@ -24,6 +25,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: "Account not authenticated" });
   }
 
+  // Can't return a 409 once the background enrichment has started (the response
+  // is already sent below), so the busy check happens up front instead.
+  const heldBy = browserOwnerState(account_id)?.heldBy;
+  if (heldBy) return res.status(409).json({ error: "browser_busy", held_by: heldBy });
+
   const pending = db.prepare(`
     SELECT COUNT(*) as c FROM targets t
     JOIN list_targets lt ON lt.target_id = t.id
@@ -36,11 +42,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // Fire and forget — do not await
   setImmediate(async () => {
     try {
-      const { getSessionContext } = await import("@/lib/linkedin/session");
       const { enrichList } = await import("@/lib/linkedin/enrich");
-      const ctx = await getSessionContext(account_id);
-      await enrichList(ctx, listId);
+      await withBrowserOwner(account_id, "enrich", { maxHoldMs: 600_000, waitMs: 30_000 }, (o) => enrichList(o.context, listId));
     } catch (err) {
+      if (err instanceof BrowserBusyError) {
+        console.warn(`[enrich] background enrichment skipped — browser owned by ${err.heldBy}`);
+        return;
+      }
       console.error("[enrich] background enrichment failed:", err instanceof Error ? err.message : err);
     }
   });

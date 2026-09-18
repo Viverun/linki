@@ -3,6 +3,7 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { getDb } from "@/lib/db";
 import { encryptSecret, decryptSecret, isEncrypted } from "@/lib/crypto";
+import { acquireBrowserOwner, setBrowserContextProvider } from "@/lib/linkedin/ownership";
 
 chromium.use(StealthPlugin());
 
@@ -140,66 +141,54 @@ export async function getSessionContext(accountId: string): Promise<BrowserConte
   }
 }
 
-// B6 (Jul 2026 CPU-spike incident): closing a Playwright page doesn't mean the
-// underlying Chromium renderer OS process has actually exited — under CPU
-// contention on the 2-vCPU prod box, teardown was observed lagging 60-90s
-// behind page.close(). If the runner loop (or a concurrent MCP/API call)
-// opens its next page immediately after, two renderer processes end up alive
-// at once, which is enough to peg both cores and starve sibling containers'
-// healthchecks (NocoDB/Chatwoot flapping). Fix: serialize ALL page opens
-// app-wide through one queue, and hold the queue for a teardown buffer after
-// each page.close() before letting the next one through. PAGE_MAX_HOLD_MS is
-// a safety valve so a caller that forgets to close its page can't wedge the
-// whole app's browser access forever.
-const PAGE_TEARDOWN_GAP_MS = 3000;
-const PAGE_MAX_HOLD_MS = 120_000;
-let pageQueueTail: Promise<void> = Promise.resolve();
+// C2-B1/PR-09: page opens on an account's browser are no longer serialized
+// through an app-wide queue with a 120 s safety valve (B6, Jul 2026
+// CPU-spike incident) — that valve was exactly the seam that let an import
+// scrape and a runner step drive the same Chromium at once (see
+// lib/linkedin/ownership.ts). One holder per account now owns the context for
+// the life of its work; getSessionPage below claims that ownership, hands out
+// one page, and releases (after the same teardown gap) when the page closes.
+setBrowserContextProvider(getOrCreateContext);
 
-/** Returns a new Page from the account's browser context */
-export async function getSessionPage(accountId: string): Promise<Page> {
-  let releaseTurn!: () => void;
-  const myTurn = new Promise<void>(r => { releaseTurn = r; });
-  const previousTail = pageQueueTail;
-  pageQueueTail = myTurn;
-  await previousTail;
-
-  let released = false;
-  const release = () => {
-    if (released) return;
-    released = true;
-    releaseTurn();
-  };
-  const safetyTimer = setTimeout(release, PAGE_MAX_HOLD_MS);
-
+/**
+ * A page on the account's browser, owned for the life of the page. Ownership is
+ * released (after the teardown gap) when the caller closes the page — the same
+ * contract as before, now backed by lib/linkedin/ownership.ts instead of a queue
+ * with a safety valve.
+ */
+export async function getSessionPage(
+  accountId: string,
+  opts: { label?: string; waitMs?: number; maxHoldMs?: number } = {}
+): Promise<Page> {
+  const { owner, release } = await acquireBrowserOwner(accountId, opts.label ?? "step", {
+    maxHoldMs: opts.maxHoldMs ?? 120_000,
+    waitMs: opts.waitMs,
+  });
   let page: Page;
   try {
-    const ctx = await getOrCreateContext(accountId);
     try {
-      page = await ctx.newPage();
+      page = await owner.newPage();
     } catch {
       // B2: context was dead — CLOSE it before recreating so its underlying
       // browser process isn't left orphaned, then retry once with a fresh one.
-      try { await ctx.close(); } catch { /* already gone */ }
-      contexts.delete(accountId);
+      // Kept here (rather than inside getOrCreateContext) because the failure
+      // surfaces on ctx.newPage(), not on context creation itself.
+      try { await owner.context.close(); } catch { /* already gone */ }
       const freshCtx = await getOrCreateContext(accountId);
       page = await freshCtx.newPage();
     }
   } catch (err) {
-    clearTimeout(safetyTimer);
-    release();
+    await release();
     throw err;
   }
-
   const originalClose = page.close.bind(page);
   page.close = (async (options?: Parameters<Page["close"]>[0]) => {
     try {
       return await originalClose(options);
     } finally {
-      clearTimeout(safetyTimer);
-      setTimeout(release, PAGE_TEARDOWN_GAP_MS);
+      await release();
     }
   }) as Page["close"];
-
   return page;
 }
 

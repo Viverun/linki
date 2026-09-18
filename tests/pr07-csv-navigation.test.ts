@@ -42,6 +42,12 @@ mockModule("@/lib/linkedin/session", {
 mockModule("@/lib/linkedin/resolve-account", {
   namedExports: { resolveLinkedInAccount: () => { accountCalls++; return { id: "fixture-account" }; } },
 });
+// C2-B1/PR-09: the API route now acquires its page through the per-account
+// browser owner (lib/linkedin/ownership.ts) rather than calling
+// getSessionContext directly — wire its context provider to the same fixture
+// ctx, counted the same way the old getSessionContext mock above was.
+const own = await import("@/lib/linkedin/ownership");
+own.setBrowserContextProvider(async () => { sessionCalls++; return apiBrowser.ctx; });
 const { default: scrapeHandler } = await import("@/pages/api/targets/[id]/profile-scrape");
 
 after(() => {
