@@ -176,7 +176,18 @@ async function runBatch(importId: string): Promise<void> {
 
   try {
     const ctx = await getSessionContext(job.account_id);
-    const { profiles, lastPage, knownTotal, exhausted } = await scrapeNavigatorUrl(ctx, job.sales_nav_url, {
+    // TEMPORARY (C2-B1/PR-06): scrapeNavigatorUrl now takes a BrowserOwner (Task 3),
+    // not a bare BrowserContext. Task 6 migrates this call site to withBrowserOwner;
+    // for now build a minimal owner around the existing getSessionContext session so
+    // tsc passes without changing import ownership semantics yet.
+    const tempOwner = {
+      accountId: job.account_id,
+      label: "import",
+      signal: new AbortController().signal,
+      context: ctx,
+      newPage: () => ctx.newPage(),
+    };
+    const { profiles, lastPage, knownTotal, exhausted } = await scrapeNavigatorUrl(tempOwner, job.sales_nav_url, {
       startPage: job.start_page,
       maxPages,
       onProgress: (p) => updateProgress.run(p.phase, p.page ?? 0, p.totalPages ?? 0, p.count, p.total, importId),

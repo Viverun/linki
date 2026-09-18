@@ -34,7 +34,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   try {
     const { profiles } = await withBrowserOwner(account_id, "sync-status", { maxHoldMs: 600_000, waitMs: 30_000 }, (o) =>
-      scrapeNavigatorList(o.context, list.sales_nav_url!, { maxPages: 300 })
+      scrapeNavigatorList(o, list.sales_nav_url!, { maxPages: 300 })
     );
 
     const updateDegree = db.prepare("UPDATE targets SET degree = ? WHERE linkedin_url = ?");
