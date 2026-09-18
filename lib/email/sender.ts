@@ -62,7 +62,7 @@ const PRE_DATA_COMMANDS = new Set(["CONN", "EHLO", "HELO", "STARTTLS", "AUTH", "
 /** Node TLS error codes raised by our own verification policy, before any SMTP command. */
 const TLS_POLICY_CODES = /^(ERR_TLS_|CERT_|DEPTH_ZERO_|SELF_SIGNED|UNABLE_TO_|HOSTNAME_MISMATCH)/;
 /** Socket errors that may indicate closure after transmission. */
-const SOCKET_CLOSE_PATTERNS = /^(Connection closed|connection closed|socket closed|EHOSTUNREACH|ENOTFOUND|ENETRESET)/i;
+const SOCKET_CLOSE_PATTERNS = /^(connection closed|socket closed)/i;
 
 /**
  * Where did an SMTP send fail, and can the message have been delivered?

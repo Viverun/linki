@@ -125,7 +125,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       const steps = stepsFor(c.workflow_id, c.track);
       // PR-12: the runner's resolver is the single source of truth. Retry can
       // never act on a step the runner would not run.
-      const resolved = resolveStep({ current_step: c.current_step, current_step_id: c.current_step_id }, steps);
+      const resolved = resolveStep({ id: c.id, current_step: c.current_step, current_step_id: c.current_step_id }, steps);
       if (resolved.kind === "deleted") {
         outcomes.push({ track_id: c.id, target_id: c.target_id, outcome: "blocked",
           reason: `the step this track was pinned to (${c.current_step_id}) no longer exists — edit the campaign to restore it, or unenroll` });
