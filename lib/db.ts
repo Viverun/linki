@@ -661,6 +661,9 @@ function runMigrations(db: Database.Database) {
     // would delete the track.
     "ALTER TABLE run_profile_tracks ADD COLUMN current_step_id TEXT",
     "CREATE INDEX IF NOT EXISTS ix_rpt_current_step_id ON run_profile_tracks(current_step_id)",
+    // C2-B2 (PR-03): how many times the open-core reply policy tried and failed
+    // to get a judgment for this reply. Three failures fail closed (human_reply).
+    "ALTER TABLE email_replies ADD COLUMN open_core_attempts INTEGER NOT NULL DEFAULT 0",
   ];
   // C2-A (PR-04): only "already applied" errors are tolerated. Anything else —
   // a lock, a malformed statement, a missing column — propagates out of

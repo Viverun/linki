@@ -1024,6 +1024,21 @@ export async function executeStep(
     return;
   }
 
+  // C2-B2 (PR-03): a captured reply with no decision yet HOLDS this contact on
+  // both channels. Nothing here is terminal — a later decision either lifts the
+  // hold (out-of-office, operator resume) or stamps email_replied_at, which the
+  // branch above then turns into the usual skip. In the open-core build this is
+  // the only thing standing between "a person replied" and the next send.
+  const undecided = db.prepare(
+    "SELECT from_email FROM email_replies WHERE target_id = ? AND dispatched_at IS NULL ORDER BY received_at DESC LIMIT 1"
+  ).get(target.id) as { from_email: string } | undefined;
+  if (undecided) {
+    log(db, runId, target.id, "info",
+      `Reply from ${undecided.from_email} awaiting decision — holding ${tr.track} track for ${target.full_name ?? target.linkedin_url}`);
+    trWait(db, tr, 1);
+    return;
+  }
+
   const step = resolution.step;
   const name = target.full_name ?? target.linkedin_url;
 
