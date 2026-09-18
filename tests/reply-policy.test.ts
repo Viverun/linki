@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Judge } from "@/lib/email/reply-policy";
 
 const dbDir = mkdtempSync(join(tmpdir(), "linki-reply-policy-test-"));
 process.env.LINKI_DB_PATH = join(dbDir, "test.db");
@@ -127,6 +128,31 @@ test("P9 threshold comes from app_settings and is clamped", async () => {
   setReplyOooThreshold(getDb(), 0.9);
 });
 
+test("P11 an operator decision made while judgment is in flight is not negated by the judge's answer", async () => {
+  withKey(); const s = scenario();
+  const before = getDb().prepare("SELECT COUNT(*) as n FROM activity_logs WHERE target_id = ?").get(s.target) as { n: number };
+  const judge: Judge = async () => {
+    // Simulate an operator deciding the reply while the judgment call is still in flight.
+    getDb().prepare("UPDATE email_replies SET dispatched_at = datetime('now'), dispatch_result_json = ? WHERE id = ?")
+      .run(JSON.stringify({ source: "open-core", decision: "operator_continue" }), s.reply);
+    return { pOoo: 0.1, model: "jev-test", returnDate: null };
+  };
+  const d = await decideReplyOpenCore(getDb(), s.reply, judge);
+  assert.equal(d, "operator_continue");
+  assert.equal(target(s.target).email_replied_at, null);
+  assert.equal(JSON.parse(reply(s.reply).dispatch_result_json!).decision, "operator_continue");
+  const after = getDb().prepare("SELECT COUNT(*) as n FROM activity_logs WHERE target_id = ?").get(s.target) as { n: number };
+  assert.equal(after.n, before.n);
+});
+
+test("P12 a return date beyond the 180-day horizon is treated as none", async () => {
+  withKey(); const s = scenario({ nextStepAt: null });
+  const d = await decideReplyOpenCore(getDb(), s.reply, judgeReturning({ pOoo: 0.97, model: "jev-test", returnDate: { chosen: "2 October 2027", confidence: 0.9 } }));
+  assert.equal(d, "ooo_continue");
+  assert.equal(JSON.parse(reply(s.reply).dispatch_result_json!).return_date, null);
+  assert.equal(track(s.track).next_step_at, null);
+});
+
 test("P10 retryUndecidedReplies decides only undecided rows and reports the count", async () => {
   // All tests in this file share one db (P5/P7 intentionally leave undecided rows behind);
   // this test owns its precondition by neutrally closing out anything left over before it runs.
@@ -156,4 +182,9 @@ test("D2 parseReturnDate resolves relative to today and rejects junk", () => {
   assert.equal(parseReturnDate("2 October", today)?.toISOString(), "2026-10-02T00:00:00.000Z", "year-less date resolves to the next occurrence");
   assert.equal(parseReturnDate("none", today), null);
   assert.equal(parseReturnDate("31 February 2026", today), null);
+});
+
+test("D3 year-less dates use a 60-day staleness window before rolling to next year", () => {
+  assert.equal(parseReturnDate("15 September", new Date("2026-09-18T00:00:00Z")), null);
+  assert.equal(parseReturnDate("5 January", new Date("2026-11-20T00:00:00Z"))?.toISOString(), "2027-01-05T00:00:00.000Z");
 });

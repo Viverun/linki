@@ -15,7 +15,10 @@ import { getReplyOooThreshold } from "@/lib/email/reply-settings";
  *   - anything else is a person answering → targets.email_replied_at, which the
  *     runner turns into the usual "Lead replied" skip.
  * It never sends. Judgment failures leave the reply undecided (the runner holds
- * on that) and are retried; three failures fail closed.
+ * on that) and are retried; three failures fail closed. An operator can decide a
+ * reply (e.g. mark it handled) at any time, including while a judgment call is
+ * in flight — every write here is guarded so that race can only ever lose, never
+ * overwrite the operator's decision.
  */
 
 export interface ReplyState {
@@ -35,6 +38,9 @@ const MAX_ATTEMPTS = 3;
 const RETURN_DATE_MIN_CONFIDENCE = 0.7;
 const BODY_LIMIT = 4000;
 const MAX_CANDIDATES = 8;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const STALE_YEARLESS_DAYS = 60; // a past year-less date within this window is stale, not "next year"
+const RETURN_DATE_HORIZON_DAYS = 180; // a return date further out than this is treated as unstated
 
 const MONTHS = "january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec";
 const DATE_PATTERNS = [
@@ -64,7 +70,14 @@ function utcDate(y: number, m: number, d: number): Date | null {
   const dt = new Date(Date.UTC(y, m, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m && dt.getUTCDate() === d ? dt : null;
 }
-/** The chosen span as a UTC midnight date, or null when it is not a real date. Year-less dates take the next occurrence on or after today. */
+/**
+ * The chosen span as a UTC midnight date, or null when it is not a real date.
+ * Year-less dates resolve relative to today: a this-year occurrence that has already
+ * passed by STALE_YEARLESS_DAYS or less is stale (null, not rolled) — "back 15 September"
+ * read on 18 September almost certainly means the September that just happened, not next
+ * year's. Only a this-year occurrence more than STALE_YEARLESS_DAYS in the past rolls to
+ * next year (e.g. "back 5 January" read in November).
+ */
 export function parseReturnDate(span: string, today: Date): Date | null {
   const s = span.trim().toLowerCase().replace(/(\d)(st|nd|rd|th)/g, "$1").replace(/\./g, "");
   let m: RegExpMatchArray | null;
@@ -79,8 +92,12 @@ export function parseReturnDate(span: string, today: Date): Date | null {
   else return null; // weekday-only forms ("Monday 6th") are too ambiguous to act on
   if (day === undefined || month === undefined) return null;
   if (year !== undefined) return utcDate(year, month, day);
+  const todayMidnight = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
   const thisYear = utcDate(today.getUTCFullYear(), month, day);
-  if (thisYear && thisYear.getTime() >= Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())) return thisYear;
+  if (!thisYear) return utcDate(today.getUTCFullYear() + 1, month, day); // e.g. 29 Feb in a non-leap year
+  if (thisYear.getTime() >= todayMidnight) return thisYear;
+  const pastDays = (todayMidnight - thisYear.getTime()) / MS_PER_DAY;
+  if (pastDays <= STALE_YEARLESS_DAYS) return null; // too recent to plausibly mean "next year"
   return utcDate(today.getUTCFullYear() + 1, month, day);
 }
 
@@ -110,7 +127,7 @@ export function jevJudge(apiKey: string): Judge {
     const rd = answers.return_date;
     return {
       pOoo: answers.is_auto_reply.noul,
-      model: response.model ?? "jev",
+      model: response.model,
       returnDate: rd ? { chosen: rd.choice === "none" ? null : rd.choice, confidence: rd.confidence } : null,
     };
   };
@@ -131,9 +148,30 @@ function returnAt09(date: Date): string {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1, 9, 0, 0)).toISOString();
 }
 
+/** The decision already recorded on a reply (set by us or by an operator), defaulting to operator_continue. */
+function priorDecision(db: Database.Database, replyId: string): ReplyDecision {
+  const current = db.prepare("SELECT dispatch_result_json FROM email_replies WHERE id = ?").get(replyId) as { dispatch_result_json: string | null } | undefined;
+  const prior = current?.dispatch_result_json ? (JSON.parse(current.dispatch_result_json) as { decision?: ReplyDecision }).decision : undefined;
+  return prior ?? "operator_continue";
+}
+
+/**
+ * Atomically claim the next attempt: increments open_core_attempts in SQL (never from a
+ * stale in-memory read) and returns the new count, but only if the reply is still undecided.
+ * Returns null when an operator (or a previous call) decided the reply in the meantime.
+ */
+function bumpAttempts(db: Database.Database, replyId: string): number | null {
+  const row = db.prepare(
+    "UPDATE email_replies SET open_core_attempts = open_core_attempts + 1 WHERE id = ? AND dispatched_at IS NULL RETURNING open_core_attempts"
+  ).get(replyId) as { open_core_attempts: number } | undefined;
+  return row ? row.open_core_attempts : null;
+}
+
 /**
  * Decide one reply. Returns the decision, or "undecided" when the judgment failed
- * and attempts remain. Safe to call again: an already-decided row is a no-op.
+ * and attempts remain. Safe to call again: an already-decided row is a no-op. Safe to
+ * race against an operator decision: whichever writer's guarded UPDATE lands first wins,
+ * and the loser reports that decision back instead of overwriting it.
  */
 export async function decideReplyOpenCore(db: Database.Database, replyId: string, judge: Judge = defaultJudge(db)): Promise<ReplyDecision | "undecided"> {
   const row = db.prepare("SELECT id, target_id, run_id, from_email, subject, body_text, received_at, dispatched_at, dispatch_result_json, open_core_attempts FROM email_replies WHERE id = ?").get(replyId) as ReplyRow | undefined;
@@ -155,63 +193,76 @@ export async function decideReplyOpenCore(db: Database.Database, replyId: string
   };
   const candidates = extractDateCandidates(state.reply.body);
 
+  // Everything from here on is synchronous (no further `await`), so once bumpAttempts
+  // observes dispatched_at IS NULL, nothing else in this process can race it before the
+  // decision is written — the only race window was the `await judge(...)` above.
   let judgment: ReplyJudgment;
   try {
     judgment = await judge(state, candidates);
+    if (!Number.isFinite(judgment.pOoo)) throw new Error(`judge returned a non-finite probability (${judgment.pOoo})`);
   } catch (err) {
-    const attempts = row.open_core_attempts + 1;
     const message = err instanceof Error ? err.message : String(err);
+    const attempts = bumpAttempts(db, row.id);
+    if (attempts === null) return priorDecision(db, row.id); // an operator decided while we were judging
     if (attempts >= MAX_ATTEMPTS) {
-      recordDecision(db, row, "human_reply", { p_ooo: null, threshold, model: null, return_date: null, attempts, reason: `judgment failed ${MAX_ATTEMPTS} times — failing closed` }, `Reply could not be judged (${message}); follow-ups stopped`);
-      return "human_reply";
+      return db.transaction(() => recordDecision(db, row, "human_reply", { p_ooo: null, threshold, model: null, return_date: null, attempts, reason: `judgment failed ${MAX_ATTEMPTS} times — failing closed` }, `Reply could not be judged (${message}); follow-ups stopped`)).immediate();
     }
-    db.prepare("UPDATE email_replies SET open_core_attempts = ?, classification_error = ? WHERE id = ? AND dispatched_at IS NULL").run(attempts, message.slice(0, 500), row.id);
+    db.prepare("UPDATE email_replies SET classification_error = ? WHERE id = ? AND dispatched_at IS NULL").run(message.slice(0, 500), row.id);
     return "undecided";
   }
 
-  const attempts = row.open_core_attempts + 1;
+  const attempts = bumpAttempts(db, row.id);
+  if (attempts === null) return priorDecision(db, row.id); // an operator decided while we were judging
+
   const pOoo = Math.max(0, Math.min(1, judgment.pOoo));
   if (pOoo >= threshold) {
     let returnDate: Date | null = null;
     if (judgment.returnDate?.chosen && judgment.returnDate.confidence >= RETURN_DATE_MIN_CONFIDENCE) {
       const parsed = parseReturnDate(judgment.returnDate.chosen, today);
-      if (parsed && parsed.getTime() > today.getTime()) returnDate = parsed;
+      if (parsed && parsed.getTime() > today.getTime() && parsed.getTime() - today.getTime() <= RETURN_DATE_HORIZON_DAYS * MS_PER_DAY) {
+        returnDate = parsed;
+      }
     }
     const iso = returnDate ? returnDate.toISOString().slice(0, 10) : null;
     const resumeAt = returnDate ? returnAt09(returnDate) : null;
-    db.transaction(() => {
-      if (resumeAt && row.run_id) {
+    return db.transaction(() => {
+      const decision = recordDecision(db, row, "ooo_continue", { p_ooo: pOoo, threshold, model: judgment.model, return_date: iso, attempts },
+        `Out-of-office reply — follow-up continues after ${resumeAt ? resumeAt.slice(0, 10) : "unchanged schedule"}`,
+        { kind: "out_of_office", summary: `Automatic out-of-office reply (p=${pOoo}); ${iso ? `back ${iso}` : "no return date"}` });
+      if (decision === "ooo_continue" && resumeAt && row.run_id) {
         db.prepare(`UPDATE run_profile_tracks SET next_step_at = CASE WHEN next_step_at IS NULL OR datetime(next_step_at) < datetime(?) THEN ? ELSE next_step_at END
                     WHERE track = 'email' AND state IN ('pending', 'in_progress')
                       AND run_profile_id IN (SELECT id FROM run_profiles WHERE run_id = ? AND target_id = ?)`).run(resumeAt, resumeAt, row.run_id, row.target_id);
       }
-      recordDecision(db, row, "ooo_continue", { p_ooo: pOoo, threshold, model: judgment.model, return_date: iso, attempts },
-        `Out-of-office reply — follow-up continues after ${resumeAt ? resumeAt.slice(0, 10) : "unchanged schedule"}`,
-        { kind: "out_of_office", summary: `Automatic out-of-office reply (p=${pOoo}); ${iso ? `back ${iso}` : "no return date"}` });
+      return decision;
     }).immediate();
-    return "ooo_continue";
   }
-  db.transaction(() => {
-    recordDecision(db, row, "human_reply", { p_ooo: pOoo, threshold, model: judgment.model, return_date: null, attempts }, "Reply received — follow-ups stopped",
-      { kind: "human_reply", summary: `A person replied (p_ooo=${pOoo})` });
-  }).immediate();
-  return "human_reply";
+  return db.transaction(() => recordDecision(db, row, "human_reply", { p_ooo: pOoo, threshold, model: judgment.model, return_date: null, attempts }, "Reply received — follow-ups stopped",
+    { kind: "human_reply", summary: `A person replied (p_ooo=${pOoo})` })).immediate();
 }
 
+/**
+ * Write a decision, guarded against a concurrent decision (operator or otherwise): the UPDATE
+ * only takes effect while dispatched_at is still NULL. When it loses that race, no stamp, no
+ * activity log, and no schedule change happen — the caller's decision is discarded in favor of
+ * whatever was already recorded, which this returns.
+ */
 function recordDecision(
   db: Database.Database, row: ReplyRow, decision: ReplyDecision,
   result: { p_ooo: number | null; threshold: number; model: string | null; return_date: string | null; attempts: number; reason?: string },
   activity: string,
   classification: { kind: "out_of_office" | "human_reply"; summary: string } = { kind: "human_reply", summary: result.reason ?? "A person replied" }
-) {
+): ReplyDecision {
   const now = new Date().toISOString();
-  db.prepare(`UPDATE email_replies SET dispatched_at = ?, dispatch_result_json = ?, classified_at = ?, classification_json = ?, classification_error = NULL, open_core_attempts = ?
+  const info = db.prepare(`UPDATE email_replies SET dispatched_at = ?, dispatch_result_json = ?, classified_at = ?, classification_json = ?, classification_error = NULL, open_core_attempts = ?
               WHERE id = ? AND dispatched_at IS NULL`)
     .run(now, JSON.stringify({ source: "open-core", decision, ...result }), now, JSON.stringify(classification), result.attempts, row.id);
+  if (info.changes === 0) return priorDecision(db, row.id);
   if (decision === "human_reply") {
     db.prepare("UPDATE targets SET email_replied_at = COALESCE(email_replied_at, ?) WHERE id = ?").run(now, row.target_id);
   }
   db.prepare("INSERT INTO activity_logs (id, target_id, type, body) VALUES (?, ?, 'email', ?)").run(randomUUID(), row.target_id, activity);
+  return decision;
 }
 
 /** Retry every undecided reply (open-core only). Returns how many reached a decision. */
