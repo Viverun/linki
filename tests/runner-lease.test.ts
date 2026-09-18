@@ -109,3 +109,16 @@ test("L9 trClaim under a foreign lease throws LeaseLostError and claims nothing"
   lease.acquireRunnerLease(getDb(), lease.RUNNER_OWNER, 120_000, Date.now() + 200_000); // hand over (expired) so later tests can claim
   assert.equal(runner.trClaim(db, "tr-l9"), true);
 });
+
+test("L10 withLease renews the lease for the holder, extending expires_at to now + LEASE_TTL_MS", () => {
+  clear();
+  lease.acquireRunnerLease(getDb(), "A", 120_000, T0);
+  assert.equal(lease.readRunnerLease(getDb())!.expires_at, new Date(T0 + 120_000).toISOString());
+  const renewedAt = T0 + 60_000; // still well within the original 120s TTL, but withLease renews anyway
+  lease.withLease(getDb(), () => {}, "A", renewedAt);
+  assert.equal(lease.readRunnerLease(getDb())!.expires_at, new Date(renewedAt + lease.LEASE_TTL_MS).toISOString());
+});
+
+test("L11 LEASE_TTL_MS matches the watchdog's worst-single-step budget (R4)", () => {
+  assert.equal(lease.LEASE_TTL_MS, 600_000);
+});

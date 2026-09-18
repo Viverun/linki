@@ -18,7 +18,16 @@ export { RUNNER_OWNER };
  * mid-step cannot write stale state either.
  */
 export const LEASE_KEY = "runner_lease";
-export const LEASE_TTL_MS = 120_000;
+/**
+ * Matches WATCHDOG_STALE_MS / LIVENESS_THRESHOLD_MS's worst-single-step budget
+ * (docs/phase1-baseline.md: ~345s worst step + ~20s randomDelay margin, 600s
+ * threshold). A tick can run many tracks back to back and only renews the lease
+ * (see withLease below) between steps, so the TTL must outlast the single
+ * longest step a tick can be mid-way through, not just the poll interval —
+ * 120_000 was short enough that a healthy solo process could lose its own
+ * lease mid-step and start refusing its own writes.
+ */
+export const LEASE_TTL_MS = 600_000;
 
 export class LeaseLostError extends Error {
   constructor(owner: string, holder: string | null) {
@@ -53,10 +62,16 @@ export function holdsRunnerLease(db: Database.Database, owner = RUNNER_OWNER, no
   return !!current && current.owner === owner && Date.parse(current.expires_at) > now;
 }
 
-/** Runs fn inside an IMMEDIATE transaction only if the lease is held; otherwise throws before fn. */
-export function withLease<T>(db: Database.Database, fn: () => T, owner = RUNNER_OWNER): T {
+/**
+ * Runs fn inside an IMMEDIATE transaction only if the lease is held; otherwise
+ * throws before fn. Renews the lease (extends expires_at to now + LEASE_TTL_MS)
+ * before running fn, so every fenced write doubles as a heartbeat — a tick that
+ * keeps writing never lets its own lease lapse mid-step (R4).
+ */
+export function withLease<T>(db: Database.Database, fn: () => T, owner = RUNNER_OWNER, now = Date.now()): T {
   return db.transaction(() => {
-    if (!holdsRunnerLease(db, owner)) throw new LeaseLostError(owner, readRunnerLease(db)?.owner ?? null);
+    if (!holdsRunnerLease(db, owner, now)) throw new LeaseLostError(owner, readRunnerLease(db)?.owner ?? null);
+    write(db, owner, now + LEASE_TTL_MS);
     return fn();
   }).immediate();
 }

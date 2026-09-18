@@ -10,6 +10,8 @@ process.env.NEXTAUTH_SECRET ??= "test-secret-for-enroll-scheduling-tests";
 
 const { spreadEnrollBatch } = await import("@/lib/linkedin/runner");
 const { getDb } = await import("@/lib/db");
+const lease = await import("@/lib/linkedin/lease");
+lease.acquireRunnerLease(getDb()); // R1: spreadEnrollBatch's writes now require the lease
 
 after(() => {
   try { getDb().close(); } catch { /* already closed */ }

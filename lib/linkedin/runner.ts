@@ -2335,7 +2335,7 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
   for (const tr of toReschedule) {
     const limits = accountLimitsMap.get(tr.account_id)!;
     const slot = rescheduleToTomorrow(limits);
-    db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(slot, tr.id);
+    trReschedule(db, tr, slot);
     log(db, tr.run_id, tr.target_id, "info", `Daily limit reached — rescheduled to ${slot}`);
   }
 
@@ -2359,6 +2359,16 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
     // which the 600s liveness threshold covers with margin; buying a few more
     // minutes is not worth instrumenting the components the audit rated highest.
     recordProgress(db, `step:${tr.track}:start`);
+    // Re-checked per track, not just once at loop start (R4): a tick processes
+    // many tracks and each step can itself run long, so the lease we held when
+    // we entered tick() may have lapsed to another process by the time we get
+    // here. withLease renews on every fenced write, but that only helps once a
+    // step is already running one of those writes — this is the guard for
+    // before it starts.
+    if (!acquireRunnerLease(db)) {
+      console.warn("[runner] lease lost — stopping this tick");
+      return;
+    }
     await executeStep(db, tr.run_id, tr, target, steps, tr.account_id, limits, emailAccountId, emailLimits, getWorkflowPrompt(tr.workflow_id));
     recordProgress(db, `step:${tr.track}:done`);
     await randomDelay(PROFILE_DELAY_MIN, PROFILE_DELAY_MAX);
@@ -2413,21 +2423,23 @@ export function spreadEnrollBatch(
   const spreadStartMs = Math.max(dayStartMs, now.getTime());
   const bucketMs = Math.max(0, dayEndMs - spreadStartMs) / batchSize;
 
-  for (let i = 0; i < pending.length; i++) {
-    const row = pending[i];
-    const claimed = db.prepare(
-      "UPDATE run_profile_tracks SET state = 'in_progress' WHERE id = ? AND state = 'pending'"
-    ).run(row.id);
-    if (claimed.changes === 0) continue;
-    const slot = (() => {
-      if (nowFrac >= end - 0.25) return rescheduleToTomorrow(limits);
-      const bucketStart = spreadStartMs + i * bucketMs;
-      return new Date(bucketStart + rand() * bucketMs).toISOString();
-    })();
-    db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(slot, row.id);
-    const tgt = db.prepare("SELECT full_name, linkedin_url FROM targets WHERE id = (SELECT target_id FROM run_profiles WHERE id = ?)").get(row.run_profile_id) as { full_name: string | null; linkedin_url: string } | undefined;
-    log(db, runId, null, "info", `[${track}] Scheduled ${tgt?.full_name ?? tgt?.linkedin_url ?? row.run_profile_id} within active window`);
-  }
+  withLease(db, () => {
+    for (let i = 0; i < pending.length; i++) {
+      const row = pending[i];
+      const claimed = db.prepare(
+        "UPDATE run_profile_tracks SET state = 'in_progress' WHERE id = ? AND state = 'pending'"
+      ).run(row.id);
+      if (claimed.changes === 0) continue;
+      const slot = (() => {
+        if (nowFrac >= end - 0.25) return rescheduleToTomorrow(limits);
+        const bucketStart = spreadStartMs + i * bucketMs;
+        return new Date(bucketStart + rand() * bucketMs).toISOString();
+      })();
+      db.prepare("UPDATE run_profile_tracks SET next_step_at = ? WHERE id = ?").run(slot, row.id);
+      const tgt = db.prepare("SELECT full_name, linkedin_url FROM targets WHERE id = (SELECT target_id FROM run_profiles WHERE id = ?)").get(row.run_profile_id) as { full_name: string | null; linkedin_url: string } | undefined;
+      log(db, runId, null, "info", `[${track}] Scheduled ${tgt?.full_name ?? tgt?.linkedin_url ?? row.run_profile_id} within active window`);
+    }
+  });
 }
 
 // ─── public API ──────────────────────────────────────────────────────────────
