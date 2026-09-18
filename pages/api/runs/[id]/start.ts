@@ -29,8 +29,12 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   ).run(id);
 
   if (!hasPremium) {
-    db.prepare("INSERT INTO logs (id, run_id, target_id, level, message) VALUES (?, ?, NULL, 'warn', ?)")
-      .run(randomUUID(), id, "LinkedIn reply detection unavailable in this build — LinkedIn follow-ups are not auto-stopped; email replies hold both channels");
+    try {
+      db.prepare("INSERT INTO logs (id, run_id, target_id, level, message) VALUES (?, ?, NULL, 'warn', ?)")
+        .run(randomUUID(), id, "LinkedIn reply detection unavailable in this build — LinkedIn follow-ups are not auto-stopped; email replies hold both channels");
+    } catch (err) {
+      console.warn("[runs/start] could not write the open-core notice log:", err instanceof Error ? err.message : err);
+    }
   }
 
   ensureGlobalRunnerStarted();
