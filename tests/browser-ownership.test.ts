@@ -88,3 +88,42 @@ test("O7 acquire/release handle: release after the teardown gap admits the next 
   const elapsed = await next;
   assert.ok(elapsed >= own.PAGE_TEARDOWN_GAP_MS - 5, `next holder admitted only after the gap (elapsed ${elapsed})`);
 });
+
+test("O8 same-tick acquirers on one account never overlap (synchronous claim)", async () => {
+  const marks: { label: string; start: number; end: number; heldBy: string | undefined }[] = [];
+  const record = (label: string) => async (): Promise<void> => {
+    const start = Date.now();
+    const heldBy = own.browserOwnerState("z1")?.heldBy;
+    await sleep(20);
+    marks.push({ label, start, end: Date.now(), heldBy });
+  };
+  await Promise.all([
+    own.withBrowserOwner("z1", "a", { maxHoldMs: 10_000 }, record("a")),
+    own.withBrowserOwner("z1", "b", { maxHoldMs: 10_000 }, record("b")),
+  ]);
+  assert.equal(marks.length, 2);
+  const a = marks.find(m => m.label === "a")!;
+  const b = marks.find(m => m.label === "b")!;
+  assert.equal(a.heldBy, "a");
+  assert.equal(b.heldBy, "b");
+  assert.ok(b.start >= a.end, `b must not start until a ends (a.end=${a.end}, b.start=${b.start})`);
+});
+
+test("O9 immediate release then immediate waitMs:0 acquire sees the admitted waiter as holder", async () => {
+  const a = await own.acquireBrowserOwner("z2", "a", { maxHoldMs: 10_000 });
+  const b = own.withBrowserOwner("z2", "b", { maxHoldMs: 10_000 }, async () => {});
+  await sleep(5);
+  await a.release();
+  await assert.rejects(
+    own.acquireBrowserOwner("z2", "c", { maxHoldMs: 1000, waitMs: 0 }),
+    (e: unknown) => e instanceof own.BrowserBusyError && (e as { heldBy: string }).heldBy === "b",
+  );
+  await b;
+});
+
+test("O10 newPage rejects once maxHoldMs has fired", async () => {
+  await own.withBrowserOwner("acct-9", "slow", { maxHoldMs: 20 }, async (o) => {
+    await sleep(60);
+    await assert.rejects(o.newPage());
+  });
+});

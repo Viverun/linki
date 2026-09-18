@@ -11,6 +11,13 @@ import type { BrowserContext, Page } from "playwright";
  * every page of the account's context is closed, so its pending Playwright calls
  * reject — and the next holder is admitted only after the previous one settled.
  * Timeout ends owned work; it never overlaps a replacement.
+ *
+ * The slot is claimed SYNCHRONOUSLY (no `await` between the free-check and
+ * `s.holder = ...`), and admission of a queued waiter also sets `s.holder`
+ * synchronously inside `admitNext` — before the waiter's promise resolves.
+ * From the instant a slot frees it is either null-with-empty-queue, or
+ * already reserved for the next admitted waiter: a fast-path caller can
+ * never race an admission and see the slot as free when it is not.
  */
 export const PAGE_TEARDOWN_GAP_MS = 3000;
 
@@ -30,8 +37,9 @@ export class BrowserBusyError extends Error {
   }
 }
 
-interface Holder { label: string; since: string; abort: AbortController; settled: Promise<void> }
-interface Slot { holder: Holder | null; queue: Array<{ resolve: () => void; reject: (e: Error) => void; label: string }> }
+interface Holder { label: string; since: string; abort: AbortController }
+interface QueueEntry { holder: Holder; resolve: () => void; reject: (e: Error) => void; timer?: ReturnType<typeof setTimeout> }
+interface Slot { holder: Holder | null; queue: QueueEntry[] }
 const slots = new Map<string, Slot>();
 const slot = (id: string) => slots.get(id) ?? (slots.set(id, { holder: null, queue: [] }), slots.get(id)!);
 
@@ -46,54 +54,71 @@ export function browserOwnerState(accountId: string): { heldBy: string; since: s
 
 const sleep = (ms: number) => new Promise<void>(r => { const t = setTimeout(r, ms); (t as { unref?: () => void }).unref?.(); });
 
-async function waitForTurn(accountId: string, label: string, waitMs: number | undefined): Promise<void> {
-  const s = slot(accountId);
-  if (!s.holder && s.queue.length === 0) return;
-  if (waitMs === 0) throw new BrowserBusyError(accountId, s.holder?.label ?? s.queue[0]?.label ?? "queued");
-  await new Promise<void>((resolve, reject) => {
-    const entry = { resolve, reject, label };
-    s.queue.push(entry);
-    if (waitMs !== undefined) {
-      const t = setTimeout(() => {
-        const i = s.queue.indexOf(entry);
-        if (i >= 0) { s.queue.splice(i, 1); reject(new BrowserBusyError(accountId, s.holder?.label ?? "queued")); }
-      }, waitMs);
-      (t as { unref?: () => void }).unref?.();
-    }
-  });
-}
-
-function admitNext(accountId: string) {
+/** Sets `s.holder` to the admitted entry's holder BEFORE resolving it — the reservation is visible synchronously. */
+function admitNext(accountId: string): void {
   const s = slot(accountId);
   const next = s.queue.shift();
-  if (next) next.resolve();
+  if (!next) return;
+  if (next.timer) clearTimeout(next.timer);
+  s.holder = next.holder;
+  next.resolve();
 }
 
 export async function acquireBrowserOwner(accountId: string, label: string, opts: AcquireOptions): Promise<{ owner: BrowserOwner; release: () => Promise<void> }> {
-  await waitForTurn(accountId, label, opts.waitMs);
   const s = slot(accountId);
-  const abort = new AbortController();
-  let settle!: () => void;
-  const settled = new Promise<void>(r => { settle = r; });
-  s.holder = { label, since: new Date().toISOString(), abort, settled };
+  const holder: Holder = { label, since: new Date().toISOString(), abort: new AbortController() };
+  let admittedImmediately: boolean;
+  if (!s.holder && s.queue.length === 0) {
+    s.holder = holder;                    // claimed synchronously — no await before this line
+    admittedImmediately = true;
+  } else {
+    if (opts.waitMs === 0) throw new BrowserBusyError(accountId, s.holder?.label ?? s.queue[0]?.holder.label ?? "queued");
+    await new Promise<void>((resolve, reject) => {
+      const entry: QueueEntry = { holder, resolve, reject };
+      if (opts.waitMs !== undefined) {
+        const t = setTimeout(() => {
+          const i = s.queue.indexOf(entry);
+          if (i >= 0) { s.queue.splice(i, 1); reject(new BrowserBusyError(accountId, s.holder?.label ?? "queued")); }
+        }, opts.waitMs);
+        (t as { unref?: () => void }).unref?.();
+        entry.timer = t;
+      }
+      s.queue.push(entry);
+    });
+    admittedImmediately = false;
+  }
+
+  const abort = holder.abort;
+  if (!admittedImmediately) {
+    // the admitted waiter pays the teardown gap — a fast-path acquire on an idle slot pays none.
+    await sleep(PAGE_TEARDOWN_GAP_MS);
+  }
+
   let context: BrowserContext;
   try {
     context = await contextProvider(accountId);
   } catch (err) {
-    s.holder = null; settle(); admitNext(accountId);
+    s.holder = null;
+    admitNext(accountId);
     throw err;
   }
   const closeAll = async () => { for (const p of context.pages()) { try { await p.close(); } catch { /* already gone */ } } };
   const timer = setTimeout(() => { abort.abort(new Error(`max hold ${opts.maxHoldMs} ms exceeded by ${label}`)); void closeAll(); }, opts.maxHoldMs);
   (timer as { unref?: () => void }).unref?.();
-  const owner: BrowserOwner = { accountId, label, signal: abort.signal, context, newPage: () => context.newPage() };
+  const newPage = async (): Promise<Page> => {
+    if (abort.signal.aborted) {
+      throw abort.signal.reason instanceof Error ? abort.signal.reason : new Error(String(abort.signal.reason ?? "aborted"));
+    }
+    return context.newPage();
+  };
+  const owner: BrowserOwner = { accountId, label, signal: abort.signal, context, newPage };
   let released = false;
   const release = async () => {
     if (released) return; released = true;
     clearTimeout(timer);
     if (abort.signal.aborted) await closeAll();      // the holder was cut off — make sure nothing of it survives
-    await sleep(PAGE_TEARDOWN_GAP_MS);
-    s.holder = null; settle(); admitNext(accountId);
+    s.holder = null;
+    admitNext(accountId);
   };
   return { owner, release };
 }
