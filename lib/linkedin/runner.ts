@@ -1921,6 +1921,7 @@ async function globalLoop(): Promise<void> {
   console.log("[runner] Global loop started");
   const db = getDb();
   let standbyLogged = false;
+  let iteration = 0;
 
   while (true) {
     if (!acquireRunnerLease(db)) {
@@ -1934,6 +1935,20 @@ async function globalLoop(): Promise<void> {
       continue;
     }
     if (standbyLogged) { console.log(`[runner] resumed — lease acquired by ${RUNNER_OWNER}`); standbyLogged = false; }
+    iteration++;
+    // First iteration after (re)acquiring, then hourly (120 iterations at the
+    // 30s poll interval): reschedule imports a crashed process left running.
+    if (iteration === 1 || iteration % 120 === 0) {
+      try {
+        const { recoverInterruptedImports } = await import("@/lib/import-jobs");
+        const r = recoverInterruptedImports(db);
+        if (r.recovered.length || r.quarantined.length) {
+          console.warn(`[import] recovery: rescheduled ${r.recovered.length}, quarantined ${r.quarantined.length}`);
+        }
+      } catch (err) {
+        console.warn("[runner] import recovery sweep error:", err instanceof Error ? err.message : err);
+      }
+    }
     recordProgress(db, "loop");
     try {
       await tick(db);

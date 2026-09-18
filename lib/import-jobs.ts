@@ -1,6 +1,9 @@
 import type DatabaseType from "better-sqlite3";
 import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
+import { RUNNER_OWNER, holdsRunnerLease, withLease } from "@/lib/linkedin/lease";
+import { withBrowserOwner, BrowserBusyError } from "@/lib/linkedin/ownership";
+import type { scrapeNavigatorUrl } from "@/lib/linkedin/scraper";
 
 type DB = DatabaseType.Database;
 
@@ -29,6 +32,10 @@ export interface ImportRow {
   enrich: number;
   started_at: string;
   finished_at: string | null;
+  owner: string | null;
+  heartbeat_at: string | null;
+  recovery_count: number;
+  stall_reason: string | null;
 }
 
 // ─── settings ────────────────────────────────────────────────────────────────
@@ -114,37 +121,55 @@ export function cancelImport(db: DB, importId: string): void {
 
 // ─── scheduler + executor ────────────────────────────────────────────────────
 
-let importRunning = false;
+/** A stale running row (no heartbeat inside this window) is presumed crashed. */
+export const IMPORT_STALE_MS = 600_000;
+
+/** Thrown by onPage when the row's owner has changed mid-scrape (another process claimed it). */
+export class ImportOwnershipLostError extends Error {}
+
+/** Atomically claims a scheduled, non-cancelled row for `owner`. True iff this call won the claim. */
+export function claimScheduledImport(db: DB, importId: string, owner: string = RUNNER_OWNER): boolean {
+  return (
+    db
+      .prepare(
+        `UPDATE list_imports SET status = 'running', owner = ?, heartbeat_at = datetime('now'), started_at = COALESCE(started_at, datetime('now'))
+         WHERE id = ? AND status = 'scheduled' AND cancel_requested = 0`
+      )
+      .run(owner, importId).changes === 1
+  );
+}
 
 /** Runner hook (called each tick): start the next due batch if none is running. */
 export async function processScheduledImports(db: DB): Promise<void> {
-  if (importRunning) return;
+  if (!holdsRunnerLease(db)) return; // standby processes never claim
   const due = db
     .prepare(
       `SELECT * FROM list_imports
        WHERE status = 'scheduled' AND cancel_requested = 0
          AND (scheduled_for IS NULL OR scheduled_for <= date('now'))
+         AND account_id NOT IN (SELECT account_id FROM list_imports WHERE status = 'running' AND account_id IS NOT NULL)
        ORDER BY scheduled_for ASC, batch_index ASC LIMIT 1`
     )
     .get() as ImportRow | undefined;
   if (!due) return;
-
-  importRunning = true;
-  db.prepare("UPDATE list_imports SET status = 'running', started_at = datetime('now') WHERE id = ?").run(due.id);
-  runBatch(due.id)
-    .catch((e) => console.error("[import] batch crashed:", e))
-    .finally(() => { importRunning = false; });
+  if (!claimScheduledImport(db, due.id)) return;
+  runBatch(due.id).catch((e) => console.error("[import] batch crashed:", e));
 }
 
-async function runBatch(importId: string): Promise<void> {
+export async function runBatch(
+  importId: string,
+  deps: { scrape?: typeof scrapeNavigatorUrl; owner?: string } = {}
+): Promise<void> {
   const db = getDb();
+  const scrape = deps.scrape ?? (await import("@/lib/linkedin/scraper")).scrapeNavigatorUrl;
+  const owner = deps.owner ?? RUNNER_OWNER;
   const job = db.prepare("SELECT * FROM list_imports WHERE id = ?").get(importId) as ImportRow | undefined;
   if (!job || !job.account_id || !job.sales_nav_url) return;
 
   // List deleted out from under us?
   const list = db.prepare("SELECT id FROM lists WHERE id = ?").get(job.list_id);
   if (!list) {
-    db.prepare("UPDATE list_imports SET status = 'canceled', finished_at = datetime('now') WHERE id = ?").run(importId);
+    db.prepare("UPDATE list_imports SET status = 'canceled', finished_at = datetime('now'), owner = NULL WHERE id = ?").run(importId);
     return;
   }
 
@@ -153,7 +178,7 @@ async function runBatch(importId: string): Promise<void> {
   const remaining = cap - importedToday(db);
   const maxPages = Math.floor(remaining / PAGE_SIZE);
   if (maxPages < 1) {
-    db.prepare("UPDATE list_imports SET status = 'scheduled', scheduled_for = ? WHERE id = ?").run(
+    db.prepare("UPDATE list_imports SET status = 'scheduled', scheduled_for = ?, owner = NULL WHERE id = ?").run(
       addDaysStr(todayStr(), 1),
       importId
     );
@@ -161,11 +186,9 @@ async function runBatch(importId: string): Promise<void> {
   }
 
   console.log(`[import] batch ${importId} (b${job.batch_index}) start_page=${job.start_page} maxPages=${maxPages} cap=${cap}`);
-  const { getSessionContext } = await import("@/lib/linkedin/session");
-  const { scrapeNavigatorUrl } = await import("@/lib/linkedin/scraper");
 
   const updateProgress = db.prepare(
-    "UPDATE list_imports SET phase = ?, page = ?, total_pages = ?, count = ?, total = ? WHERE id = ?"
+    "UPDATE list_imports SET phase = ?, page = ?, total_pages = ?, count = ?, total = ? WHERE id = ? AND owner = ?"
   );
   const isCanceled = () => {
     const r = db.prepare("SELECT cancel_requested FROM list_imports WHERE id = ?").get(importId) as
@@ -174,66 +197,102 @@ async function runBatch(importId: string): Promise<void> {
     return !r || r.cancel_requested === 1; // row deleted (list cascade) or explicit cancel
   };
 
+  // Every verified page is inserted and checkpointed together, inside one
+  // owner-fenced transaction: if the row is no longer ours (owner changed —
+  // another process reclaimed it after a perceived crash), the UPDATE matches
+  // nothing and we throw, rolling back the insert too. No page is ever
+  // recorded without the profiles that came with it, and nothing is inserted
+  // for a row we no longer own.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const onPage = (pageNum: number, pageProfiles: any[]) => {
+    db.transaction(() => {
+      const { imported, skipped } = insertProfiles(db, job.list_id, pageProfiles);
+      const r = db
+        .prepare(
+          `UPDATE list_imports SET page = ?, imported = imported + ?, skipped = skipped + ?, count = count + ?, heartbeat_at = datetime('now'), phase = 'scraping'
+           WHERE id = ? AND status = 'running' AND owner = ?`
+        )
+        .run(pageNum, imported, skipped, pageProfiles.length, importId, owner);
+      if (r.changes === 0) throw new ImportOwnershipLostError(`import ${importId} is no longer owned by ${owner}`);
+    }).immediate();
+  };
+
   try {
-    const ctx = await getSessionContext(job.account_id);
-    // TEMPORARY (C2-B1/PR-06): scrapeNavigatorUrl now takes a BrowserOwner (Task 3),
-    // not a bare BrowserContext. Task 6 migrates this call site to withBrowserOwner;
-    // for now build a minimal owner around the existing getSessionContext session so
-    // tsc passes without changing import ownership semantics yet.
-    const tempOwner = {
-      accountId: job.account_id,
-      label: "import",
-      signal: new AbortController().signal,
-      context: ctx,
-      newPage: () => ctx.newPage(),
-    };
-    const { profiles, lastPage, knownTotal, exhausted } = await scrapeNavigatorUrl(tempOwner, job.sales_nav_url, {
-      startPage: job.start_page,
-      maxPages,
-      onProgress: (p) => updateProgress.run(p.phase, p.page ?? 0, p.totalPages ?? 0, p.count, p.total, importId),
-      isCanceled,
-    });
+    const result = await withBrowserOwner(job.account_id, "import", { maxHoldMs: 3 * 3_600_000 }, (bo) =>
+      scrape(bo, job.sales_nav_url!, {
+        startPage: job.start_page,
+        maxPages,
+        onProgress: (p) => updateProgress.run(p.phase, p.page ?? 0, p.totalPages ?? 0, p.count, p.total, importId, owner),
+        isCanceled: () => isCanceled() || bo.signal.aborted,
+        onPage,
+      })
+    );
 
     if (isCanceled()) {
-      if (db.prepare("SELECT id FROM list_imports WHERE id = ?").get(importId)) {
-        db.prepare("UPDATE list_imports SET status = 'canceled', finished_at = datetime('now') WHERE id = ?").run(importId);
+      db.prepare("UPDATE list_imports SET status = 'canceled', finished_at = datetime('now'), owner = NULL WHERE id = ?").run(importId);
+      return;
+    }
+
+    const { lastPage, knownTotal, exhausted, stalled } = result;
+
+    // Stalled with nothing verified this window (the very first page failed) —
+    // truthfully an error, not a done-with-zero-progress row.
+    if (stalled && lastPage < job.start_page) {
+      db.prepare("UPDATE list_imports SET status = 'error', error = ?, owner = NULL, finished_at = datetime('now') WHERE id = ?").run(
+        stalled.reason,
+        importId
+      );
+      if (/re-authentication|No data intercepted/i.test(stalled.reason) && job.account_id) {
+        try {
+          const { markNeedsReauth } = await import("@/lib/linkedin/session");
+          await markNeedsReauth(job.account_id);
+        } catch { /* ignore */ }
       }
       return;
     }
 
-    const { imported, skipped } = insertProfiles(db, job.list_id, profiles);
-    console.log(`[import] batch ${importId} inserted ${imported} new, skipped ${skipped} (lastPage=${lastPage}, exhausted=${exhausted})`);
-
-    db.prepare(
-      `UPDATE list_imports
-         SET status = 'done', imported = ?, skipped = ?, count = ?, total = ?, page = ?, total_pages = ?, finished_at = datetime('now')
-       WHERE id = ?`
-    ).run(imported, skipped, profiles.length, knownTotal, lastPage, Math.ceil(knownTotal / PAGE_SIZE), importId);
-
-    // More of the list left → chain the remainder to the next day
-    if (!exhausted) {
+    db.transaction(() => {
       db.prepare(
-        `INSERT INTO list_imports
-           (id, list_id, account_id, sales_nav_url, status, scheduled_for, start_page, batch_index, enrich, total, total_pages, started_at)
-         VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, datetime('now'))`
-      ).run(
-        randomUUID(),
-        job.list_id,
-        job.account_id,
-        job.sales_nav_url,
-        addDaysStr(todayStr(), 1),
-        lastPage + 1,
-        job.batch_index + 1,
-        job.enrich,
-        knownTotal,
-        Math.ceil(knownTotal / PAGE_SIZE)
-      );
-    }
+        `UPDATE list_imports SET status = 'done', total = ?, total_pages = ?, finished_at = datetime('now'), owner = NULL, stall_reason = ? WHERE id = ?`
+      ).run(knownTotal, Math.ceil(knownTotal / PAGE_SIZE), stalled?.reason ?? null, importId);
+
+      // More of the list left → chain the remainder to the next day
+      if (!exhausted) {
+        db.prepare(
+          `INSERT INTO list_imports
+             (id, list_id, account_id, sales_nav_url, status, scheduled_for, start_page, batch_index, enrich, total, total_pages, started_at)
+           VALUES (?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, datetime('now'))`
+        ).run(
+          randomUUID(),
+          job.list_id,
+          job.account_id,
+          job.sales_nav_url,
+          addDaysStr(todayStr(), 1),
+          lastPage + 1,
+          job.batch_index + 1,
+          job.enrich,
+          knownTotal,
+          Math.ceil(knownTotal / PAGE_SIZE)
+        );
+      }
+    }).immediate();
+    console.log(`[import] batch ${importId} done (lastPage=${lastPage}, exhausted=${exhausted})`);
   } catch (err) {
+    if (err instanceof ImportOwnershipLostError) {
+      console.warn(`[import] ${err.message} — leaving the row to its new owner`);
+      return;
+    }
+    if (err instanceof BrowserBusyError) {
+      db.prepare("UPDATE list_imports SET status = 'scheduled', owner = NULL, error = ? WHERE id = ?").run(
+        "browser busy — will retry",
+        importId
+      );
+      return;
+    }
     const message = err instanceof Error ? err.message : String(err);
     console.error("[import] FAILED:", message);
     if (db.prepare("SELECT id FROM list_imports WHERE id = ?").get(importId)) {
-      db.prepare("UPDATE list_imports SET status = 'error', error = ?, finished_at = datetime('now') WHERE id = ?").run(
+      db.prepare("UPDATE list_imports SET status = 'error', error = ?, owner = NULL, finished_at = datetime('now') WHERE id = ?").run(
         message,
         importId
       );
@@ -246,6 +305,40 @@ async function runBatch(importId: string): Promise<void> {
       } catch { /* ignore */ }
     }
   }
+}
+
+/**
+ * Reschedules imports whose runner died mid-batch (running with a heartbeat
+ * older than IMPORT_STALE_MS) so they resume from the first unverified page —
+ * never re-fetching a page whose profiles are already durably checkpointed.
+ * Quarantines (fails closed, no further auto-retry) after 3 interrupted runs.
+ */
+export function recoverInterruptedImports(db: DB, now: number = Date.now()): { recovered: string[]; quarantined: string[] } {
+  const cutoff = new Date(now - IMPORT_STALE_MS).toISOString().slice(0, 19).replace("T", " ");
+  return withLease(db, () => {
+    const stale = db
+      .prepare(`SELECT id, page, start_page, recovery_count FROM list_imports WHERE status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < ?)`)
+      .all(cutoff) as Array<{ id: string; page: number | null; start_page: number; recovery_count: number }>;
+    const recovered: string[] = [];
+    const quarantined: string[] = [];
+    for (const r of stale) {
+      if (r.recovery_count >= 2) {
+        db.prepare(
+          `UPDATE list_imports SET status = 'error', owner = NULL, finished_at = datetime('now'), recovery_count = recovery_count + 1,
+           error = 'quarantined after 3 interrupted runs — check the account session and retry manually' WHERE id = ?`
+        ).run(r.id);
+        quarantined.push(r.id);
+      } else {
+        const resumeFrom = r.page && r.page >= r.start_page ? r.page + 1 : r.start_page;
+        db.prepare(
+          `UPDATE list_imports SET status = 'scheduled', scheduled_for = NULL, owner = NULL, start_page = ?, recovery_count = recovery_count + 1,
+           error = 'recovered after interrupted run (attempt ' || (recovery_count + 1) || ')' WHERE id = ?`
+        ).run(resumeFrom, r.id);
+        recovered.push(r.id);
+      }
+    }
+    return { recovered, quarantined };
+  });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

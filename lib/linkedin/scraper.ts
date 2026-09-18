@@ -174,89 +174,91 @@ export async function scrapeNavigatorList(
     `https://www.linkedin.com/sales/lists/people/${listId}?${n > 1 ? `page=${n}&` : ""}sortCriteria=CREATED_TIME&sortOrder=DESCENDING`;
 
   const page = await owner.newPage();
-  let knownTotal = 0;
-  let intercepted: FlatResponse | null = null;
-  let stalled: { page: number; reason: string } | undefined;
+  try {
+    let knownTotal = 0;
+    let intercepted: FlatResponse | null = null;
+    let stalled: { page: number; reason: string } | undefined;
 
-  const waitForIntercept = async (url: string, waitMs: number): Promise<FlatResponse | null> => {
-    intercepted = null;
-    page.removeAllListeners("response");
-    page.on("response", async (response) => {
-      if (intercepted) return;
-      if (response.url().includes("salesApiPeopleSearch") && response.status() === 200) {
-        try { intercepted = await response.json() as FlatResponse; } catch { /* ignore */ }
-      }
-    });
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(waitMs);
-    return intercepted;
-  };
+    const waitForIntercept = async (url: string, waitMs: number): Promise<FlatResponse | null> => {
+      intercepted = null;
+      page.removeAllListeners("response");
+      page.on("response", async (response) => {
+        if (intercepted) return;
+        if (response.url().includes("salesApiPeopleSearch") && response.status() === 200) {
+          try { intercepted = await response.json() as FlatResponse; } catch { /* ignore */ }
+        }
+      });
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(waitMs);
+      return intercepted;
+    };
 
-  // First page of the window
-  const firstData = await waitForIntercept(buildUrl(startPage), 15000);
-  if (!firstData) {
-    const finalUrl = page.url();
-    console.error(`[scraper] no intercept after 15s. Final URL: ${finalUrl}`);
-    await page.close();
-    throw new Error("No data intercepted from Sales Nav — session may need re-authentication");
-  }
-
-  knownTotal = firstData.paging?.total ?? 0;
-  const firstPageProfiles: SalesProfile[] = [];
-  for (const el of firstData.elements ?? []) {
-    if (!el.entityUrn || seen.has(el.entityUrn)) continue;
-    seen.add(el.entityUrn);
-    allElements.push(el);
-    firstPageProfiles.push(el);
-  }
-  console.log(`[scraper] page ${startPage}: ${allElements.length} elements, total=${knownTotal}`);
-  await onPage?.(startPage, firstPageProfiles.map(el => profileToResult(el, null)));
-
-  const totalPages = Math.ceil(knownTotal / PAGE_SIZE);
-  const endPage = Math.min(totalPages, startPage + maxPages - 1);
-  let lastPage = startPage;
-  onProgress?.({ phase: 'scraping', page: startPage, totalPages: endPage, count: allElements.length, total: knownTotal });
-
-  for (let pageNum = startPage + 1; pageNum <= endPage; pageNum++) {
-    if (owner.signal.aborted) break;
-    if (isCanceled && (await isCanceled())) break;
-    const delayMs = 60000 + Math.random() * 60000;
-    console.log(`[scraper] waiting ${Math.round(delayMs / 1000)}s before page ${pageNum}...`);
-    await page.waitForTimeout(delayMs);
-    if (owner.signal.aborted) break;
-    if (isCanceled && (await isCanceled())) break;
-
-    let pageData = await waitForIntercept(buildUrl(pageNum), 15000);
-    if (!pageData || (pageData.elements?.length ?? 0) === 0) {
-      console.log(`[scraper] page ${pageNum} empty on first try — retrying with 15s wait`);
-      pageData = await waitForIntercept(buildUrl(pageNum), 15000);
+    // First page of the window
+    const firstData = await waitForIntercept(buildUrl(startPage), 15000);
+    if (!firstData) {
+      const finalUrl = page.url();
+      console.error(`[scraper] no intercept after 15s. Final URL: ${finalUrl}`);
+      throw new Error("No data intercepted from Sales Nav — session may need re-authentication");
     }
-    if (!pageData || (pageData.elements?.length ?? 0) === 0) {
-      stalled = { page: pageNum, reason: "no data intercepted after retry" };
-      console.warn(`[scraper] page ${pageNum} still empty after retry — ending window at verified page ${lastPage}`);
-      break;
-    }
-    const pagePageProfiles: SalesProfile[] = [];
-    for (const el of pageData.elements ?? []) {
+
+    knownTotal = firstData.paging?.total ?? 0;
+    const firstPageProfiles: SalesProfile[] = [];
+    for (const el of firstData.elements ?? []) {
       if (!el.entityUrn || seen.has(el.entityUrn)) continue;
       seen.add(el.entityUrn);
       allElements.push(el);
-      pagePageProfiles.push(el);
+      firstPageProfiles.push(el);
     }
-    console.log(`[scraper] page ${pageNum}/${endPage}: ${allElements.length} (total ${knownTotal})`);
-    await onPage?.(pageNum, pagePageProfiles.map(el => profileToResult(el, null)));
-    lastPage = pageNum;
-    onProgress?.({ phase: 'scraping', page: pageNum, totalPages: endPage, count: allElements.length, total: knownTotal });
-  }
+    console.log(`[scraper] page ${startPage}: ${allElements.length} elements, total=${knownTotal}`);
+    await onPage?.(startPage, firstPageProfiles.map(el => profileToResult(el, null)));
 
-  await page.close();
-  return {
-    profiles: allElements.map(el => profileToResult(el, null)),
-    lastPage,
-    knownTotal,
-    exhausted: !stalled && lastPage >= totalPages,
-    ...(stalled ? { stalled } : {}),
-  };
+    const totalPages = Math.ceil(knownTotal / PAGE_SIZE);
+    const endPage = Math.min(totalPages, startPage + maxPages - 1);
+    let lastPage = startPage;
+    onProgress?.({ phase: 'scraping', page: startPage, totalPages: endPage, count: allElements.length, total: knownTotal });
+
+    for (let pageNum = startPage + 1; pageNum <= endPage; pageNum++) {
+      if (owner.signal.aborted) break;
+      if (isCanceled && (await isCanceled())) break;
+      const delayMs = 60000 + Math.random() * 60000;
+      console.log(`[scraper] waiting ${Math.round(delayMs / 1000)}s before page ${pageNum}...`);
+      await page.waitForTimeout(delayMs);
+      if (owner.signal.aborted) break;
+      if (isCanceled && (await isCanceled())) break;
+
+      let pageData = await waitForIntercept(buildUrl(pageNum), 15000);
+      if (!pageData || (pageData.elements?.length ?? 0) === 0) {
+        console.log(`[scraper] page ${pageNum} empty on first try — retrying with 15s wait`);
+        pageData = await waitForIntercept(buildUrl(pageNum), 15000);
+      }
+      if (!pageData || (pageData.elements?.length ?? 0) === 0) {
+        stalled = { page: pageNum, reason: "no data intercepted after retry" };
+        console.warn(`[scraper] page ${pageNum} still empty after retry — ending window at verified page ${lastPage}`);
+        break;
+      }
+      const pagePageProfiles: SalesProfile[] = [];
+      for (const el of pageData.elements ?? []) {
+        if (!el.entityUrn || seen.has(el.entityUrn)) continue;
+        seen.add(el.entityUrn);
+        allElements.push(el);
+        pagePageProfiles.push(el);
+      }
+      console.log(`[scraper] page ${pageNum}/${endPage}: ${allElements.length} (total ${knownTotal})`);
+      await onPage?.(pageNum, pagePageProfiles.map(el => profileToResult(el, null)));
+      lastPage = pageNum;
+      onProgress?.({ phase: 'scraping', page: pageNum, totalPages: endPage, count: allElements.length, total: knownTotal });
+    }
+
+    return {
+      profiles: allElements.map(el => profileToResult(el, null)),
+      lastPage,
+      knownTotal,
+      exhausted: !stalled && lastPage >= totalPages,
+      ...(stalled ? { stalled } : {}),
+    };
+  } finally {
+    await page.close().catch(() => {});
+  }
 }
 
 export async function scrapeSavedSearch(
@@ -275,86 +277,88 @@ export async function scrapeSavedSearch(
     `https://www.linkedin.com/sales/search/people?savedSearchId=${savedSearchId}${n > 1 ? `&page=${n}` : ""}`;
 
   const page = await owner.newPage();
-  let knownTotal = 0;
-  let stalled: { page: number; reason: string } | undefined;
+  try {
+    let knownTotal = 0;
+    let stalled: { page: number; reason: string } | undefined;
 
-  const waitForIntercept = async (url: string, waitMs: number): Promise<FlatResponse | null> => {
-    let intercepted: FlatResponse | null = null;
-    page.removeAllListeners("response");
-    page.on("response", async (response) => {
-      if (intercepted) return;
-      if (response.url().includes("salesApiLeadSearch") && response.status() === 200) {
-        try { intercepted = await response.json() as FlatResponse; } catch { /* ignore */ }
-      }
-    });
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(waitMs);
-    return intercepted;
-  };
+    const waitForIntercept = async (url: string, waitMs: number): Promise<FlatResponse | null> => {
+      let intercepted: FlatResponse | null = null;
+      page.removeAllListeners("response");
+      page.on("response", async (response) => {
+        if (intercepted) return;
+        if (response.url().includes("salesApiLeadSearch") && response.status() === 200) {
+          try { intercepted = await response.json() as FlatResponse; } catch { /* ignore */ }
+        }
+      });
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(waitMs);
+      return intercepted;
+    };
 
-  // First page of the window
-  const firstData = await waitForIntercept(buildUrl(startPage), 15000);
-  if (!firstData) {
-    await page.close();
-    throw new Error("No data intercepted from saved search — session may need re-authentication");
-  }
-
-  knownTotal = firstData.paging?.total ?? 0;
-  const firstPageProfiles: SalesProfile[] = [];
-  for (const el of firstData.elements ?? []) {
-    if (!el.entityUrn || seen.has(el.entityUrn)) continue;
-    seen.add(el.entityUrn);
-    allElements.push(el);
-    firstPageProfiles.push(el);
-  }
-  console.log(`[scraper:saved-search] page ${startPage}: ${allElements.length} elements, total=${knownTotal}`);
-  await onPage?.(startPage, firstPageProfiles.map(el => profileToResult(el, null)));
-
-  const totalPages = Math.ceil(knownTotal / PAGE_SIZE);
-  const endPage = Math.min(totalPages, startPage + maxPages - 1);
-  let lastPage = startPage;
-  onProgress?.({ phase: 'scraping', page: startPage, totalPages: endPage, count: allElements.length, total: knownTotal });
-
-  for (let pageNum = startPage + 1; pageNum <= endPage; pageNum++) {
-    if (owner.signal.aborted) break;
-    if (isCanceled && (await isCanceled())) break;
-    const delayMs = 60000 + Math.random() * 60000;
-    console.log(`[scraper:saved-search] waiting ${Math.round(delayMs / 1000)}s before page ${pageNum}...`);
-    await page.waitForTimeout(delayMs);
-    if (owner.signal.aborted) break;
-    if (isCanceled && (await isCanceled())) break;
-
-    let pageData = await waitForIntercept(buildUrl(pageNum), 15000);
-    if (!pageData || (pageData.elements?.length ?? 0) === 0) {
-      console.log(`[scraper:saved-search] page ${pageNum} empty on first try — retrying with 15s wait`);
-      pageData = await waitForIntercept(buildUrl(pageNum), 15000);
+    // First page of the window
+    const firstData = await waitForIntercept(buildUrl(startPage), 15000);
+    if (!firstData) {
+      throw new Error("No data intercepted from saved search — session may need re-authentication");
     }
-    if (!pageData || (pageData.elements?.length ?? 0) === 0) {
-      stalled = { page: pageNum, reason: "no data intercepted after retry" };
-      console.warn(`[scraper:saved-search] page ${pageNum} still empty after retry — ending window at verified page ${lastPage}`);
-      break;
-    }
-    const pagePageProfiles: SalesProfile[] = [];
-    for (const el of pageData.elements ?? []) {
+
+    knownTotal = firstData.paging?.total ?? 0;
+    const firstPageProfiles: SalesProfile[] = [];
+    for (const el of firstData.elements ?? []) {
       if (!el.entityUrn || seen.has(el.entityUrn)) continue;
       seen.add(el.entityUrn);
       allElements.push(el);
-      pagePageProfiles.push(el);
+      firstPageProfiles.push(el);
     }
-    console.log(`[scraper:saved-search] page ${pageNum}/${endPage}: ${allElements.length} (total ${knownTotal})`);
-    await onPage?.(pageNum, pagePageProfiles.map(el => profileToResult(el, null)));
-    lastPage = pageNum;
-    onProgress?.({ phase: 'scraping', page: pageNum, totalPages: endPage, count: allElements.length, total: knownTotal });
-  }
+    console.log(`[scraper:saved-search] page ${startPage}: ${allElements.length} elements, total=${knownTotal}`);
+    await onPage?.(startPage, firstPageProfiles.map(el => profileToResult(el, null)));
 
-  await page.close();
-  return {
-    profiles: allElements.map(el => profileToResult(el, null)),
-    lastPage,
-    knownTotal,
-    exhausted: !stalled && lastPage >= totalPages,
-    ...(stalled ? { stalled } : {}),
-  };
+    const totalPages = Math.ceil(knownTotal / PAGE_SIZE);
+    const endPage = Math.min(totalPages, startPage + maxPages - 1);
+    let lastPage = startPage;
+    onProgress?.({ phase: 'scraping', page: startPage, totalPages: endPage, count: allElements.length, total: knownTotal });
+
+    for (let pageNum = startPage + 1; pageNum <= endPage; pageNum++) {
+      if (owner.signal.aborted) break;
+      if (isCanceled && (await isCanceled())) break;
+      const delayMs = 60000 + Math.random() * 60000;
+      console.log(`[scraper:saved-search] waiting ${Math.round(delayMs / 1000)}s before page ${pageNum}...`);
+      await page.waitForTimeout(delayMs);
+      if (owner.signal.aborted) break;
+      if (isCanceled && (await isCanceled())) break;
+
+      let pageData = await waitForIntercept(buildUrl(pageNum), 15000);
+      if (!pageData || (pageData.elements?.length ?? 0) === 0) {
+        console.log(`[scraper:saved-search] page ${pageNum} empty on first try — retrying with 15s wait`);
+        pageData = await waitForIntercept(buildUrl(pageNum), 15000);
+      }
+      if (!pageData || (pageData.elements?.length ?? 0) === 0) {
+        stalled = { page: pageNum, reason: "no data intercepted after retry" };
+        console.warn(`[scraper:saved-search] page ${pageNum} still empty after retry — ending window at verified page ${lastPage}`);
+        break;
+      }
+      const pagePageProfiles: SalesProfile[] = [];
+      for (const el of pageData.elements ?? []) {
+        if (!el.entityUrn || seen.has(el.entityUrn)) continue;
+        seen.add(el.entityUrn);
+        allElements.push(el);
+        pagePageProfiles.push(el);
+      }
+      console.log(`[scraper:saved-search] page ${pageNum}/${endPage}: ${allElements.length} (total ${knownTotal})`);
+      await onPage?.(pageNum, pagePageProfiles.map(el => profileToResult(el, null)));
+      lastPage = pageNum;
+      onProgress?.({ phase: 'scraping', page: pageNum, totalPages: endPage, count: allElements.length, total: knownTotal });
+    }
+
+    return {
+      profiles: allElements.map(el => profileToResult(el, null)),
+      lastPage,
+      knownTotal,
+      exhausted: !stalled && lastPage >= totalPages,
+      ...(stalled ? { stalled } : {}),
+    };
+  } finally {
+    await page.close().catch(() => {});
+  }
 }
 
 /**

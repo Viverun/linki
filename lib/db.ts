@@ -690,6 +690,11 @@ function runMigrations(db: Database.Database) {
     // C2-B2 (PR-03): how many times the open-core reply policy tried and failed
     // to get a judgment for this reply. Three failures fail closed (human_reply).
     "ALTER TABLE email_replies ADD COLUMN open_core_attempts INTEGER NOT NULL DEFAULT 0",
+    // C2-B1 (PR-06/PR-09): import ownership and truthful checkpoints.
+    "ALTER TABLE list_imports ADD COLUMN owner TEXT",
+    "ALTER TABLE list_imports ADD COLUMN heartbeat_at TEXT",
+    "ALTER TABLE list_imports ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE list_imports ADD COLUMN stall_reason TEXT",
   ];
   // C2-A (PR-04): only "already applied" errors are tolerated. Anything else —
   // a lock, a malformed statement, a missing column — propagates out of
