@@ -206,7 +206,8 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
   let replies = 0;
   let bounces = 0;
 
-  await new Promise<void>((resolve) => {
+  try {
+    await new Promise<void>((resolve) => {
     const imap = new Imap({
       host: account.imap_host!,
       port: account.imap_port ?? 993,
@@ -373,14 +374,32 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
     });
 
     imap.connect();
-  });
-
-  // Open-core only: replies whose judgment failed earlier are retried here so a
-  // transient TypeSafe/network error does not hold a contact forever.
-  if (!premium?.replies) {
-    try { await retryUndecidedReplies(db); } catch (err) { console.warn("[email-inbox] retryUndecidedReplies failed:", err instanceof Error ? err.message : err); }
+    });
+  } catch (err) {
+    console.warn(`[email-inbox] IMAP sync failed for account ${emailAccountId}:`, err instanceof Error ? err.message : err);
+  } finally {
+    // Open-core only: replies whose judgment failed earlier are retried here so a
+    // transient TypeSafe/network error does not hold a contact forever. Runs whether
+    // the IMAP sync above succeeded, errored, or threw — a sweep is independent of
+    // mailbox connectivity.
+    await runOpenCoreSweep(db);
   }
 
   db.prepare("UPDATE email_accounts SET inbox_synced_at = datetime('now') WHERE id = ?").run(emailAccountId);
   return { replies, bounces };
+}
+
+/**
+ * Runs the open-core reply sweep exactly once, swallowing any failure (a transient
+ * TypeSafe/network error must never fail the calling sync). No-op under premium, which
+ * classifies and dispatches replies itself. Exported so syncEmailInbox and tests share
+ * one code path.
+ */
+export async function runOpenCoreSweep(db: ReturnType<typeof getDb>): Promise<void> {
+  if (premium?.replies) return;
+  try {
+    await retryUndecidedReplies(db);
+  } catch (err) {
+    console.warn("[email-inbox] retryUndecidedReplies failed:", err instanceof Error ? err.message : err);
+  }
 }

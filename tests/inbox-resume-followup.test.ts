@@ -32,7 +32,7 @@ function scenario() {
   db.prepare("INSERT INTO run_profile_tracks (id, run_profile_id, track, state, current_step, error_message, next_step_at) VALUES (?, ?, 'email', 'skipped', 1, 'Lead replied', '2026-01-01T00:00:00.000Z')").run(ids.email, ids.profile);
   db.prepare("INSERT INTO run_profile_tracks (id, run_profile_id, track, state, current_step, error_message) VALUES (?, ?, 'linkedin', 'skipped', 0, 'Lead replied')").run(ids.linkedin, ids.profile);
   db.prepare("INSERT INTO run_profile_tracks (id, run_profile_id, track, state, current_step, error_message) VALUES (?, ?, 'email', 'skipped', 0, 'Lead replied')").run(ids.otherTrack, ids.otherProfile);
-  db.prepare("INSERT INTO email_replies (id, target_id, run_id, from_email, subject, body_text, received_at, dispatched_at, dispatch_result_json) VALUES (?, ?, ?, 'a@b.test', 'Re', 'no thanks', datetime('now'), datetime('now'), '{\"source\":\"open-core\",\"decision\":\"human_reply\"}')").run(ids.reply, ids.target, ids.run);
+  db.prepare("INSERT INTO email_replies (id, target_id, run_id, from_email, subject, body_text, received_at, dispatched_at, dispatch_result_json) VALUES (?, ?, ?, 'a@b.test', 'Re', 'no thanks', datetime('now'), datetime('now'), '{\"source\":\"open-core\",\"decision\":\"human_reply\",\"p_ooo\":0.12}')").run(ids.reply, ids.target, ids.run);
   return ids;
 }
 const track = (id: string) => getDb().prepare("SELECT state, next_step_at, error_message FROM run_profile_tracks WHERE id = ?").get(id) as { state: string; next_step_at: string | null; error_message: string | null };
@@ -53,7 +53,10 @@ test("R2 resume clears the stamp, re-arms only this run's 'Lead replied' tracks,
   assert.equal(track(s.linkedin).state, "in_progress");
   assert.equal(track(s.otherTrack).state, "skipped", "another run's track is not touched");
   const rep = db.prepare("SELECT dispatch_result_json FROM email_replies WHERE id = ?").get(s.reply) as { dispatch_result_json: string };
-  assert.equal(JSON.parse(rep.dispatch_result_json).decision, "operator_continue");
+  const parsed = JSON.parse(rep.dispatch_result_json);
+  assert.equal(parsed.decision, "operator_continue");
+  assert.equal(parsed.p_ooo, 0.12, "resume merges onto the prior JSON — the model's audit trail survives");
+  assert.ok(parsed.resumed_at, "resume stamps when the operator override happened");
   const act = db.prepare("SELECT body FROM activity_logs WHERE target_id = ? ORDER BY rowid DESC LIMIT 1").get(s.target) as { body: string };
   assert.equal(act.body, "Follow-ups resumed from inbox");
 });
@@ -73,4 +76,14 @@ test("R4 an undecided reply is also decided by resume", () => {
   const rep = getDb().prepare("SELECT dispatched_at, dispatch_result_json FROM email_replies WHERE id = ?").get(s.reply) as { dispatched_at: string | null; dispatch_result_json: string };
   assert.ok(rep.dispatched_at);
   assert.equal(JSON.parse(rep.dispatch_result_json).decision, "operator_continue");
+});
+
+test("R5 resume re-arms a track cancelled from the inbox, not just one skipped with 'Lead replied'", () => {
+  const s = scenario();
+  const db = getDb();
+  db.prepare("UPDATE run_profile_tracks SET error_message = 'Follow-up cancelled from inbox' WHERE id = ?").run(s.email);
+  const r = post(s.reply);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { ok: true, rearmed: 2 });
+  assert.equal(track(s.email).state, "in_progress");
 });

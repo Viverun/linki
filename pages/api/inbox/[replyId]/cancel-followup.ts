@@ -38,8 +38,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     "INSERT INTO activity_logs (id, target_id, type, body) VALUES (?, ?, 'email', 'Scheduled follow-up cancelled from inbox.')",
   ).run(randomUUID(), reply.target_id);
 
+  // Cancelling is itself a decision: stamp dispatched_at (if not already set) so an
+  // undecided reply held in the runner cannot later be re-judged by the open-core
+  // sweep (retryUndecidedReplies) and have its dispatch_result_json overwritten.
   db.prepare(
-    "UPDATE email_replies SET dispatch_result_json = ? WHERE id = ?",
+    "UPDATE email_replies SET dispatch_result_json = ?, dispatched_at = COALESCE(dispatched_at, datetime('now')) WHERE id = ?",
   ).run(JSON.stringify({ kind: "cancelled", notes: "Follow-up cancelled from inbox" }), replyId);
 
   return res.json({ ok: true });

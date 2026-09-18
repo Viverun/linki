@@ -188,7 +188,9 @@ export async function decideReplyOpenCore(db: Database.Database, replyId: string
   const today = new Date();
   const state: ReplyState = {
     reply: { from: row.from_email, subject: row.subject ?? "", body: row.body_text.slice(0, BODY_LIMIT), received_at: row.received_at },
-    our_last_email: track?.last_email_subject || track?.last_email_body ? { subject: track?.last_email_subject ?? "", body: track?.last_email_body ?? "" } : null,
+    our_last_email: track?.last_email_subject || track?.last_email_body
+      ? { subject: (track?.last_email_subject ?? "").slice(0, 500), body: (track?.last_email_body ?? "").slice(0, BODY_LIMIT) }
+      : null,
     today: today.toISOString().slice(0, 10),
   };
   const candidates = extractDateCandidates(state.reply.body);
@@ -265,9 +267,13 @@ function recordDecision(
   return decision;
 }
 
-/** Retry every undecided reply (open-core only). Returns how many reached a decision. */
-export async function retryUndecidedReplies(db: Database.Database, judge?: Judge): Promise<number> {
-  const rows = db.prepare("SELECT id FROM email_replies WHERE dispatched_at IS NULL ORDER BY received_at ASC LIMIT 50").all() as Array<{ id: string }>;
+/**
+ * Retry every undecided reply (open-core only). Returns how many reached a decision.
+ * Bounded to a small batch per call (default 10, was 50) so a sweep run from inside a
+ * runner tick or IMAP sync cannot monopolise it.
+ */
+export async function retryUndecidedReplies(db: Database.Database, judge?: Judge, { limit = 10 }: { limit?: number } = {}): Promise<number> {
+  const rows = db.prepare("SELECT id FROM email_replies WHERE dispatched_at IS NULL ORDER BY received_at ASC LIMIT ?").all(limit) as Array<{ id: string }>;
   let decided = 0;
   for (const { id } of rows) {
     const d = await decideReplyOpenCore(db, id, judge);

@@ -7,6 +7,8 @@ const key = process.env.TYPESAFE_API_KEY;
 if (!key) { console.error("TYPESAFE_API_KEY is not set"); process.exit(2); }
 const judge = jevJudge(key);
 const ours = { subject: "Quick question about your hiring plans", body: "Hi Ada — are you looking to expand the team this quarter?" };
+// Fixed sample strings only — this script never sends repository or database
+// content (real reply bodies, subjects, or contact data) to TypeSafe.
 const samples = [
   ["clear OOO with date", "Thank you for your email. I am out of the office until 2 October 2026 with limited access to email and will respond on my return."],
   ["curt human reply", "Not interested, please remove me from your list."],

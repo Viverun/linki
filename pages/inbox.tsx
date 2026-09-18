@@ -54,16 +54,20 @@ const VERDICT_BADGES: Record<string, { label: string; cls: string }> = {
 };
 
 function verdictBadge(reply: InboxReply): { label: string; cls: string } {
-  if (reply.classification_error) return { label: "Failed", cls: "bg-error/15 text-error" };
-  if (reply.reply_id && !reply.dispatched_at) return { label: "Awaiting decision", cls: "bg-base-300/60 text-base-content/50" };
+  if (reply.reply_id && !reply.dispatched_at) {
+    return reply.classification_error
+      ? { label: "Awaiting decision — retrying", cls: "bg-base-300/60 text-base-content/50" }
+      : { label: "Awaiting decision", cls: "bg-base-300/60 text-base-content/50" };
+  }
+  if (reply.dispatched_at && reply.classification_error) return { label: "Failed", cls: "bg-error/15 text-error" };
   if (reply.reply_kind && VERDICT_BADGES[reply.reply_kind]) return VERDICT_BADGES[reply.reply_kind];
   return { label: "—", cls: "bg-base-300/40 text-base-content/30" };
 }
 
 // Stable key for filtering — matches the categories the badge renders.
 function verdictKey(reply: InboxReply): string {
-  if (reply.classification_error) return "failed";
   if (reply.reply_id && !reply.dispatched_at) return "pending";
+  if (reply.dispatched_at && reply.classification_error) return "failed";
   if (reply.reply_kind && VERDICT_BADGES[reply.reply_kind]) return reply.reply_kind;
   return "none";
 }
@@ -75,7 +79,7 @@ const VERDICT_FILTERS: Array<{ key: string; label: string }> = [
   { key: "call_task", label: "Call task" },
   { key: "human_reply", label: "Human reply" },
   { key: "not_interested", label: "Not interested" },
-  { key: "pending", label: "Pending" },
+  { key: "pending", label: "Awaiting decision" },
   { key: "failed", label: "Failed" },
   { key: "none", label: "Unclassified" },
 ];
@@ -294,7 +298,7 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
                   Cancel follow-up
                 </button>
               )}
-              {reply.reply_id && (reply.email_replied_at || dispatch?.decision === "human_reply") && (
+              {reply.reply_id && (reply.email_replied_at || dispatch?.decision === "human_reply" || !reply.dispatched_at) && (
                 <button
                   onClick={handleResumeFollowup}
                   disabled={acting !== null}

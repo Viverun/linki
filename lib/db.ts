@@ -375,6 +375,32 @@ function widenStepSideEffectActions(db: Database.Database) {
   for (const sql of STEP_SIDE_EFFECTS_INDEXES) db.exec(sql);
 }
 
+/**
+ * C2-B2 fix wave: replies captured by an inbox sync that ran BEFORE this phase existed
+ * were never decided (dispatched_at IS NULL forever) and never held anything — the
+ * reply-hold behaviour did not exist yet, so the runner kept moving those contacts
+ * along. Once C2-B2 shipped, `runner.ts` started treating every undecided reply as a
+ * hold. Left alone, every one of those pre-existing rows would retroactively freeze
+ * the current campaign on a reply that is months old and was already handled (or
+ * superseded) long ago. This backfill marks them decided — as if an operator had
+ * looked at each one and said "continue" — exactly once, gated by an app_settings
+ * marker so it never re-runs (and never touches a reply legitimately captured after
+ * this phase shipped, which the reply-hold path is supposed to catch).
+ */
+function backfillLegacyUndecidedReplies(db: Database.Database) {
+  const marker = db.prepare("SELECT 1 FROM app_settings WHERE key = 'c2b2_reply_backfill_done'").get();
+  if (marker) return;
+  db.prepare(`
+    UPDATE email_replies SET
+      dispatched_at = COALESCE(dispatched_at, created_at),
+      dispatch_result_json = COALESCE(dispatch_result_json, '{"source":"migration","decision":"operator_continue","reason":"captured before reply holds existed (C2-B2)"}')
+    WHERE dispatched_at IS NULL
+  `).run();
+  db.prepare(
+    "INSERT INTO app_settings (key, value, updated_at) VALUES ('c2b2_reply_backfill_done', datetime('now'), datetime('now'))"
+  ).run();
+}
+
 function runMigrations(db: Database.Database) {
   // Add columns introduced after initial schema — safe to run on existing DBs
   const migrations = [
@@ -676,6 +702,7 @@ function runMigrations(db: Database.Database) {
       try { db.exec(sql); } catch (err) { if (!isAlreadyApplied(err)) throw err; }
     }
     widenStepSideEffectActions(db);
+    backfillLegacyUndecidedReplies(db);
   }).immediate();
 
   backfillCurrentStepId(db);

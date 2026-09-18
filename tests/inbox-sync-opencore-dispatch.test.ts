@@ -14,16 +14,23 @@ const calls: string[] = [];
 const premiumBox: { premium: null | { replies: { classifyAndDispatch: (id: string) => Promise<void>; shouldSyncInbox: () => boolean; syncAccountInbox: () => Promise<number> } } } = { premium: null };
 mockModule("@/lib/premium", { namedExports: { get premium() { return premiumBox.premium; }, get hasPremium() { return premiumBox.premium !== null; } } });
 const realPolicy = await import("@/lib/email/reply-policy");
+let retryBehaviour: () => Promise<number> = async () => { calls.push("retry"); return 0; };
 mockModule("@/lib/email/reply-policy", {
   namedExports: {
     ...realPolicy,
     decideReplyOpenCore: async (_db: unknown, id: string) => { calls.push(`open-core:${id}`); return "ooo_continue"; },
-    retryUndecidedReplies: async () => { calls.push("retry"); return 0; },
+    retryUndecidedReplies: async () => retryBehaviour(),
   },
 });
-const { dispatchCapturedReply } = await import("@/lib/email/inbox");
+const { dispatchCapturedReply, runOpenCoreSweep } = await import("@/lib/email/inbox");
 const { getDb } = await import("@/lib/db");
 after(() => { try { getDb().close(); } catch { /* never opened */ } rmSync(dbDir, { recursive: true, force: true }); });
+
+// syncEmailInbox itself needs a real (or a fully faked) IMAP account to exercise end
+// to end, which would require mocking the `imap` package's connection lifecycle in
+// detail — not feasible without a large mock here. Per the brief, we instead exercise
+// the shared helper syncEmailInbox calls unconditionally: runOpenCoreSweep(db). Both
+// the sync's own code path and these tests call the exact same function.
 
 test("S1 without premium the open-core policy decides the reply", async () => {
   calls.length = 0; premiumBox.premium = null;
@@ -42,3 +49,26 @@ test("S2 with premium its dispatcher decides and the open-core policy is not cal
   assert.deepEqual(calls, ["premium:r2"]);
   premiumBox.premium = null;
 });
+
+test("S3 runOpenCoreSweep calls retryUndecidedReplies exactly once (open-core)", async () => {
+  calls.length = 0; premiumBox.premium = null;
+  retryBehaviour = async () => { calls.push("retry"); return 0; };
+  await runOpenCoreSweep(getDb());
+  assert.deepEqual(calls, ["retry"]);
+});
+
+test("S4 runOpenCoreSweep swallows a throw from retryUndecidedReplies instead of propagating it", async () => {
+  calls.length = 0; premiumBox.premium = null;
+  retryBehaviour = async () => { calls.push("retry"); throw new Error("synthetic transient failure"); };
+  await assert.doesNotReject(() => runOpenCoreSweep(getDb()));
+  assert.deepEqual(calls, ["retry"]);
+});
+
+// Not tested here: runOpenCoreSweep as a no-op under premium. mock.module's
+// namedExports snapshots `@/lib/premium`'s `premium` getter once at mock setup
+// (see the note on S2 above) rather than preserving a live binding, so — unlike
+// dispatchCapturedReply, which takes the premium surface as an explicit third
+// argument specifically to work around this — runOpenCoreSweep(db) always
+// observes the module's snapshot-time value here, not premiumBox.premium as
+// set by an individual test. The premium/no-premium branch itself is exercised
+// directly in dispatchCapturedReply's S1/S2 above.

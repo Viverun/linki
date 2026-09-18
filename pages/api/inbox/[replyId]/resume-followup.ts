@@ -21,17 +21,21 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
 
   const result = db.transaction(() => {
     const now = new Date().toISOString();
-    const prior = reply.dispatch_result_json ? (JSON.parse(reply.dispatch_result_json) as { decision?: string }).decision : undefined;
-    if (!reply.dispatched_at || prior === "human_reply") {
+    const priorJson = reply.dispatch_result_json ? (JSON.parse(reply.dispatch_result_json) as Record<string, unknown> & { decision?: string }) : undefined;
+    if (!reply.dispatched_at || priorJson?.decision === "human_reply") {
+      // Merge onto whatever was recorded before (model judgment or a prior operator
+      // decision) rather than replacing it wholesale, so the audit trail (p_ooo,
+      // reason, source, etc.) survives a resume instead of being erased.
+      const merged = { ...(priorJson ?? { source: "open-core" }), decision: "operator_continue", resumed_at: now };
       db.prepare("UPDATE email_replies SET dispatched_at = ?, dispatch_result_json = ?, classification_error = NULL WHERE id = ?")
-        .run(now, JSON.stringify({ source: "open-core", decision: "operator_continue" }), replyId);
+        .run(now, JSON.stringify(merged), replyId);
     }
     db.prepare("UPDATE targets SET email_replied_at = NULL WHERE id = ?").run(reply.target_id);
     let rearmed = 0;
     if (reply.run_id) {
       rearmed = db.prepare(
         `UPDATE run_profile_tracks SET state = 'in_progress', error_message = NULL, next_step_at = NULL
-         WHERE state = 'skipped' AND error_message = 'Lead replied'
+         WHERE state = 'skipped' AND error_message IN ('Lead replied', 'Follow-up cancelled from inbox')
            AND run_profile_id IN (SELECT id FROM run_profiles WHERE run_id = ? AND target_id = ?)`
       ).run(reply.run_id, reply.target_id).changes;
     }
