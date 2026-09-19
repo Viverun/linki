@@ -127,3 +127,10 @@ test("O10 newPage rejects once maxHoldMs has fired", async () => {
     await assert.rejects(o.newPage());
   });
 });
+
+test("O11 admitted waiter's teardown gap keeps the event loop alive with nothing else pending", async () => {
+  const a = own.acquireBrowserOwner("acct-11", "a", { maxHoldMs: 1000 });
+  const b = own.withBrowserOwner("acct-11", "b", { maxHoldMs: 1000 }, async () => "ran");
+  await (await a).release();
+  assert.equal(await b, "ran");
+});

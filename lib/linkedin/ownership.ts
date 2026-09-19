@@ -52,7 +52,8 @@ export function browserOwnerState(accountId: string): { heldBy: string; since: s
   return h ? { heldBy: h.label, since: h.since } : null;
 }
 
-const sleep = (ms: number) => new Promise<void>(r => { const t = setTimeout(r, ms); (t as { unref?: () => void }).unref?.(); });
+// Ref'd on purpose: an admitted waiter is live work; an unref'd gap timer let Node exit mid-await (gate failure under Node 22).
+const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });
 
 /** Sets `s.holder` to the admitted entry's holder BEFORE resolving it — the reservation is visible synchronously. */
 function admitNext(accountId: string): void {
