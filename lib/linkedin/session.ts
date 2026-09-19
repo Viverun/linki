@@ -174,6 +174,9 @@ export async function getSessionPage(
       // Kept here (rather than inside getOrCreateContext) because the failure
       // surfaces on ctx.newPage(), not on context creation itself.
       try { await owner.context.close(); } catch { /* already gone */ }
+      // The "close" listener evicts asynchronously — delete explicitly so the
+      // retry below cannot observe a stale map entry for the context we just closed.
+      contexts.delete(accountId);
       const freshCtx = await getOrCreateContext(accountId);
       page = await freshCtx.newPage();
     }

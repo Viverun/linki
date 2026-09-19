@@ -1,7 +1,7 @@
 import type DatabaseType from "better-sqlite3";
 import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
-import { RUNNER_OWNER, holdsRunnerLease, withLease } from "@/lib/linkedin/lease";
+import { RUNNER_OWNER, holdsRunnerLease, withLease, LeaseLostError } from "@/lib/linkedin/lease";
 import { withBrowserOwner, BrowserBusyError } from "@/lib/linkedin/ownership";
 import type { scrapeNavigatorUrl } from "@/lib/linkedin/scraper";
 
@@ -169,7 +169,18 @@ export async function processScheduledImports(db: DB): Promise<void> {
     )
     .get() as ImportRow | undefined;
   if (!due) return;
-  const token = claimScheduledImport(db, due.id);
+  // Fenced claim (part 2 of ruling R17): holdsRunnerLease above is a fast
+  // exit for the common case, but the lease can be lost between that check
+  // and the claim write below — withLease re-checks atomically inside the
+  // same transaction as the claim, so a process that just lost the lease can
+  // never claim a row out from under the new owner.
+  let token: string | null;
+  try {
+    token = withLease(db, () => claimScheduledImport(db, due.id));
+  } catch (err) {
+    if (err instanceof LeaseLostError) return;
+    throw err;
+  }
   if (!token) return;
   runBatch(due.id, { owner: token }).catch((e) => console.error("[import] batch crashed:", e));
 }
@@ -187,7 +198,7 @@ export async function runBatch(
   // List deleted out from under us?
   const list = db.prepare("SELECT id FROM lists WHERE id = ?").get(job.list_id);
   if (!list) {
-    db.prepare("UPDATE list_imports SET status = 'canceled', finished_at = datetime('now'), owner = NULL WHERE id = ?").run(importId);
+    db.prepare("UPDATE list_imports SET status = 'canceled', finished_at = datetime('now'), owner = NULL WHERE id = ? AND owner = ? AND status = 'running'").run(importId, owner);
     return;
   }
 
@@ -196,9 +207,10 @@ export async function runBatch(
   const remaining = cap - importedToday(db);
   const maxPages = Math.floor(remaining / PAGE_SIZE);
   if (maxPages < 1) {
-    db.prepare("UPDATE list_imports SET status = 'scheduled', scheduled_for = ?, owner = NULL WHERE id = ?").run(
+    db.prepare("UPDATE list_imports SET status = 'scheduled', scheduled_for = ?, owner = NULL WHERE id = ? AND owner = ? AND status = 'running'").run(
       addDaysStr(todayStr(), 1),
-      importId
+      importId,
+      owner
     );
     return;
   }
@@ -232,7 +244,13 @@ export async function runBatch(
   // for a row we no longer own.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const onPage = (pageNum: number, pageProfiles: any[]) => {
-    db.transaction(() => {
+    // withLease is itself an IMMEDIATE transaction fenced on the runner lease
+    // — a process that lost the lease (e.g. a replacement took over after a
+    // perceived crash) can no longer durably checkpoint this import, even if
+    // it still (falsely) believes it owns the row. LeaseLostError propagates
+    // like ImportOwnershipLostError below: the scraper's `finally` closes the
+    // page, and runBatch's catch treats both the same way.
+    withLease(db, () => {
       const { imported, skipped } = insertProfiles(db, job.list_id, pageProfiles);
       const r = db
         .prepare(
@@ -241,7 +259,7 @@ export async function runBatch(
         )
         .run(pageNum, imported, skipped, pageProfiles.length, importId, owner);
       if (r.changes === 0) throw new ImportOwnershipLostError(`import ${importId} no longer owned`);
-    }).immediate();
+    });
   };
 
   try {
@@ -273,7 +291,9 @@ export async function runBatch(
     const { lastPage, knownTotal, exhausted, stalled } = result;
 
     // Stalled with nothing verified this window (the very first page failed) —
-    // truthfully an error, not a done-with-zero-progress row.
+    // truthfully an error, not a done-with-zero-progress row. Unreachable with
+    // the current scraper (it never returns `lastPage < startPage`); kept for
+    // a scraper that reports a first-page miss as `stalled`.
     if (stalled && lastPage < job.start_page) {
       const r = db
         .prepare(
@@ -327,7 +347,7 @@ export async function runBatch(
     }).immediate();
     console.log(`[import] batch ${importId} done (lastPage=${lastPage}, exhausted=${exhausted})`);
   } catch (err) {
-    if (err instanceof ImportOwnershipLostError) {
+    if (err instanceof ImportOwnershipLostError || err instanceof LeaseLostError) {
       console.warn(`[import] ${err.message} — leaving the row to its new owner`);
       return;
     }

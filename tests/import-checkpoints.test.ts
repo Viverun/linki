@@ -254,6 +254,34 @@ test("I8 recovery finishes a stale row whose window was already fully checkpoint
   assert.equal(r.error, null);
 });
 
+test("I10 a process that lost the runner lease cannot checkpoint a second page (Critical part 2)", async () => {
+  lease.acquireRunnerLease(db()); // we hold it as lease.RUNNER_OWNER when page 1 checkpoints
+  const { id, listId } = seedRunningImport();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const scrape = async (owner: any, url: string, opts: any) => {
+    await opts.onPage(1, makeProfiles(1, 25, "i10"));
+    // Another process now holds the lease — ours is no longer valid, so the
+    // owner-token predicate on the row would still (falsely) pass but the
+    // lease fence must not. Written directly (acquireRunnerLease's fairness
+    // check would refuse to steal a lease that is still fresh for us).
+    db().prepare(
+      `UPDATE app_settings SET value = ? WHERE key = ?`
+    ).run(JSON.stringify({ owner: "other-process", expires_at: new Date(Date.now() + 600_000).toISOString() }), lease.LEASE_KEY);
+    await opts.onPage(2, makeProfiles(2, 25, "i10")); // throws LeaseLostError — never reached below
+    return { profiles: [], lastPage: 2, knownTotal: 75, exhausted: false };
+  };
+  await importJobs.runBatch(id, { scrape });
+  const r = row(id);
+  assert.equal(r.page, 1, "page 2's checkpoint never landed");
+  assert.equal(r.imported, 25, "only page 1's profiles are durably counted");
+  assert.equal(listTargetCount(listId), 25, "no second-page profiles inserted");
+  assert.equal(r.status, "running", "recovery's job, not runBatch's — the row is left running for the new owner");
+  // Hand the lease back to us for the tests that follow (acquireRunnerLease's
+  // fairness check would otherwise refuse to steal it back from "other-process").
+  db().prepare(`DELETE FROM app_settings WHERE key = ?`).run(lease.LEASE_KEY);
+  lease.acquireRunnerLease(db());
+});
+
 test("I9 recovery cancels a stale row that was already flagged for cancellation, instead of rescheduling it", () => {
   lease.acquireRunnerLease(db());
   const { id } = seedRunningImport({ heartbeatAt: "2020-01-01 00:00:00" });

@@ -113,6 +113,10 @@ guard: it serialises every page open per LinkedIn account, so an import scrape
 and a runner step cannot open competing pages against the same account even
 within the one enforced process.
 
+Graceful shutdown (SIGTERM/SIGINT) drains any in-flight browser holds (bounded
+to 30 s) before releasing the lease, so a rolling restart cannot overlap two
+Chromium stacks on one account.
+
 To clear a stuck lease after a confirmed-dead owner:
 
 ```sql

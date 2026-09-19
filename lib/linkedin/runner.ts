@@ -9,7 +9,7 @@ export { classifyError, UNKNOWN_ERROR_CLASS };
 import { randomUUID, createHash } from "crypto";
 import { setInterval as nodeSetInterval } from "node:timers";
 import { getSessionPage, saveSessionState } from "@/lib/linkedin/session";
-import { browserOwnerState, tryWithBrowserOwner, BrowserBusyError } from "@/lib/linkedin/ownership";
+import { browserOwnerState, tryWithBrowserOwner, BrowserBusyError, abortAllBrowserOwners } from "@/lib/linkedin/ownership";
 import { visitProfile, type VisitResult } from "@/lib/linkedin/visit";
 import { sendConnectionRequest, WeeklyLimitError, AlreadyConnectedError, PendingInviteError, vanityNameOf } from "@/lib/linkedin/connect";
 import { sendMessage, NotConnectedError, MessagingUrnUnresolvedError } from "@/lib/linkedin/message";
@@ -1723,7 +1723,7 @@ export async function executeStep(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (err instanceof LeaseLostError) {
-      log(db, runId, target.id, "warn", "lease lost mid-step — no state written");
+      log(db, runId, target.id, "warn", "lease lost mid-step — track position not advanced (ledger/context writes already made are kept)");
       return;
     }
     if (err instanceof BrowserBusyError) {
@@ -1801,9 +1801,27 @@ const gs = global as typeof global & { __linkiLeaseSignalsRegistered?: boolean }
 export function ensureGlobalRunnerStarted(): void {
   if (!gs.__linkiLeaseSignalsRegistered) {
     gs.__linkiLeaseSignalsRegistered = true;
-    const releaseOnExit = () => { try { releaseRunnerLease(getDb()); } catch { /* best effort */ } };
-    process.once("SIGTERM", releaseOnExit);
-    process.once("SIGINT", releaseOnExit);
+    // Shutdown handover (ruling R17): releasing the lease before an in-flight
+    // browser hold has actually stopped would let a replacement process start
+    // a second Chromium stack against the same account while this process's
+    // hold is still running. Abort every local hold and wait (bounded) for it
+    // to settle FIRST, then release the lease. Best-effort throughout — a
+    // stuck shutdown must not prevent the process from exiting.
+    //
+    // Registering a SIGTERM/SIGINT listener suppresses Node's default
+    // terminate-immediately behaviour for that signal, so once this handler
+    // is installed *it* is responsible for ending the process — hence the
+    // explicit process.exit(0) once the best-effort sequence above has run.
+    const releaseOnExit = async () => {
+      try {
+        await abortAllBrowserOwners("process shutting down");
+        releaseRunnerLease(getDb());
+        console.log("[runner] shutdown: browser holds aborted, lease released");
+      } catch { /* best effort */ }
+      process.exit(0);
+    };
+    process.once("SIGTERM", () => { void releaseOnExit(); });
+    process.once("SIGINT", () => { void releaseOnExit(); });
   }
   const state = (g.__linkiRunner ??= { loop: null, attempts: 0 });
   if (state.loop) return;

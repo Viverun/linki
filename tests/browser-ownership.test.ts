@@ -134,3 +134,39 @@ test("O11 admitted waiter's teardown gap keeps the event loop alive with nothing
   await (await a).release();
   assert.equal(await b, "ran");
 });
+
+test("O12 abortAllBrowserOwners aborts every held slot, closes its pages, and waits for both to settle", async () => {
+  let rejectOnClose1!: (e: Error) => void;
+  let rejectOnClose2!: (e: Error) => void;
+  const pending1 = new Promise<never>((_, rej) => { rejectOnClose1 = rej; });
+  const pending2 = new Promise<never>((_, rej) => { rejectOnClose2 = rej; });
+  let signalA: AbortSignal | undefined;
+  let signalB: AbortSignal | undefined;
+
+  const holdA = own.withBrowserOwner("acct-12a", "runner", { maxHoldMs: 60_000 }, async (o) => {
+    signalA = o.signal;
+    const p = await o.newPage();
+    const realClose = p.close.bind(p);
+    p.close = (async () => { rejectOnClose1(new Error("page closed")); return realClose(); }) as typeof p.close;
+    await pending1.catch(() => {}); // resolves once abortAllBrowserOwners closes this page
+  });
+  const holdB = own.withBrowserOwner("acct-12b", "import", { maxHoldMs: 60_000 }, async (o) => {
+    signalB = o.signal;
+    const p = await o.newPage();
+    const realClose = p.close.bind(p);
+    p.close = (async () => { rejectOnClose2(new Error("page closed")); return realClose(); }) as typeof p.close;
+    await pending2.catch(() => {});
+  });
+  await sleep(10);
+
+  assert.ok(own.browserOwnerState("acct-12a"));
+  assert.ok(own.browserOwnerState("acct-12b"));
+
+  await own.abortAllBrowserOwners("x", 5000);
+
+  await Promise.all([holdA, holdB]);
+  assert.equal(signalA?.aborted, true);
+  assert.equal(signalB?.aborted, true);
+  assert.equal(own.browserOwnerState("acct-12a"), null);
+  assert.equal(own.browserOwnerState("acct-12b"), null);
+});

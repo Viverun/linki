@@ -37,7 +37,13 @@ export class BrowserBusyError extends Error {
   }
 }
 
-interface Holder { label: string; since: string; abort: AbortController }
+interface Holder {
+  label: string;
+  since: string;
+  abort: AbortController;
+  context?: BrowserContext;
+  settled: Promise<void>;
+}
 interface QueueEntry { holder: Holder; resolve: () => void; reject: (e: Error) => void; timer?: ReturnType<typeof setTimeout> }
 interface Slot { holder: Holder | null; queue: QueueEntry[] }
 const slots = new Map<string, Slot>();
@@ -55,6 +61,11 @@ export function browserOwnerState(accountId: string): { heldBy: string; since: s
 // Ref'd on purpose: an admitted waiter is live work; an unref'd gap timer let Node exit mid-await (gate failure under Node 22).
 const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms); });
 
+/** Closes every open page of a context, swallowing errors for pages already gone. Shared by the max-hold timer and abortAllBrowserOwners. */
+async function closeAllPages(context: BrowserContext): Promise<void> {
+  for (const p of context.pages()) { try { await p.close(); } catch { /* already gone */ } }
+}
+
 /** Sets `s.holder` to the admitted entry's holder BEFORE resolving it — the reservation is visible synchronously. */
 function admitNext(accountId: string): void {
   const s = slot(accountId);
@@ -67,7 +78,9 @@ function admitNext(accountId: string): void {
 
 export async function acquireBrowserOwner(accountId: string, label: string, opts: AcquireOptions): Promise<{ owner: BrowserOwner; release: () => Promise<void> }> {
   const s = slot(accountId);
-  const holder: Holder = { label, since: new Date().toISOString(), abort: new AbortController() };
+  let resolveSettled!: () => void;
+  const settled = new Promise<void>(r => { resolveSettled = r; });
+  const holder: Holder = { label, since: new Date().toISOString(), abort: new AbortController(), settled };
   let admittedImmediately: boolean;
   if (!s.holder && s.queue.length === 0) {
     s.holder = holder;                    // claimed synchronously — no await before this line
@@ -101,9 +114,11 @@ export async function acquireBrowserOwner(accountId: string, label: string, opts
   } catch (err) {
     s.holder = null;
     admitNext(accountId);
+    resolveSettled();
     throw err;
   }
-  const closeAll = async () => { for (const p of context.pages()) { try { await p.close(); } catch { /* already gone */ } } };
+  holder.context = context;
+  const closeAll = () => closeAllPages(context);
   const timer = setTimeout(() => { abort.abort(new Error(`max hold ${opts.maxHoldMs} ms exceeded by ${label}`)); void closeAll(); }, opts.maxHoldMs);
   (timer as { unref?: () => void }).unref?.();
   const newPage = async (): Promise<Page> => {
@@ -120,6 +135,7 @@ export async function acquireBrowserOwner(accountId: string, label: string, opts
     if (abort.signal.aborted) await closeAll();      // the holder was cut off — make sure nothing of it survives
     s.holder = null;
     admitNext(accountId);
+    resolveSettled();
   };
   return { owner, release };
 }
@@ -137,4 +153,26 @@ export async function tryWithBrowserOwner<T>(accountId: string, label: string, o
     if (err instanceof BrowserBusyError) return { ok: false, heldBy: err.heldBy };
     throw err;
   }
+}
+
+/**
+ * Shutdown handover (ruling R17): a process that is about to release the
+ * runner lease must not leave an in-flight browser hold running for another
+ * process to collide with. Aborts every currently-held slot's signal (so its
+ * pending Playwright calls reject) and closes every open page of its context
+ * (the same close-all the max-hold timer uses), then waits for each holder's
+ * `release()` to actually run — bounded by `settleTimeoutMs` so a holder that
+ * never settles cannot block shutdown forever.
+ */
+export async function abortAllBrowserOwners(reason: string, settleTimeoutMs = 30_000): Promise<void> {
+  const holders: Holder[] = [];
+  for (const s of slots.values()) { if (s.holder) holders.push(s.holder); }
+  for (const h of holders) {
+    h.abort.abort(new Error(reason));
+    if (h.context) void closeAllPages(h.context);
+  }
+  await Promise.all(holders.map(h => new Promise<void>(resolve => {
+    const t = setTimeout(resolve, settleTimeoutMs); // ref'd — shutdown genuinely waits on this
+    h.settled.then(() => { clearTimeout(t); resolve(); });
+  })));
 }
