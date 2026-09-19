@@ -26,6 +26,13 @@ mockModule("@/lib/db", {
   },
 });
 
+// Hoisted above the first test(): under Node 22, node:test drains any tests
+// already registered while a top-level await is still pending, runs after()
+// (closing the DB), and this import (and the L8–L11 tests below it) would
+// then fail with "The database connection is not open". Node 24 waits for
+// full module evaluation first, which is why this passed on the host before.
+const runner = await import("@/lib/linkedin/runner");
+
 const clear = () => getDb().prepare("DELETE FROM app_settings WHERE key = 'runner_lease'").run();
 const T0 = Date.parse("2026-09-18T10:00:00Z");
 
@@ -83,7 +90,6 @@ test("L7 a malformed stored value is treated as absent", () => {
 });
 
 // ── watchdog + verbs (runner loaded with browser modules mocked, as in runner-watchdog.test.ts)
-const runner = await import("@/lib/linkedin/runner");
 const setMarker = (iso: string) => getDb().prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES ('runner_progress_at', ?, datetime('now'))
   ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(iso);
 const stale = () => new Date(Date.now() - 11 * 60_000).toISOString();

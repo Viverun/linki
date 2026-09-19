@@ -23,6 +23,12 @@ mockModule("@/lib/email/reply-policy", {
   },
 });
 const { dispatchCapturedReply, runOpenCoreSweep } = await import("@/lib/email/inbox");
+// Hoisted above the first test(): under Node 22, node:test drains any tests
+// already registered while a top-level await is still pending, runs after()
+// (closing the DB), and this import (and the S5/S6 tests using it) would then
+// fail with "The database connection is not open". Node 24 waits for full
+// module evaluation first, which is why this passed on the host before.
+const { syncEmailInbox } = await import("@/lib/email/inbox");
 const { getDb } = await import("@/lib/db");
 after(() => { try { getDb().close(); } catch { /* never opened */ } rmSync(dbDir, { recursive: true, force: true }); });
 
@@ -77,7 +83,6 @@ test("S4 runOpenCoreSweep swallows a throw from retryUndecidedReplies instead of
 // config, and no pending targets — must still run the open-core sweep, or a
 // single-account install could leave undecided replies without an automatic
 // path to a decision. Neither path touches IMAP, so they are drivable here.
-const { syncEmailInbox } = await import("@/lib/email/inbox");
 
 test("S5 an account without IMAP config still runs the sweep once", async () => {
   calls.length = 0; premiumBox.premium = null;

@@ -67,6 +67,13 @@ after(() => {
   rmSync(dbDir, { recursive: true, force: true });
 });
 
+// Hoisted above the first test(): under Node 22, node:test drains any tests
+// already registered while a top-level await is still pending, runs after()
+// (closing the DB), and the R1 tests using retryHandler would then fail with
+// "The database connection is not open". Node 24 waits for full module
+// evaluation first, which is why this passed on the host before.
+const { default: retryHandler } = await import("@/pages/api/runs/[id]/retry");
+
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
 const BODY = "Hi {{first_name}}, following up on our connection.";
@@ -423,8 +430,6 @@ test("19b MessagingUrnUnresolvedError is provably pre-click and DOES abandon", a
 // that claims to do something dangerous and instead does nothing is worse than
 // either behaviour, because the operator reaches for it exactly when they need
 // to know what happened.
-
-const { default: retryHandler } = await import("@/pages/api/runs/[id]/retry");
 
 function callRetry(runId: string, body: unknown) {
   const cap: { status: number; body: unknown } = { status: 200, body: undefined };

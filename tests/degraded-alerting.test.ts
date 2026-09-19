@@ -19,6 +19,13 @@ after(() => {
   rmSync(dbDir, { recursive: true, force: true });
 });
 
+// Hoisted above the first test(): under Node 22, node:test drains any tests
+// already registered while a top-level await is still pending, runs after()
+// (closing the DB), and the Part B tests using this import would then fail
+// with "The database connection is not open". Node 24 waits for full module
+// evaluation first, which is why this passed on the host before.
+const { bannerFromHealth } = await import("@/lib/health-contract");
+
 const readKey = (k: string) =>
   (db.prepare("SELECT value FROM app_settings WHERE key = ?").get(k) as { value: string } | undefined)?.value ?? null;
 const failures = () => parseInt(readKey("runner_tick_failures") ?? "0", 10);
@@ -121,8 +128,6 @@ test("A: the stored error class is the classified value, not the raw constructor
 // dependencies, so the split is deliberate and stated rather than hidden: every
 // DECISION the banner makes lives in bannerFromHealth and is tested behaviourally
 // below; only the React wiring is checked structurally, at the end.
-
-const { bannerFromHealth } = await import("@/lib/health-contract");
 
 const healthy = { ok: true, body: { ok: true, runner: { state: "healthy", consecutive_tick_failures: 0 } } };
 const degraded = (failures: number, cls: string) =>
