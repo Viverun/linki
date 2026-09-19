@@ -26,7 +26,7 @@ Storage: `app_settings` key `runner_lease`, value JSON `{ "owner": string, "expi
 
 ```ts
 export const RUNNER_OWNER: string;
-export const LEASE_TTL_MS = 120_000;          // renewed every loop iteration (POLL_INTERVAL_MS ≪ TTL)
+export const LEASE_TTL_MS = 600_000; // renewed on every fenced write and before each step; covers the worst single step
 export function acquireRunnerLease(db, owner = RUNNER_OWNER, ttlMs = LEASE_TTL_MS): boolean;
 export function readRunnerLease(db): { owner: string; expires_at: string } | null;
 export function holdsRunnerLease(db, owner = RUNNER_OWNER): boolean;   // owner matches and not expired
@@ -75,6 +75,9 @@ export function browserOwnerState(accountId): { heldBy: string; since: string } 
 
 Semantics (per account, process-local — combined with §1 this is global):
 
+- The slot claim is synchronous — reservation happens before any `await`, so two
+  same-tick acquirers cannot both be admitted; the teardown gap is charged to the
+  admitted waiter, whose gap timer is `ref`'d so it cannot drain the event loop.
 - One holder at a time; waiters queue FIFO. `withBrowserOwner` waits up to `waitMs`
   (default: unbounded for imports, see §3; runner steps use `tryWithBrowserOwner`).
 - `maxHoldMs` timer: on expiry the owner's `signal` aborts, then **every page of the

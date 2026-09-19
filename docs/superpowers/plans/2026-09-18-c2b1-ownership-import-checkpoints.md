@@ -505,6 +505,10 @@ test("O7 acquire/release handle: release after the teardown gap admits the next 
 
 - [ ] **Step 3: Implement `lib/linkedin/ownership.ts`**
 
+> **SUPERSEDED by 02568cb / a142d1d** — the reference code below claims the slot after an
+> `await` (two same-tick acquirers were both admitted) and unref's the gap timer (Node 22
+> drained the loop mid-await); see `lib/linkedin/ownership.ts` for the corrected implementation.
+
 ```ts
 import type { BrowserContext, Page } from "playwright";
 

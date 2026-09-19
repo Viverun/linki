@@ -99,6 +99,28 @@ driving one LinkedIn account, and duplicate outreach. Scaling the app — replic
 cluster mode, a second container on the same volume — without a cross-process lock
 is unsafe. See NF-7.
 
+### Runner lease now enforces this
+
+The runner lease (`app_settings.runner_lease`, TTL 600 s, renewed on every
+fenced track write and before each step) now **enforces** the single-process
+precondition above rather than merely assuming it. A second process that
+starts up loses the race for the lease and runs in standby: `/api/health`
+reports `runner.lease.mine=false` and `runner.phase="standby"` for that
+process, and it does not drive the runner loop.
+
+Browser ownership (`lib/linkedin/ownership.ts`) is a second, complementary
+guard: it serialises every page open per LinkedIn account, so an import scrape
+and a runner step cannot open competing pages against the same account even
+within the one enforced process.
+
+To clear a stuck lease after a confirmed-dead owner:
+
+```sql
+DELETE FROM app_settings WHERE key='runner_lease';
+```
+
+The next loop iteration re-acquires the lease within 30 s.
+
 ## When something goes wrong, who finds out
 
 Before P2-2 the answer was *nobody*. A tick that threw on every iteration
