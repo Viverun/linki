@@ -50,12 +50,13 @@ Four things. Each has caused, or would cause, real damage.
 Pause the run first, edit, then resume. The system now refuses the edit outright,
 so this is mostly enforced — but do not go looking for a way around it.
 
-**2. Do not add an account in a timezone other than UTC.**
-This is a known, **unfixed** defect. The daily sending limit is counted against
-UTC days while the account's working hours are counted in its own timezone. For a
-non-UTC account the day boundaries do not line up and the account can send up to
-**double** its configured daily limit, silently. There is no warning. Until this
-is fixed, every account must be UTC.
+**2. Do not leave an account's timezone wrong (or unset when it is not UTC).**
+Daily limits and the working-hours window are both measured in the account's own
+timezone, so they roll over at the same local midnight. Set the timezone to where
+the account actually operates: a wrong value does not raise the limit, but it
+moves when the day starts and when the account is allowed to send. (Until this
+release the two were measured in different timezones, so a non-UTC account could
+silently send up to double its daily limit. That is fixed.)
 
 **3. Do not let a second person sign up.**
 Registration closes after the first account. If someone needs access, they use the
@@ -130,8 +131,12 @@ account.
 container against the same data would drive one LinkedIn account from two
 browsers and send duplicates. Do not scale it up.
 
-**One known defect is unfixed and listed above:** the non-UTC timezone limit
-doubling. It is not dangerous if you keep every account on UTC.
+**The non-UTC timezone limit doubling is fixed.** Daily sending limits and the
+working-hours window are now both counted on the account's local calendar day
+(including 23- and 25-hour DST days), so an account outside UTC no longer gets two
+overlapping partial days. The handover sections that said "keep every account on
+UTC" describe older releases; setting the timezone correctly is still required, as
+in section 3.
 
 ## 7. If Linki runs on a machine that sleeps
 

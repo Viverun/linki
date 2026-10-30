@@ -21,6 +21,7 @@ import { enrichProfile } from "@/lib/linkedin/enrich";
 import { matchPerson } from "@/lib/apollo";
 import { premium } from "@/lib/premium";
 import { decryptSecret } from "@/lib/crypto";
+import { localDayKey, localDayWindow, safeTimeZone, zonedDateTimeToUtc } from "@/lib/local-day";
 
 // Minimum gap between Sales Nav profile enrichment calls per account (ms)
 const SALES_NAV_ENRICH_MIN_GAP_MS = 5 * 60 * 1000;
@@ -30,12 +31,12 @@ const lastSalesNavEnrichAt: Record<string, number> = {};
 // Accounts that reported "No InMail credits left" today (Jul 2026 incident — LinkedIn's
 // own credit balance, distinct from daily_inmail_limit; without this, a depleted account
 // re-attempted InMail on every queued lead, each burning a ~30-50s Sales Nav page load for
-// nothing). Keyed by accountId -> the date (YYYY-MM-DD, local) it was detected exhausted.
+// nothing). Keyed by accountId -> the account-LOCAL date (YYYY-MM-DD) it was detected
+// exhausted, so a Berlin account gets a fresh attempt at Berlin midnight, not UTC midnight.
 // In-memory only — worst case after a restart is one wasted attempt before re-detecting.
 const inmailCreditsExhaustedOn: Record<string, string> = {};
-function todayLocalDate(): string { return new Date().toISOString().slice(0, 10); }
-function inmailCreditsExhaustedToday(accountId: string): boolean {
-  return inmailCreditsExhaustedOn[accountId] === todayLocalDate();
+function inmailCreditsExhaustedToday(accountId: string, timezone: string | null | undefined, now = new Date()): boolean {
+  return inmailCreditsExhaustedOn[accountId] === localDayKey(timezone, now);
 }
 
 // Initial wait before first acceptance check (6h)
@@ -79,10 +80,69 @@ function effectiveEmailLimit(account: EmailAccountLimits): number {
   return Math.min(account.daily_email_limit, ramped);
 }
 
+type RunnerDb = ReturnType<typeof getDb>;
+
+export interface LinkedInActionsSentToday {
+  connects: number;
+  messages: number;
+  inmails: number;
+}
+
+/**
+ * Count the LinkedIn actions this account has already performed on its own local
+ * calendar day.
+ *
+ * The day is the account's, not UTC's: quota and working hours must roll over at
+ * the same midnight, or a non-UTC account effectively gets two partial days and
+ * can send up to double its configured limit. `created_at` is stored as UTC, so
+ * the local day is converted to a UTC range and compared as a half-open interval.
+ */
+export function countLinkedInActionsSentToday(
+  db: RunnerDb,
+  accountId: string,
+  timezone: string | null | undefined,
+  now: Date = new Date()
+): LinkedInActionsSentToday {
+  const { start, end } = localDayWindow(timezone, now);
+  return db.prepare(
+    `SELECT
+       COALESCE(SUM(message LIKE 'Connection request sent%'), 0) AS connects,
+       COALESCE(SUM(message LIKE 'Message sent%'), 0) AS messages,
+       COALESCE(SUM(message LIKE 'InMail sent%'), 0) AS inmails
+     FROM logs
+     WHERE run_id IN (SELECT id FROM runs WHERE account_id = ?)
+       AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)`
+  ).get(accountId, start.toISOString(), end.toISOString()) as LinkedInActionsSentToday;
+}
+
+/**
+ * Count emails sent on the email account's local calendar day.
+ *
+ * Matched by `run_profiles.email_account_id` (the actual sender), not
+ * `runs.email_account_id`, which differs when accounts rotate within a run.
+ */
+export function countEmailsSentToday(
+  db: RunnerDb,
+  emailAccountId: string,
+  timezone: string | null | undefined,
+  now: Date = new Date()
+): number {
+  const { start, end } = localDayWindow(timezone, now);
+  return (db.prepare(
+    `SELECT COUNT(*) as c FROM logs l
+     WHERE l.message LIKE 'Email sent%'
+       AND datetime(l.created_at) >= datetime(?) AND datetime(l.created_at) < datetime(?)
+       AND EXISTS (
+         SELECT 1 FROM run_profiles rp
+         WHERE rp.run_id = l.run_id AND rp.target_id = l.target_id
+         AND rp.email_account_id = ?
+       )`
+  ).get(start.toISOString(), end.toISOString(), emailAccountId) as { c: number }).c;
+}
+
 function getLocalParts(tz: string, date = new Date()): { hour: number; minute: number; isoWeekday: number } {
-  const safeZone = (() => { try { Intl.DateTimeFormat(undefined, { timeZone: tz }); return tz; } catch { return "UTC"; } })();
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: safeZone,
+    timeZone: safeTimeZone(tz),
     hour: "numeric", minute: "numeric", weekday: "short", hour12: false,
   }).formatToParts(date);
   const get = (t: string) => parts.find(p => p.type === t)?.value ?? "";
@@ -98,49 +158,6 @@ function isWithinSchedule(account: ScheduleConfig): boolean {
   if (!allowedDays.includes(isoWeekday)) return false;
   const frac = hour + minute / 60;
   return frac >= (account.active_hours_start ?? 9) && frac < (account.active_hours_end ?? 18);
-}
-
-function zonedDateTimeToUtc(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-  timezone: string,
-): Date {
-  let guess = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
-
-  for (let i = 0; i < 3; i++) {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }).formatToParts(guess);
-
-    const get = (type: string) =>
-      parts.find(p => p.type === type)?.value ?? "0";
-
-    const localAsUtc = Date.UTC(
-      parseInt(get("year"), 10),
-      parseInt(get("month"), 10) - 1,
-      parseInt(get("day"), 10),
-      parseInt(get("hour"), 10) % 24,
-      parseInt(get("minute"), 10),
-      parseInt(get("second"), 10),
-    );
-
-    const offset = localAsUtc - guess.getTime();
-    guess = new Date(
-      Date.UTC(year, month - 1, day, hour, minute, 0) - offset
-    );
-  }
-
-  return guess;
 }
 
 function randomSlotInActiveWindow(account: ScheduleConfig, targetDate?: Date): string {
@@ -173,10 +190,13 @@ function randomSlotInActiveWindow(account: ScheduleConfig, targetDate?: Date): s
   return new Date(slot).toISOString();
 }
 
-function rescheduleToTomorrow(account: ScheduleConfig): string {
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  return randomSlotInActiveWindow(account, tomorrow);
+function rescheduleToTomorrow(account: ScheduleConfig, now = new Date()): string {
+  // "Tomorrow" must mean the ACCOUNT's next local day. Adding a day to the server
+  // clock lands on the wrong local date whenever the offsets differ: for a New
+  // York account at 22:00 local, server-tomorrow is still today locally, so the
+  // retry was scheduled into an already-past slot and fired immediately.
+  const nextDayNoon = new Date(localDayWindow(account.timezone, now).end.getTime() + 12 * 3_600_000);
+  return randomSlotInActiveWindow(account, nextDayNoon);
 }
 
 function nextScheduledSlot(account: ScheduleConfig): string {
@@ -1611,17 +1631,9 @@ export async function executeStep(
 
       // Last-line-of-defense: re-check the daily limit for this email account against ground-truth
       // (matched by run_profiles.email_account_id, the actual sender). If any prior gate is buggy,
-      // this catches the overshoot and reschedules instead of sending.
-      const sentTodayActual = (db.prepare(
-        `SELECT COUNT(*) as c FROM logs l
-         WHERE l.message LIKE 'Email sent%'
-         AND date(l.created_at) = date('now')
-         AND EXISTS (
-           SELECT 1 FROM run_profiles rp
-           WHERE rp.run_id = l.run_id AND rp.target_id = l.target_id
-           AND rp.email_account_id = ?
-         )`
-      ).get(emailAccountId) as { c: number }).c;
+      // this catches the overshoot and reschedules instead of sending. Counted on the account's
+      // local day, the same window enrollment uses.
+      const sentTodayActual = countEmailsSentToday(db, emailAccountId, emailAccountLimits.timezone);
       const hardLimit = effectiveEmailLimit(emailAccountLimits);
       if (sentTodayActual >= hardLimit) {
         log(db, runId, target.id, "warn", `Daily limit guard tripped for ${emailAccountId} (${sentTodayActual}/${hardLimit}) — rescheduling ${name} to tomorrow`);
@@ -1758,7 +1770,7 @@ export async function executeStep(
       return;
     }
     if (msg.includes("No InMail credits left")) {
-      inmailCreditsExhaustedOn[accountId] = todayLocalDate();
+      inmailCreditsExhaustedOn[accountId] = localDayKey(accountLimits.timezone);
       const slot = rescheduleToTomorrow(accountLimits);
       log(db, runId, target.id, "warn", `No InMail credits left on this account — pausing InMail sends until tomorrow, rescheduled ${name} to ${slot}`);
       trReschedule(db, tr, slot);
@@ -2129,42 +2141,23 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
 
   // Count actions already done today per LinkedIn account — messages and InMail are
   // counted separately so a busy message quota never starves InMail sends (and vice versa).
+  // "Today" is the account's own calendar day (see lib/local-day.ts), not UTC.
   const connectsSentToday = new Map<string, number>();
   const messagesSentToday = new Map<string, number>();
   const inmailsSentToday = new Map<string, number>();
-  for (const [accountId] of accountLimitsMap) {
-    const c = (db.prepare(
-      `SELECT COUNT(*) as c FROM logs WHERE run_id IN (SELECT id FROM runs WHERE account_id = ?)
-       AND message LIKE 'Connection request sent%' AND date(created_at) = date('now')`
-    ).get(accountId) as { c: number }).c;
-    const m = (db.prepare(
-      `SELECT COUNT(*) as c FROM logs WHERE run_id IN (SELECT id FROM runs WHERE account_id = ?)
-       AND message LIKE 'Message sent%' AND date(created_at) = date('now')`
-    ).get(accountId) as { c: number }).c;
-    const im = (db.prepare(
-      `SELECT COUNT(*) as c FROM logs WHERE run_id IN (SELECT id FROM runs WHERE account_id = ?)
-       AND message LIKE 'InMail sent%' AND date(created_at) = date('now')`
-    ).get(accountId) as { c: number }).c;
-    connectsSentToday.set(accountId, c);
-    messagesSentToday.set(accountId, m);
-    inmailsSentToday.set(accountId, im);
+  for (const [accountId, account] of accountLimitsMap) {
+    const done = countLinkedInActionsSentToday(db, accountId, account.timezone);
+    connectsSentToday.set(accountId, done.connects);
+    messagesSentToday.set(accountId, done.messages);
+    inmailsSentToday.set(accountId, done.inmails);
   }
 
   // Count emails sent today per email account — match by run_profiles.email_account_id
   // (the actual sending account), not runs.email_account_id (which may differ when accounts rotate)
   const emailsSentToday = new Map<string, number>();
   for (const emailAccountId of emailAccountIds) {
-    const e = (db.prepare(
-      `SELECT COUNT(*) as c FROM logs l
-       WHERE l.message LIKE 'Email sent%'
-       AND date(l.created_at) = date('now')
-       AND EXISTS (
-         SELECT 1 FROM run_profiles rp
-         WHERE rp.run_id = l.run_id AND rp.target_id = l.target_id
-         AND rp.email_account_id = ?
-       )`
-    ).get(emailAccountId) as { c: number }).c;
-    emailsSentToday.set(emailAccountId, e);
+    const limits = emailAccountLimitsMap.get(emailAccountId);
+    emailsSentToday.set(emailAccountId, countEmailsSentToday(db, emailAccountId, limits?.timezone));
   }
 
   // Steps cache: (workflow_id, track) → steps filtered by that track
@@ -2242,6 +2235,7 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
         : (connectsSentToday.get(run.account_id) ?? 0);
       const actionsLeft = Math.max(0, dailyLimit - sentToday);
       const firstStepTypeSql = isInmailFirst ? "'sales_inmail'" : "'connect'";
+      const linkedinDay = localDayWindow(limits.timezone);
       const scheduledToday = (db.prepare(
         `SELECT COUNT(*) as c FROM run_profile_tracks rt
          JOIN run_profiles rp ON rp.id = rt.run_profile_id
@@ -2249,8 +2243,8 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
          JOIN workflow_steps ws ON ws.workflow_id = r.workflow_id AND ws.track = 'linkedin' AND ws.step_order = 1
          WHERE r.account_id = ? AND rt.track = 'linkedin' AND rt.state = 'in_progress'
          AND ws.step_type = ${firstStepTypeSql}
-         AND date(datetime(rt.next_step_at)) = date('now')`
-      ).get(run.account_id) as { c: number }).c;
+         AND datetime(rt.next_step_at) >= datetime(?) AND datetime(rt.next_step_at) < datetime(?)`
+      ).get(run.account_id, linkedinDay.start.toISOString(), linkedinDay.end.toISOString()) as { c: number }).c;
       slotsRemaining.set(run.account_id, Math.max(0, actionsLeft - scheduledToday));
     }
     const slotsLeft = slotsRemaining.get(run.account_id)!;
@@ -2281,12 +2275,13 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
         if (emailLimits) {
           const effectiveLimit = effectiveEmailLimit(emailLimits);
           const emailsLeft = Math.max(0, effectiveLimit - (emailsSentToday.get(emailAccId) ?? 0));
+          const emailDay = localDayWindow(emailLimits.timezone);
           const emailScheduledToday = (db.prepare(
             `SELECT COUNT(*) as c FROM run_profile_tracks rt
              JOIN run_profiles rp ON rp.id = rt.run_profile_id
              WHERE rp.email_account_id = ? AND rt.track = 'email' AND rt.state = 'in_progress'
-             AND date(datetime(rt.next_step_at)) = date('now')`
-          ).get(emailAccId) as { c: number }).c;
+             AND datetime(rt.next_step_at) >= datetime(?) AND datetime(rt.next_step_at) < datetime(?)`
+          ).get(emailAccId, emailDay.start.toISOString(), emailDay.end.toISOString()) as { c: number }).c;
           const emailSlotsLeft = Math.max(0, emailsLeft - emailScheduledToday);
           if (emailSlotsLeft > 0) {
             const pendingEmail = db.prepare(
@@ -2353,7 +2348,7 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
     } else if (step.step_type === "sales_inmail") {
       const sentToday = inmailsSentToday.get(tr.account_id) ?? 0;
       const planned = inmailsPlanned.get(tr.account_id) ?? 0;
-      if (inmailCreditsExhaustedToday(tr.account_id) || sentToday + planned >= (limits.daily_inmail_limit ?? 15)) {
+      if (inmailCreditsExhaustedToday(tr.account_id, limits.timezone) || sentToday + planned >= (limits.daily_inmail_limit ?? 15)) {
         toReschedule.push(tr);
       } else {
         inmailsPlanned.set(tr.account_id, planned + 1);
