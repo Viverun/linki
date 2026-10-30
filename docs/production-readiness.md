@@ -582,3 +582,22 @@ Applied on branch `c2b1-ownership` after the record above, in one commit `6966ec
 | Revisions | Branch `c2b1-ownership` (14 commits over `c545ccc`, head `3b5f10e`) fast-forwarded to `main` 2026-09-19 and pushed to `origin` (`Viverun/linki`); `upstream` not pushed; branch deleted. |
 | Carried-forward limitations (not waived) | Cross-process contention verified with fake browser objects in one process — two real Chromium stacks **Unverified**; imports verified against synthetic fixtures — live Sales Navigator **Unverified**; `last_step_at`/`pending_reply_context` touches unfenced; import max hold 3 h against a worst-case ~3.5 h window (abort → error branch, recovered from page+1 by the next holder); `authenticateAccount` and headless login open a browser outside the ownership guard (pre-existing); concurrent SIGTERM+SIGINT run two idempotent best-effort shutdown sequences. Plus the C2-A/C2-B2 limitations carried above. No production rollout is approved by this sign-off. |
 | Authorization granted | None beyond this record. **C3 and C4 remain unauthorized**; a separate maintainer instruction is required to begin C3. |
+
+## Post-register addendum (2026-10-30) — dependency refresh and N6 timezone fix
+
+This addendum records work done after the C2-B1 sign-off. It does **not** rerun
+the isolated Node 22 gate, does not amend any measurement recorded above, and is
+**not** a deployment approval or a C3 authorization. Every earlier figure (432,
+490, 536, 563, 618, 644 tests; "0 advisories") remains the measurement for the
+revision it names.
+
+| Field | Value |
+| --- | --- |
+| Revisions | `5e6baff` reply-policy decision clock; `69198b0` dependency refresh + Dependabot; `827a8ce` local-day daily limits (N6). Local `main` commits, not pushed at the time of writing. |
+| Test reliability | `5e6baff` adds an injectable `now` to `decideReplyOpenCore` so the reply-policy date fixtures no longer expire with the calendar. P1 had begun failing on its own on 2026-10-30 with no code change (643/644). A new P13 pins the past-return-date behaviour. |
+| N6 (timezone daily-limit doubling) | **Closed.** Daily quotas now use the account's local calendar day via `lib/local-day.ts`; DST days are 23/25 h; `rescheduleToTomorrow` targets the account's next local date instead of the server's. See the N6 resolution note in `docs/audit-corrections.md`. |
+| Dependency changes | `next` / `eslint-config-next` 16.3.5 → 16.4.3 (pulls `sharp` 0.35.5); `zod` 4.4.3 → 4.6.7; `nodemailer` 10.0.10 → 10.3.1; `mailparser` 3.9.28 → 3.14.1; `@modelcontextprotocol/sdk` 1.29.0 → 1.32.2. The eslint bump activated `react-hooks/set-state-in-effect` in `pages/inbox.tsx`; fixed by deriving thread loading from `(reply.id, email account)` rather than disabling the rule. |
+| Advisory count (host, 2026-10-30) | Full and `--omit=dev`: **3 low**, all one `deepmerge` conclusion under `puppeteer-extra-plugin-stealth`. The only offered fix is a breaking downgrade to stealth 2.7.0, which is worse than the risk; accepted and left open. Was 18 entries before this refresh. |
+| npm audit scope | npm graph only. Debian/Chromium/deployed-image assessment remains **Unverified**, as recorded above. Docker Dependabot is deliberately disabled: the base digest and Chromium version are pinned to keep the LinkedIn browser fingerprint stable. |
+| Gate (host) | Node 24.19.0, 2026-10-30: `tsc --noEmit` pass, `eslint` 0/0, **657/657 tests**, `next build` pass, `npm ci --dry-run` consistent, pre-commit `scripts/preflight.sh` PASS on each commit. |
+| Isolated gate | **Not rerun.** The pinned Node 22.23.0 digest-image gate above remains the last isolated measurement; a fresh `verify:c0` is required before any deployment claim. |

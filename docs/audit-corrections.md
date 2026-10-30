@@ -222,6 +222,24 @@ separate, larger problem that the cap window is UTC while the schedule window is
 timezone-aware, so a non-UTC account whose working hours cross UTC midnight gets
 two full allocations in one local working day.
 
+**N6 resolution (2026-10-30, `827a8ce`) — closed.** The cap window is now the
+account's own local calendar day, the same window the schedule uses. The new
+`lib/local-day.ts` converts a local date into a half-open UTC interval
+(`>= start AND < end`, with `end` taken from the next local date so DST days are
+honestly 23 or 25 hours), and every daily gate reads that interval: the
+connect/message/InMail counters, email counts at enrollment and in the
+execute-time hard-limit guard, the already-scheduled-today counts, and the
+in-memory InMail-credit memo. `rescheduleToTomorrow` had the same class of bug
+from the other direction — it added a day to the *server* clock, so a New York
+account at 22:00 local was rescheduled into a local slot already in the past and
+retried immediately; it now targets the account's next local date. Covered by
+`tests/local-day.test.ts` (12 tests: offsets, both 2026 Berlin DST transitions,
+month/year rollover, invalid-zone fallback, and behavioural comparisons showing
+the same rows counting differently under a UTC window). The bounded
+midnight-straddle behaviour described in the paragraph above still applies to a
+tick that itself crosses midnight — capped at the slots it had already allocated —
+and is not removed by this fix.
+
 F7's severity is unchanged: caps remain bypassable only by calling `executeStep`
 directly, never by ordinary operation under load.
 
@@ -609,8 +627,9 @@ Consolidation is Phase 3.
 
 Two of the audit's findings fell to measurement. Ratings derived from reading
 code without executing it should be treated as hypotheses until a failing
-reproduction exists. That applies to the findings still open (F4–F7, N3, N6, N7,
-N8) as much as it did to F3.
+reproduction exists. That applies to the findings still open (F4–F7, N3, N7,
+N8; N6 was closed on 2026-10-30 — see the N6 resolution note above) as much as it
+did to F3.
 
 ---
 

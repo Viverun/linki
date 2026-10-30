@@ -249,4 +249,6 @@ audit never saw.
 4. `/data` backup/restore — the only irrecoverable failure in the system.
 5. F4 signup disable — five lines against the P0-on-exposure.
 6. N6 — must land *before* any non-UTC account is added, not after.
+   **Landed 2026-10-30 (`827a8ce`)**, so this prerequisite no longer blocks adding
+   an account outside UTC (see the N6 resolution in `docs/audit-corrections.md`).
 7. Then F7, F5, F6, N7, N8's remaining sites, and the lint sweep.
