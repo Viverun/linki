@@ -585,19 +585,20 @@ Applied on branch `c2b1-ownership` after the record above, in one commit `6966ec
 
 ## Post-register addendum (2026-10-30) — dependency refresh and N6 timezone fix
 
-This addendum records work done after the C2-B1 sign-off. It does **not** rerun
-the isolated Node 22 gate, does not amend any measurement recorded above, and is
-**not** a deployment approval or a C3 authorization. Every earlier figure (432,
-490, 536, 563, 618, 644 tests; "0 advisories") remains the measurement for the
-revision it names.
+This addendum records work done after the C2-B1 sign-off. It adds a fresh
+isolated Node 22 gate for these revisions but does not amend any measurement
+recorded above, and is **not** a deployment approval or a C3 authorization.
+Every earlier figure (432, 490, 536, 563, 618, 644 tests; "0 advisories") remains
+the measurement for the revision it names.
 
 | Field | Value |
 | --- | --- |
-| Revisions | `5e6baff` reply-policy decision clock; `69198b0` dependency refresh + Dependabot; `827a8ce` local-day daily limits (N6); `8bd5c11` register addendum. Pushed to `origin/main` (`Viverun/linki`) on 2026-10-30; `upstream` not pushed. |
+| Revisions | `5e6baff` reply-policy decision clock; `69198b0` dependency refresh + Dependabot; `827a8ce` local-day daily limits (N6); `8bd5c11` register addendum; `0d444ba` per-tick track cap (NF-5). Pushed to `origin/main` (`Viverun/linki`) on 2026-10-30; `upstream` not pushed. |
+| NF-5 (unbounded tick) | **Closed.** `tick()` executes at most `MAX_TRACKS_PER_TICK` (5) due tracks per pass via `tracksForTick()`, oldest-due first; the rest stay due for the next tick, and claim leases move executed tracks forward so no account starves another. Bounds the audited ~61-minute ten-track pass to roughly half an hour. `tests/tick-cap.test.ts`. See `docs/audit-corrections.md`. |
 | Test reliability | `5e6baff` adds an injectable `now` to `decideReplyOpenCore` so the reply-policy date fixtures no longer expire with the calendar. P1 had begun failing on its own on 2026-10-30 with no code change (643/644). A new P13 pins the past-return-date behaviour. |
 | N6 (timezone daily-limit doubling) | **Closed.** Daily quotas now use the account's local calendar day via `lib/local-day.ts`; DST days are 23/25 h; `rescheduleToTomorrow` targets the account's next local date instead of the server's. See the N6 resolution note in `docs/audit-corrections.md`. |
 | Dependency changes | `next` / `eslint-config-next` 16.3.5 → 16.4.3 (pulls `sharp` 0.35.5); `zod` 4.4.3 → 4.6.7; `nodemailer` 10.0.10 → 10.3.1; `mailparser` 3.9.28 → 3.14.1; `@modelcontextprotocol/sdk` 1.29.0 → 1.32.2. The eslint bump activated `react-hooks/set-state-in-effect` in `pages/inbox.tsx`; fixed by deriving thread loading from `(reply.id, email account)` rather than disabling the rule. |
 | Advisory count (host, 2026-10-30) | Full and `--omit=dev`: **3 low**, all one `deepmerge` conclusion under `puppeteer-extra-plugin-stealth`. The only offered fix is a breaking downgrade to stealth 2.7.0, which is worse than the risk; accepted and left open. Was 18 entries before this refresh. |
 | npm audit scope | npm graph only. Debian/Chromium/deployed-image assessment remains **Unverified**, as recorded above. Docker Dependabot is deliberately disabled: the base digest and Chromium version are pinned to keep the LinkedIn browser fingerprint stable. |
-| Gate (host) | Node 24.19.0, 2026-10-30: `tsc --noEmit` pass, `eslint` 0/0, **657/657 tests**, `next build` pass, `npm ci --dry-run` consistent, pre-commit `scripts/preflight.sh` PASS on each commit. |
-| Isolated gate | **Passed on `8bd5c11`** — GitHub Actions run `41077175790`, 2026-10-30, 4m05s: Node **v22.23.0** x64, `gate: true`, all eight checks exit 0 (typecheck, tests, lint with `--max-warnings=0`, prebuild, build, typegen, native-sqlite, npm-version), **631 pass / 0 fail / 0 skipped**, snapshot `7ac0fdf4…` (263 files). Reconciles exactly as 657 host − 26 local-only `tests/demo-harness.test.ts`, the by-design gap recorded in `docs/phase1-baseline.md:20` and excluded from the snapshot by `.git/info/exclude`. Same 26-test host/container gap as C2-B1 (644 vs 618), so this refresh introduced none of it. |
+| Gate (host) | Node 24.19.0, 2026-10-30: `tsc --noEmit` pass, `eslint` 0/0, **662/662 tests**, `next build` pass, `npm ci --dry-run` consistent, pre-commit `scripts/preflight.sh` PASS on each commit. |
+| Isolated gate | **Passed on `0d444ba`** — GitHub Actions run `41078613779`, 2026-10-30: Node **v22.23.0** x64, `gate: true`, all eight checks exit 0 (typecheck, tests, lint with `--max-warnings=0`, prebuild, build, typegen, native-sqlite, npm-version), **636 pass / 0 fail / 0 skipped**, snapshot `1ed3334b…` (264 files). Reconciles exactly as 662 host − 26 local-only `tests/demo-harness.test.ts`, the by-design gap recorded in `docs/phase1-baseline.md:20` and excluded from the snapshot by `.git/info/exclude`. The preceding run `41077175790` passed 631/631 on `8bd5c11` under the same reconciliation; same 26-test gap as C2-B1 (644 vs 618). |

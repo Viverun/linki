@@ -130,6 +130,11 @@ above an unbounded quantity is not slow detection, it is no detection: it cannot
 distinguish a busy runner from a dead one. Per-step markers make staleness
 independent of tick length.
 
+**Update (2026-10-30):** NF-5 is closed. `tick()` now executes at most five due
+tracks per pass, so the sequential portion is bounded. Per-step markers are kept:
+a single step is still the longest unit, and the threshold no longer rests on any
+assumption about tick length.
+
 ## Standing test rule — multi-site coverage
 
 Derived from two surviving mutants in Task 1 (M8, M16), both the same error: a
