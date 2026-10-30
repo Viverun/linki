@@ -19,6 +19,16 @@ type Judgment = { pOoo: number; model: string; returnDate: { chosen: string | nu
 const judgeReturning = (j: Judgment) => async () => j;
 const judgeThrowing = () => async () => { throw new Error("synthetic judge failure"); };
 
+/**
+ * Fixed decision clock for every test that reads or writes a return date.
+ *
+ * The P-series fixtures spell dates out ("2 October 2026"), and a real clock made
+ * them correct only until those dates passed: P1 asserted a future return date and
+ * started failing on its own on 3 October 2026, with no code change. Passing the
+ * clock explicitly makes the suite depend on the fixture, not on today.
+ */
+const TODAY = new Date("2026-09-18T00:00:00Z");
+
 let seq = 0;
 function scenario(opts: { body?: string; nextStepAt?: string | null } = {}) {
   const n = ++seq; const db = getDb();
@@ -40,7 +50,7 @@ const withKey = () => getDb().prepare("INSERT INTO integrations (key, api_key) V
 
 test("P1 high-probability OOO continues: decision recorded, no stamp, track rescheduled after the return date", async () => {
   withKey(); const s = scenario({ nextStepAt: null });
-  const d = await decideReplyOpenCore(getDb(), s.reply, judgeReturning({ pOoo: 0.97, model: "jev-test", returnDate: { chosen: "2 October 2026", confidence: 0.9 } }));
+  const d = await decideReplyOpenCore(getDb(), s.reply, judgeReturning({ pOoo: 0.97, model: "jev-test", returnDate: { chosen: "2 October 2026", confidence: 0.9 } }), TODAY);
   assert.equal(d, "ooo_continue");
   const r = reply(s.reply);
   assert.ok(r.dispatched_at);
@@ -54,7 +64,7 @@ test("P1 high-probability OOO continues: decision recorded, no stamp, track resc
 
 test("P2 return date never moves next_step_at earlier", async () => {
   withKey(); const s = scenario({ nextStepAt: "2026-12-01T00:00:00.000Z" });
-  await decideReplyOpenCore(getDb(), s.reply, judgeReturning({ pOoo: 0.97, model: "jev-test", returnDate: { chosen: "2 October 2026", confidence: 0.9 } }));
+  await decideReplyOpenCore(getDb(), s.reply, judgeReturning({ pOoo: 0.97, model: "jev-test", returnDate: { chosen: "2 October 2026", confidence: 0.9 } }), TODAY);
   assert.equal(track(s.track).next_step_at, "2026-12-01T00:00:00.000Z");
 });
 
@@ -147,7 +157,19 @@ test("P11 an operator decision made while judgment is in flight is not negated b
 
 test("P12 a return date beyond the 180-day horizon is treated as none", async () => {
   withKey(); const s = scenario({ nextStepAt: null });
-  const d = await decideReplyOpenCore(getDb(), s.reply, judgeReturning({ pOoo: 0.97, model: "jev-test", returnDate: { chosen: "2 October 2027", confidence: 0.9 } }));
+  const d = await decideReplyOpenCore(getDb(), s.reply, judgeReturning({ pOoo: 0.97, model: "jev-test", returnDate: { chosen: "2 October 2027", confidence: 0.9 } }), TODAY);
+  assert.equal(d, "ooo_continue");
+  assert.equal(JSON.parse(reply(s.reply).dispatch_result_json!).return_date, null);
+  assert.equal(track(s.track).next_step_at, null);
+});
+
+test("P13 a return date already in the past is treated as none (it must not move the schedule)", async () => {
+  // Regression for the fixture that made P1 time-dependent: on 2026-10-30 the date
+  // "2 October 2026" is in the past, and an explicit past date must never be read as
+  // "next year" or used to resume a follow-up. The judgement is still a valid OOO
+  // decision; only the return date is discarded.
+  withKey(); const s = scenario({ nextStepAt: null });
+  const d = await decideReplyOpenCore(getDb(), s.reply, judgeReturning({ pOoo: 0.97, model: "jev-test", returnDate: { chosen: "2 October 2026", confidence: 0.9 } }), new Date("2026-10-30T00:00:00Z"));
   assert.equal(d, "ooo_continue");
   assert.equal(JSON.parse(reply(s.reply).dispatch_result_json!).return_date, null);
   assert.equal(track(s.track).next_step_at, null);

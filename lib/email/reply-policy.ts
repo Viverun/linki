@@ -172,8 +172,20 @@ function bumpAttempts(db: Database.Database, replyId: string): number | null {
  * and attempts remain. Safe to call again: an already-decided row is a no-op. Safe to
  * race against an operator decision: whichever writer's guarded UPDATE lands first wins,
  * and the loser reports that decision back instead of overwriting it.
+ *
+ * `now` is the decision clock: every date comparison (year-less date resolution, the
+ * "is this return date still ahead?" test, the 180-day horizon) reads it. It defaults
+ * to the real clock, so production behaviour is unchanged; tests pass a fixed date
+ * instead of depending on the calendar. Without this seam a fixture like
+ * "back 2 October 2026" was correct only until that date passed, and then failed —
+ * the suite went red with the passage of time rather than with a code change.
  */
-export async function decideReplyOpenCore(db: Database.Database, replyId: string, judge: Judge = defaultJudge(db)): Promise<ReplyDecision | "undecided"> {
+export async function decideReplyOpenCore(
+  db: Database.Database,
+  replyId: string,
+  judge: Judge = defaultJudge(db),
+  now: Date = new Date()
+): Promise<ReplyDecision | "undecided"> {
   const row = db.prepare("SELECT id, target_id, run_id, from_email, subject, body_text, received_at, dispatched_at, dispatch_result_json, open_core_attempts FROM email_replies WHERE id = ?").get(replyId) as ReplyRow | undefined;
   if (!row) throw new Error(`reply ${replyId} not found`);
   if (row.dispatched_at) {
@@ -185,7 +197,7 @@ export async function decideReplyOpenCore(db: Database.Database, replyId: string
     ? db.prepare(`SELECT rt.last_email_subject, rt.last_email_body FROM run_profile_tracks rt JOIN run_profiles rp ON rp.id = rt.run_profile_id
                   WHERE rp.run_id = ? AND rp.target_id = ? AND rt.track = 'email'`).get(row.run_id, row.target_id) as { last_email_subject: string | null; last_email_body: string | null } | undefined
     : undefined;
-  const today = new Date();
+  const today = now;
   const state: ReplyState = {
     reply: { from: row.from_email, subject: row.subject ?? "", body: row.body_text.slice(0, BODY_LIMIT), received_at: row.received_at },
     our_last_email: track?.last_email_subject || track?.last_email_body
