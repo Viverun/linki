@@ -46,6 +46,19 @@ const CONNECTION_MAX_WAIT_DAYS = 7;
 // Delay between profiles (seconds)
 const PROFILE_DELAY_MIN = 8;
 const PROFILE_DELAY_MAX = 20;
+// A tick used to execute every due track in one sequential pass, so its duration
+// scaled with workload — audited at ~61 minutes for ten tracks and unbounded in
+// principle (NF-5) — and all other tick-level work queued behind it. The slowest
+// real step is ~345s plus a ≤20s delay, so five tracks bound a tick to roughly
+// half an hour. The remainder stays due and is picked up by the next tick in
+// oldest-due order, so the cap defers work without starving it.
+export const MAX_TRACKS_PER_TICK = 5;
+
+/** Due tracks arrive oldest-first (ORDER BY next_step_at), so take from the front. */
+export function tracksForTick<T>(due: readonly T[]): T[] {
+  return due.slice(0, MAX_TRACKS_PER_TICK);
+}
+
 // Poll interval (ms)
 const POLL_INTERVAL_MS = 30_000;
 // How far ahead a claimed track's next_step_at is pushed while it executes.
@@ -2384,8 +2397,9 @@ async function tick(db: ReturnType<typeof getDb>): Promise<void> {
     log(db, tr.run_id, tr.target_id, "info", `Daily limit reached — rescheduled to ${slot}`);
   }
 
-  // Execute what's left
-  for (const tr of toExecute) {
+  // Execute what's left, up to the per-tick cap (NF-5). Tracks beyond the cap
+  // keep their due state and run on the next tick, oldest-due first.
+  for (const tr of tracksForTick(toExecute)) {
     const steps = getSteps(tr.workflow_id, tr.track);
     const limits = accountLimitsMap.get(tr.account_id)!;
     const emailAccountId = tr.email_account_id ?? null;

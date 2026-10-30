@@ -266,6 +266,19 @@ a single tick the cap **is** correctly enforced despite the stale read.
 F7's severity is therefore **unchanged**: caps remain bypassable only by calling
 `executeStep` directly, not by ordinary operation under load.
 
+**NF-5 resolution (2026-10-30) — bounded.** `tick()` now executes at most
+`MAX_TRACKS_PER_TICK` (5) due tracks per pass via `tracksForTick()`; the rest keep
+their due state and are picked up by the next tick in oldest-due order. At the
+audited ~61 minutes for ten tracks, that bounds the sequential portion to roughly
+half an hour. Fairness does not depend on luck: a claimed track's `next_step_at`
+moves forward by the claim lease, so each pass removes its five from the head of
+the queue and a busy account cannot starve a later one. `tests/tick-cap.test.ts`
+pins the cap, the order-preserving slice, and that `tick()` iterates the capped
+list rather than the raw one (the old form is asserted absent). `tick()` still
+performs its non-track work (enrollment, sync, overflow rescheduling) before the
+capped loop; what is bounded here is the unbounded sequential step execution NF-5
+measured.
+
 ---
 
 ## F2 — rating rests on a recovery route that Task 3 removes
