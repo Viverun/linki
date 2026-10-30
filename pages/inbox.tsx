@@ -95,7 +95,11 @@ interface ReplyModalProps {
 
 function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProps) {
   const [messages, setMessages] = useState<EmailMessage[]>([]);
-  const [loadingThread, setLoadingThread] = useState(true);
+  // Thread loading is derived from which reply's thread has been fetched, not stored:
+  // setting "loading" synchronously inside the effect causes cascading renders
+  // (react-hooks/set-state-in-effect), and a per-reply key also prevents a slow
+  // response for reply A from landing on reply B.
+  const [loadedThreadKey, setLoadedThreadKey] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [replySubject, setReplySubject] = useState("");
   const [sending, setSending] = useState(false);
@@ -103,6 +107,10 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
   const threadEndRef = useRef<HTMLDivElement>(null);
 
   const verdict = verdictBadge(reply);
+  const canLoadThread = Boolean(reply.email_account_id && reply.email);
+  const threadKey = `${reply.id}:${reply.email_account_id ?? ""}`;
+  const loadingThread = canLoadThread && loadedThreadKey !== threadKey;
+  const shownMessages = canLoadThread ? messages : [];
   const dispatch = (() => {
     if (!reply.dispatch_result_json) return null;
     try { return JSON.parse(reply.dispatch_result_json) as Record<string, unknown>; } catch { return null; }
@@ -161,15 +169,13 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
   }
 
   useEffect(() => {
-    if (!reply.email_account_id || !reply.email) {
-      setLoadingThread(false);
-      return;
-    }
-    setLoadingThread(true);
-    const params = new URLSearchParams({ targetId: reply.id, emailAccountId: reply.email_account_id });
+    if (!canLoadThread) return;
+    let cancelled = false;
+    const params = new URLSearchParams({ targetId: reply.id, emailAccountId: reply.email_account_id! });
     fetch(`/api/inbox/thread?${params}`)
       .then((r) => r.json())
       .then((d) => {
+        if (cancelled) return;
         setMessages(d.messages ?? []);
         // Pre-fill reply subject from last message
         const last = (d.messages ?? []).at(-1) as EmailMessage | undefined;
@@ -177,9 +183,10 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
           setReplySubject(last.subject.startsWith("Re:") ? last.subject : `Re: ${last.subject}`);
         }
       })
-      .catch(() => toast.error("Failed to load thread"))
-      .finally(() => setLoadingThread(false));
-  }, [reply.id, reply.email_account_id, reply.email]);
+      .catch(() => { if (!cancelled) toast.error("Failed to load thread"); })
+      .finally(() => { if (!cancelled) setLoadedThreadKey(threadKey); });
+    return () => { cancelled = true; };
+  }, [canLoadThread, threadKey, reply.id, reply.email_account_id]);
 
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -319,12 +326,12 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
               <RiLoader4Line size={18} className="animate-spin" />
               <span className="text-sm">Loading thread…</span>
             </div>
-          ) : messages.length === 0 ? (
+          ) : shownMessages.length === 0 ? (
             <div className="text-center text-base-content/30 text-sm py-10">
               {canReply ? "No messages found in thread" : "No email account linked to this reply"}
             </div>
           ) : (
-            messages.map((msg, i) => {
+            shownMessages.map((msg, i) => {
               const isFromContact = msg.from.toLowerCase().includes((reply.email ?? "").toLowerCase());
               return (
                 <div

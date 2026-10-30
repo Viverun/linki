@@ -1,0 +1,39 @@
+version: 2
+
+# Dependency updates for the open-core tree.
+#
+# Deliberately NOT configured:
+#  - docker: Dockerfile pins the Debian base by digest and Chromium by exact
+#    version on purpose. A rebuild with a newer base changes the browser
+#    fingerprint LinkedIn sees and triggers a forced logout (Jun 2026 incident).
+#    Base-image bumps stay manual and deliberate.
+#
+# Grouped so a week of patch bumps arrives as one reviewable PR per dependency
+# class instead of a dozen.
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    groups:
+      production-dependencies:
+        dependency-type: production
+        update-types: ["minor", "patch"]
+      development-dependencies:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+    labels:
+      - dependencies
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - ci
