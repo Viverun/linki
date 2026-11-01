@@ -27,6 +27,47 @@ after(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 
+/**
+ * A directory whose files can be EXECUTED.
+ *
+ * The isolated gate mounts `/tmp` as `noexec` on purpose — scratch data cannot
+ * be executed even if something writes a payload there — and reserves exec for
+ * the workspace. A PATH shim written under `/tmp` is therefore skipped by the
+ * shell, which then falls through to the REAL `node` further along PATH: a fake
+ * that quietly stops being a fake. That is exactly how this suite failed its
+ * first isolated run (9 of 11), while passing on the host.
+ *
+ * So the fixture root is probed rather than assumed: a script inside it must
+ * actually run. The fallback is the workspace's `node_modules`, which must be
+ * exec-capable because it holds native addons that are dlopened.
+ */
+const EXEC_ROOT = (() => {
+  const canExec = (base: string): boolean => {
+    try {
+      const dir = mkdtempSync(join(base, "linki-exec-probe-"));
+      const file = join(dir, "probe.sh");
+      writeFileSync(file, "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+      const r = spawnSync(file, [], { encoding: "utf8" });
+      rmSync(dir, { recursive: true, force: true });
+      return r.status === 7;
+    } catch {
+      return false;
+    }
+  };
+  const fallback = join(import.meta.dirname, "..", "node_modules", ".cache");
+  for (const base of [tmpdir(), fallback]) {
+    try {
+      mkdirSync(base, { recursive: true });
+    } catch {
+      continue;
+    }
+    if (canExec(base)) return base;
+  }
+  // Loud, because the alternative is a suite that silently measures the real
+  // binaries instead of the fakes and reports the result as evidence.
+  throw new Error("no exec-capable fixture directory: PATH shims could not be created");
+})();
+
 interface Result {
   code: number;
   stdout: string;
@@ -50,7 +91,7 @@ interface Sandbox {
 }
 
 function sandbox(opts: { health?: number; threshold?: number; max?: number; docker?: number } = {}): Sandbox {
-  const dir = mkdtempSync(join(tmpdir(), "linki-watchdog-"));
+  const dir = mkdtempSync(join(EXEC_ROOT, "linki-watchdog-"));
   dirs.push(dir);
 
   const bin = join(dir, "bin");
@@ -159,24 +200,33 @@ function sandbox(opts: { health?: number; threshold?: number; max?: number; dock
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
+/**
+ * Assertion message for a shell invocation. The exit code alone says nothing
+ * about WHY the script exited — and the first isolated run of this suite failed
+ * with nine bare "1 !== 0" assertions that took a container reproduction to
+ * explain. The child's stderr would have said it in one line.
+ */
+const why = (r: Result) =>
+  `code=${r.code} stdout=${JSON.stringify(r.stdout)} stderr=${JSON.stringify(r.stderr)}`;
+
 // ─── the threshold is reachable at all ───────────────────────────────────────
 
 test("an empty history reaches the threshold one failure at a time, with no premature exit", () => {
   const s = sandbox({ health: 1, threshold: 3 });
 
   const first = s.run();
-  assert.equal(first.code, 0, "a non-acting failure is not an error");
+  assert.equal(first.code, 0, why(first));
   assert.equal(s.streak(), 1);
   assert.deepEqual(s.restarts(), [], "nothing below the threshold");
   assert.match(first.stdout, /streak 1\/3/);
 
   const second = s.run();
-  assert.equal(second.code, 0);
+  assert.equal(second.code, 0, why(second));
   assert.equal(s.streak(), 2);
   assert.deepEqual(s.restarts(), []);
 
   const third = s.run();
-  assert.equal(third.code, 0);
+  assert.equal(third.code, 0, why(third));
   assert.equal(s.restarts().length, 1, "the third consecutive failure acts");
 });
 
@@ -190,7 +240,7 @@ test("the first successful restart exits 0 and logs that it happened", () => {
 
   const r = s.run();
 
-  assert.equal(r.code, 0, "a successful restart must not exit non-zero");
+  assert.equal(r.code, 0, why(r));
   assert.match(r.stdout, /restart issued/);
   assert.equal(s.restarts().length, 1);
   assert.equal(s.streak(), 0, "the streak resets once the condition is treated");
@@ -206,7 +256,7 @@ test("healthy: no restart, and the streak is cleared without touching the budget
 
   const r = s.run();
 
-  assert.equal(r.code, 0);
+  assert.equal(r.code, 0, why(r));
   assert.deepEqual(s.restarts(), []);
   assert.equal(s.streak(), 0);
   assert.match(r.stdout, /clearing the failure streak/);
@@ -234,7 +284,7 @@ test("a probe that cannot run is not an unhealthy app", () => {
 
   const r = s.run();
 
-  assert.equal(r.code, 0);
+  assert.equal(r.code, 0, why(r));
   assert.deepEqual(s.restarts(), [], "a broken probe must not restart anything");
   assert.equal(s.streak(), 2, "and must not advance the streak either");
   assert.match(r.stdout, /could not run/);
@@ -249,7 +299,7 @@ test("budget exhausted: no restart, streak preserved, and it says so", () => {
 
   const r = s.run();
 
-  assert.equal(r.code, 0, "not restarting is a decision, not an error");
+  assert.equal(r.code, 0, why(r));
   assert.deepEqual(s.restarts(), []);
   assert.match(r.stdout, /BUDGET EXHAUSTED/);
   assert.equal(s.history().length, 2, "the history is untouched");
@@ -284,7 +334,7 @@ test("a failed restart stays recoverable and is visible to whatever runs the cro
 
   const failed = s.run();
 
-  assert.equal(failed.code, 1, "a restart that did not happen must not exit 0");
+  assert.equal(failed.code, 1, why(failed));
   assert.match(failed.stdout, /restart FAILED/);
   assert.equal(s.streak(), 1, "the streak is intact so the next run retries");
   assert.deepEqual(s.history(), [], "a restart that did not happen spends no budget");
@@ -294,7 +344,7 @@ test("a failed restart stays recoverable and is visible to whatever runs the cro
   s.setDockerExit(0);
   const recovered = s.run();
 
-  assert.equal(recovered.code, 0);
+  assert.equal(recovered.code, 0, why(recovered));
   assert.equal(s.restarts().length, 2, "the retry actually reached docker");
   assert.equal(s.streak(), 0);
 });
@@ -308,7 +358,7 @@ test("a zero-byte state file is a fresh state, not a crash", () => {
 
   const r = s.run();
 
-  assert.equal(r.code, 0);
+  assert.equal(r.code, 0, why(r));
   assert.equal(s.streak(), 1, "it counts from zero instead of failing on arithmetic");
 });
 
