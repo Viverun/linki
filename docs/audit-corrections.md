@@ -1367,3 +1367,57 @@ restarts that happened (each successful restart kills in-flight work; a failed
 one kills nothing). The predicate has no explicit timeout. And nothing here
 verifies that the supervisor is actually installed and scheduled — the script's
 behaviour is now tested, the deployed unit is not.
+
+## C4/PR-18 — a dismissed incident never came back (2026-11-01)
+
+The dismissal stored `BannerState.key` in `sessionStorage` and compared it to the
+current key on every render. The key identifies the **class** of problem —
+`dead`, `degraded:TypeError`, `unreachable` — and that choice is right: it is what
+keeps escalation visible, so dismissing a degraded banner at 09:00 does not
+silence a dead runner at 09:30.
+
+What was wrong is that nothing ever cleared it. A dismissal therefore described a
+class forever, not an incident once:
+
+1. Dismiss "dead".
+2. The runner recovers — the banner disappears because `severity: "none"`
+   renders nothing, **not** because the dismissal ended.
+3. An hour later the runner dies again in the same tab. Same key, same stored
+   value, banner suppressed.
+
+Steps 2 and 3 look identical to the operator, which is what makes it quiet. The
+session-scoped storage that was meant to bound the lifetime did not help: the
+class is stable within a session, so the stale key survived every incident of
+that class for as long as the tab stayed open.
+
+**What shipped (`93efb73`):**
+
+- `nextDismissedKey(dismissed, banner)` — observing `severity: "none"` returns
+  `null`, ending the dismissal at the moment the condition clears. Anything else
+  leaves the key alone, so a persistent incident whose counter climbs from 5 to
+  40 stays dismissed; re-showing the same incident every tick is how an operator
+  learns to dismiss without reading.
+- `isDismissedBanner(dismissed, banner)` — never hides a different key, and never
+  hides `severity: "none"`. Escalation, a different error class, a different
+  unhealthy reason and the unreachable state all remain visible whatever was
+  dismissed.
+- Both live in `lib/health-contract.ts`, the module's existing rule: the
+  decisions worth testing stay out of the React wiring, because there is no DOM
+  test tooling here and adding it for one boolean is the worse trade. The
+  component reconciles on every poll through a ref, so a dismissal neither
+  restarts the 60s interval nor gets read through a stale closure.
+- Storage-disabled behaviour became explicit: `sessionStorage` throwing means the
+  key lives only in component state, so it still covers the incident on screen
+  and a reload shows the banner again — failing toward visibility.
+
+**Evidence:** `tests/health-banner-dismissal.test.ts` (13), modelling the
+component's poll loop without React. The acceptance scenario is the first test:
+dismiss → recover → same class visible. Four mutations confirm the tests
+discriminate — removing the expiry fails the acceptance scenario, ignoring the
+key fails escalation/network/class, restoring the inline `dismissedKey ===
+banner.key` comparison fails the wiring guard, and switching to `localStorage`
+fails the session-lifetime guard.
+
+**Not claimed:** nothing exercises the banner in a real browser, so behaviour
+under React re-render and StrictMode double-invocation rests on the structural
+assertion that the component delegates both decisions, not on observing it.
