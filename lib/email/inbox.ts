@@ -7,6 +7,7 @@ import type { PremiumSurface } from "@/lib/premium";
 import { decryptSecret } from "@/lib/crypto";
 import { emailTlsOptions } from "@/lib/email/tls";
 import { decideReplyOpenCore, retryUndecidedReplies } from "@/lib/email/reply-policy";
+import { applyBounce, isBounceSender } from "@/lib/email/bounce";
 
 const IMAP_POLL_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
 // Jul 2026 incident: all email accounts became "due" in the same tick and synced
@@ -20,22 +21,6 @@ function accountJitterMs(accountId: string): number {
   let h = 0;
   for (let i = 0; i < accountId.length; i++) h = (h * 31 + accountId.charCodeAt(i)) >>> 0;
   return h % IMAP_POLL_JITTER_MS;
-}
-
-const BOUNCE_SENDER_PATTERNS = [
-  /mailer-daemon@/i,
-  /postmaster@/i,
-  /mail-delivery-subsystem@/i,
-  /delivery-status@/i,
-  /amazonses\.com$/i,
-];
-
-function extractEmails(text: string): string[] {
-  return [...text.matchAll(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g)].map(m => m[0].toLowerCase());
-}
-
-function isBounce(fromEmail: string): boolean {
-  return BOUNCE_SENDER_PATTERNS.some(p => p.test(fromEmail));
 }
 
 function parseHeaderValue(raw: string, field: string): string {
@@ -305,67 +290,17 @@ export async function syncEmailInbox(emailAccountId: string): Promise<{ replies:
 
                 const emailMatch = fromRaw.match(/<([^>]+)>/) ?? fromRaw.match(/([^\s]+@[^\s]+)/);
                 const fromEmail = emailMatch?.[1]?.toLowerCase().trim();
-                if (!fromEmail || !isBounce(fromEmail)) continue;
+                if (!fromEmail || !isBounceSender(fromEmail)) continue;
 
-                // Also extract Final-Recipient from DSN bodies (SES bounce format)
-                const finalRecipient = msg.body.match(/Final-Recipient:\s*rfc822;\s*([^\s\r\n]+)/i)?.[1] ?? "";
-                const candidates = extractEmails(msg.body + " " + toRaw + " " + finalRecipient);
-                for (const candidate of candidates) {
-                  if (BOUNCE_SENDER_PATTERNS.some(p => p.test(candidate))) continue;
-
-                  const target = db
-                    .prepare("SELECT id, email_status, company_id FROM targets WHERE lower(email) = ?")
-                    .get(candidate) as { id: string; email_status: string | null; company_id: string | null } | undefined;
-
-                  if (!target || target.email_status === "invalid") continue;
-
-                  const note = `Email bounced on ${new Date().toISOString().slice(0, 10)} — marked invalid`;
-                  db.prepare(`
-                    UPDATE targets SET email_status = 'invalid',
-                      notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END
-                    WHERE id = ?
-                  `).run(note, note, target.id);
-
-                  db.prepare(`
-                    UPDATE run_profile_tracks SET state = 'skipped', error_message = 'Email bounced — invalid address'
-                    WHERE run_profile_id IN (SELECT id FROM run_profiles WHERE target_id = ?)
-                    AND state IN ('pending', 'in_progress')
-                  `).run(target.id);
-
-                  if (target.company_id) {
-                    const companyNote = `Email domain flagged invalid — bounce for ${candidate} on ${new Date().toISOString().slice(0, 10)}`;
-                    db.prepare(`
-                      UPDATE companies SET email_domain_invalid = 1,
-                        notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END
-                      WHERE id = ?
-                    `).run(companyNote, companyNote, target.company_id);
-
-                    const siblings = db.prepare(`
-                      SELECT id FROM targets WHERE company_id = ? AND id != ? AND email IS NOT NULL AND email_status != 'invalid'
-                    `).all(target.company_id, target.id) as { id: string }[];
-
-                    for (const sibling of siblings) {
-                      const sibNote = `Email bounced on ${new Date().toISOString().slice(0, 10)} — marked invalid (domain flagged via company)`;
-                      db.prepare(`
-                        UPDATE targets SET email_status = 'invalid',
-                          notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END
-                        WHERE id = ?
-                      `).run(sibNote, sibNote, sibling.id);
-                      db.prepare(`
-                        UPDATE run_profile_tracks SET state = 'skipped', error_message = 'Email domain invalid — company flagged'
-                        WHERE run_profile_id IN (SELECT id FROM run_profiles WHERE target_id = ?)
-                        AND state IN ('pending', 'in_progress')
-                      `).run(sibling.id);
-                    }
-
-                    if (siblings.length > 0) {
-                      console.log(`[email-inbox] Company ${target.company_id} flagged — ${siblings.length} sibling(s) marked invalid`);
-                    }
-                  }
-
-                  console.log(`[email-inbox] Bounce for ${candidate} (target ${target.id}) — marked invalid`);
+                // Scope, temporary-vs-permanent and idempotency all live in
+                // lib/email/bounce.ts (PR-14), so they can be tested against a
+                // real DB instead of only through IMAP.
+                const outcome = applyBounce(db, { body: msg.body, toRaw, fromEmail });
+                if (outcome.applied) {
                   bounces++;
-                  break;
+                  console.log(`[email-inbox] Bounce: ${outcome.reason}`);
+                } else {
+                  console.log(`[email-inbox] Bounce ignored: ${outcome.reason}`);
                 }
               }
               resFetch();
