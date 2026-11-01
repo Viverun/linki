@@ -1258,3 +1258,52 @@ contact's `run_profiles` and `logs` — deliberate contact-level erasure, with t
 run row and every other contact preserved. Whether that is the retention policy
 PR-08's acceptance text asks for is a policy decision for C4, not a code defect
 this change silently settles.
+
+## C4/PR-17 — the secondary backup was never verified (2026-11-01)
+
+The primary snapshot has been written to `.partial`, verified, renamed and only
+then pruned since the backup system was built. The off-volume copy was three
+lines: `copyFileSync`, log, `prune`. Everything the primary does to make a
+snapshot *evidence* was skipped for the copy whose entire purpose is surviving
+the loss of the primary.
+
+The failure that exposes is not "the copy stops running" — that would at least be
+visible. It is an interrupted or short copy landing on the final name:
+`linki-auto-<stamp>.db`, plausible size, never opened by anything, exit code 0.
+Retention then treats it as the newest snapshot and, at `retain`, deletes a
+verified file to keep it. Over weeks the second location becomes a directory of
+correctly-named files, and the first time anyone opens one is the incident it
+existed to survive.
+
+**What shipped (`1a4f43c`):**
+
+- The secondary is written to `.partial`, verified with the *same*
+  `verifySnapshot` the primary uses (integrity check, expected table list, every
+  table readable), and promoted by `rename`. Verification is not duplicated: one
+  definition, two callers, so the copy cannot drift from the primary's standard.
+- A copy failure (`ENOSPC`, I/O error, a short copy) deletes the partial and
+  throws, naming that the primary snapshot is intact. Nothing plausible is left
+  behind.
+- A copy that fails verification is renamed to `.rejected` rather than deleted —
+  the same convention as the primary, for the same reason: a deleted failed
+  snapshot takes the explanation with it.
+- Retention on the secondary runs only after the new copy verified. It can
+  therefore never delete the last good secondary in favour of a broken one.
+- An existing secondary filename is an error, not an overwrite. With a
+  second-granularity timestamp, a retried cron run collides; silently replacing a
+  verified off-volume snapshot is unrecoverable.
+- Secondary capacity is checked with the existing `assertFreeSpace` *before*
+  anything is written, so a full off-volume disk fails as "no space" instead of
+  as a half-written file plus an `ENOSPC`.
+
+**Evidence:** `tests/backup-secondary.test.ts` (6), driving the real script
+against real SQLite files with a planted older secondary. Reverting to the old
+direct copy fails 4 of 6, including "the last good secondary must survive a
+failed copy" — the assertion that distinguishes a verifiable copy from a
+plausible file.
+
+**What this does not claim:** the copy is verifiable, not independent. Same host,
+same volume, same credentials means one loss takes both. Restore rehearsal with
+separately escrowed synthetic encryption material has not been performed, and
+RPO/RTO is not measured. Those are the row's remaining acceptance clauses and
+they stay open, recorded as such rather than folded into a closure.
