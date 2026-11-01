@@ -1307,3 +1307,63 @@ same volume, same credentials means one loss takes both. Restore rehearsal with
 separately escrowed synthetic encryption material has not been performed, and
 RPO/RTO is not measured. Those are the row's remaining acceptance clauses and
 they stay open, recorded as such rather than folded into a closure.
+
+## C4/PR-05 — the supervisor reported failure after success, and could not count (2026-11-01)
+
+The register's concern was that `set -euo pipefail` and a history-dependent write
+list might interact badly. They do — but at a different line than the one named,
+and the two other defects in the same script were found by running it rather than
+reading it.
+
+**Defect 1 — a successful restart exited 1.** The restart path wrote the budget
+with a group piped into `awk`:
+
+```sh
+{ echo 0; echo "${now}"; [ -n "${history}" ] && echo "${history}"; } | awk …
+```
+
+With an empty history the group's status is 1, `pipefail` makes the pipeline 1,
+and `set -e` terminated the script *after* `docker compose restart` had succeeded
+and *before* `log "restart issued"`. The first restart after any fresh state is
+exactly the run with an empty history, so the first restart a new install ever
+performs reports failure to cron while having worked. The same construct at `:42`
+was harmless — `set -e` exempts a failing `&&`-list — which is why reading the two
+lines together suggested they shared a defect and executing them showed they did
+not.
+
+**Defect 2 — two overlapping runs lost a restart.** The state file is
+read-modify-write and nothing serialised access. Cron firing while the previous
+tick is still probing makes both runs read the same streak and write the same
+successor: one restart is never recorded, and the hourly cap that exists to stop
+restart loops believes fewer restarts happened than did. Runs now hold a
+non-blocking `flock`; a tick that loses the race exits 0 and says so, because the
+other invocation is already deciding. If `flock` is missing the script refuses to
+start rather than silently reverting to the unserialised behaviour — a supervisor
+that looks armed and is not is the worst available outcome.
+
+**Defect 3 — a broken probe looked like a dead app.** Any non-zero status from
+`node health-predicate.js` counted as "unhealthy", so a missing `node`, a syntax
+error or an OOM kill would restart the service three times an hour. A restart
+cannot fix a broken supervisor, and this script is the last line of defence
+precisely when other things are broken. Exit 1 is the predicate's documented "a
+restart can fix this"; every other status now declines and logs why.
+
+Two smaller ones: state writes go through a temp file and a rename (in-place `>`
+truncation leaves a zero-byte file that reads back as "streak 0, no restarts" —
+it forgets the budget in the direction that keeps restarting), and a failed
+restart exits non-zero while leaving the streak so the next tick retries.
+
+**Evidence:** `tests/watchdog-control-flow.test.ts` (11) executes the real script
+under bash. Only `node` and `docker` are shimmed, because `set -euo pipefail`,
+`flock`, `awk`, `date` and the state file are the subject of the test. Against
+the pre-change script 5 of 11 fail; individual mutations then confirm which guard
+catches what (no lock → concurrency only; original pipeline → the restart path;
+probe exit handling → the probe test; clearing history on recovery → the budget
+test).
+
+**Not fixed here:** a persistently failing `docker compose restart` retries every
+tick with no separate backoff, because the budget deliberately charges only
+restarts that happened (each successful restart kills in-flight work; a failed
+one kills nothing). The predicate has no explicit timeout. And nothing here
+verifies that the supervisor is actually installed and scheduled — the script's
+behaviour is now tested, the deployed unit is not.
