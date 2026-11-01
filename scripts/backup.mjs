@@ -237,13 +237,51 @@ function createBackup(opts = {}) {
     // which is the right outcome — one copy beats none — but "the off-volume
     // copy silently stopped happening" is exactly how you discover, during an
     // incident, that the second location has been empty for six weeks.
+    //
+    // The copy gets the same treatment as the primary: written under `.partial`,
+    // verified, then promoted by rename. A `copyFileSync` straight onto the final
+    // name means an interrupted or short copy *is* the backup — a truncated file
+    // with a valid-looking name, which the next prune then counts as the newest
+    // good snapshot and keeps in preference to a real one.
     fs.mkdirSync(offsiteDir, { recursive: true });
     const offsitePath = path.join(offsiteDir, finalName);
-    fs.copyFileSync(finalPath, offsitePath);
-    log(`copied to ${offsitePath}`);
+    if (fs.existsSync(offsitePath)) {
+      // Never overwrite. The primary refuses the same collision, and silently
+      // replacing a verified off-volume snapshot is not recoverable.
+      throw new Error(`offsite snapshot already exists: ${offsitePath}`);
+    }
+
+    // Capacity is checked before anything is written, so a full off-volume disk
+    // fails as "no space" rather than as a half-written file plus an ENOSPC.
+    assertFreeSpace(sourcePath, offsiteDir, opts.statfs);
+
+    const offsitePartial = `${offsitePath}.partial`;
+    fs.rmSync(offsitePartial, { force: true });
+    const copyFile = opts.copyFile ?? fs.copyFileSync;
+    try {
+      copyFile(finalPath, offsitePartial);
+    } catch (err) {
+      // A short copy is not evidence and must not consume the last good slot.
+      fs.rmSync(offsitePartial, { force: true });
+      throw new Error(`offsite copy failed (primary snapshot is intact): ${err.message}`);
+    }
+
+    try {
+      verify(offsitePartial, expectedTables);
+    } catch (err) {
+      // Keep the evidence, exactly as the primary does.
+      const rejected = `${offsitePath}.rejected`;
+      fs.renameSync(offsitePartial, rejected);
+      throw new Error(`offsite copy FAILED verification (kept at ${rejected}): ${err.message}`);
+    }
+    fs.renameSync(offsitePartial, offsitePath);
+    log(`copied to ${offsitePath} (verified)`);
+
     // Retention applies THERE TOO. Pruning only the primary leaves the off-volume
     // directory growing without bound, which ends as a full disk — and a full disk
-    // is the one condition that stops new backups being written at all.
+    // is the one condition that stops new backups being written at all. Reached
+    // only after the new copy verified, so it can never prune the last good one
+    // in favour of a file that turned out to be broken.
     prune(offsiteDir, retain);
   } else {
     // The default BACKUP_DIR is inside the bind-mounted ./data. Snapshots written
