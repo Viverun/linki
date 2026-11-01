@@ -1206,3 +1206,55 @@ Production deployment uses digest-pinned `node:22-slim` (resolving to Node v22.2
 **Claimed:** 21 errors / 13 warnings residual lint debt carried from Phases 0–5 as risky churn.
 **Measured:** Systematic remediation of React hook dependencies, unhandled Promise/state lifecycles in UI pages (`pages/workflows/[id].tsx`, `pages/contacts/index.tsx`, `pages/email-health.tsx`, `pages/settings.tsx`, `pages/lists/[id].tsx`), and unused parameters (`lib/linkedin/runner.ts`, `lib/linkedin/scraper.ts`, `pages/companies/[id].tsx`, `pages/contacts/[id].tsx`).
 **What shipped:** Reached **0 errors / 0 warnings** under `eslint --max-warnings=0`. All 432 tests continue to pass and Next.js production build succeeds with zero prerender defects.
+
+---
+
+## C3/PR-08 — deletion could erase a live run's bookkeeping (2026-11-01)
+
+**Claimed (C0 register, PR-08):** target deletion "removes run profiles/logs", and
+account deletion "performs a database delete". Both statements were mechanically
+true and both were unguarded.
+
+**Measured:** the removal itself was the defect. Single target delete, bulk target
+delete, list delete, run contact removal and email-account delete all ran without
+asking whether a run was executing. For a live run the ordering is: step performs
+the external action (LinkedIn message sent, email delivered) → bookkeeping write
+happens → the row it references is gone → the `logs` insert violates
+`logs.run_id → runs(id)` or `logs.target_id → targets(id)` **after** the send. The
+contact disappears, the message is real, and nothing in the database says so.
+Workflow and run deletion already refused this case; the resource-level paths did
+not, which is exactly the inconsistency PR-08's acceptance text names.
+
+The UI was the second half: `pages/lists/index.tsx`, `pages/companies/index.tsx`
+and the email-account handler in `pages/settings.tsx` did not read `res.ok`, so a
+refused delete toasted success and dropped the row from local state. The row
+survived in the DB and reappeared on the next fetch — the same class of bug
+already fixed once for LinkedIn-account deletion.
+
+**What shipped (`d10dc4f`):**
+
+- `lib/delete-guards.ts` — one predicate for all paths: deletable only while no
+  `running`/`paused` run references the resource. Paused counts as live because
+  resuming must not discover its targets vanished; terminal runs cannot act again.
+- Bulk target delete is all-or-nothing, so a batch cannot half-succeed silently.
+- Email accounts are matched on `run_profiles.email_account_id` as well as
+  `runs.email_account_id` — the profile is the actual sender, and rotation can
+  leave the run row stale. An FK refusal from run *history* is now a 409 that
+  names the reason rather than a 500 the UI cannot parse.
+- Account deletion closes the browser context **after** the row is gone, and a
+  close failure only warns — a refused delete must not kill a live session.
+- Company deletion unlinks and deletes in one transaction; previously a failure
+  between the two left contacts detached from a company that still existed.
+- The three UI handlers surface the refusal and leave state untouched.
+
+**Evidence:** `tests/deletion-lifecycle.test.ts` (16) and
+`tests/delete-ui-feedback.test.ts` (5). Both were mutation-checked before being
+accepted — neutralising the guards fails 5, removing the inline run-remove guard
+fails 1, reverting one UI handler fails 1, dropping `closeSession` fails 1. A
+suite that stayed green against the old code would have been evidence of nothing.
+
+**Not fixed here:** deleting a *terminal* run's contact still erases that
+contact's `run_profiles` and `logs` — deliberate contact-level erasure, with the
+run row and every other contact preserved. Whether that is the retention policy
+PR-08's acceptance text asks for is a policy decision for C4, not a code defect
+this change silently settles.
