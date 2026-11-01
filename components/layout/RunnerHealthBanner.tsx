@@ -1,5 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
-import { bannerFromHealth, type BannerState } from "@/lib/health-contract";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  bannerFromHealth,
+  isDismissedBanner,
+  nextDismissedKey,
+  type BannerState,
+} from "@/lib/health-contract";
 
 /**
  * Puts the runner's condition in front of a person.
@@ -20,7 +25,9 @@ import { bannerFromHealth, type BannerState } from "@/lib/health-contract";
 const POLL_MS = 60_000;
 
 /** Session-scoped, so a dismissal never outlives the tab. localStorage would let
- *  someone dismiss a banner in March and not see the next outage in June. */
+ *  someone dismiss a banner in March and not see the next outage in June. It is
+ *  ALSO cleared when the condition clears (see `nextDismissedKey`), so one
+ *  incident cannot silence the next one of the same class. */
 const DISMISS_KEY = "linki:health-banner-dismissed";
 
 /**
@@ -36,6 +43,23 @@ function readDismissed(): string | null {
   }
 }
 
+/**
+ * Persists the dismissal, or removes it on recovery.
+ *
+ * When storage is unavailable the write fails silently and the key lives only in
+ * component state: the dismissal still applies to the incident in view, but a
+ * reload shows the banner again. That is the explicit storage-disabled behaviour
+ * — fail toward visibility, never toward an outage nobody can see.
+ */
+function writeDismissed(key: string | null): void {
+  try {
+    if (key === null) window.sessionStorage.removeItem(DISMISS_KEY);
+    else window.sessionStorage.setItem(DISMISS_KEY, key);
+  } catch {
+    /* storage unavailable — the in-memory key still covers this incident */
+  }
+}
+
 export default function RunnerHealthBanner() {
   const [banner, setBanner] = useState<BannerState | null>(null);
   // Read in the initialiser rather than in an effect. Calling setState
@@ -43,8 +67,20 @@ export default function RunnerHealthBanner() {
   // error here). No hydration mismatch results: the first render returns null
   // regardless, because `banner` is not populated until the first poll resolves.
   const [dismissedKey, setDismissedKey] = useState<string | null>(readDismissed);
+  // Mirrored in a ref so the poll callback can reconcile the dismissal without
+  // being re-created (which would restart the interval) and without reading a
+  // stale closure.
+  const dismissedRef = useRef<string | null>(dismissedKey);
+
+  const applyDismissal = useCallback((next: string | null) => {
+    if (dismissedRef.current === next) return;
+    dismissedRef.current = next;
+    setDismissedKey(next);
+    writeDismissed(next);
+  }, []);
 
   const poll = useCallback(async () => {
+    let next: BannerState;
     try {
       const res = await fetch("/api/health", { cache: "no-store" });
       // `res.ok` is checked rather than assumed: /api/health answers 503 WITH a
@@ -57,13 +93,19 @@ export default function RunnerHealthBanner() {
       } catch {
         body = null;
       }
-      setBanner(bannerFromHealth({ ok: res.ok, body }));
+      next = bannerFromHealth({ ok: res.ok, body });
     } catch {
       // Network-level failure: the server is unreachable, which is itself the
       // most severe thing this banner reports.
-      setBanner(bannerFromHealth(null));
+      next = bannerFromHealth(null);
     }
-  }, []);
+    setBanner(next);
+    // PR-18: a dismissal covers one incident. Seeing the condition clear ends
+    // it, so the next outage of the same class is shown again. Without this the
+    // key — which deliberately identifies the class, not the occurrence — would
+    // silence every later incident of that class for the rest of the session.
+    applyDismissal(nextDismissedKey(dismissedRef.current, next));
+  }, [applyDismissal]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -98,16 +140,9 @@ export default function RunnerHealthBanner() {
   }, [poll]);
 
   if (!banner || banner.severity === "none") return null;
-  if (dismissedKey === banner.key) return null;
+  if (isDismissedBanner(dismissedKey, banner)) return null;
 
-  const dismiss = () => {
-    try {
-      window.sessionStorage.setItem(DISMISS_KEY, banner.key);
-    } catch {
-      /* storage unavailable — hide for this render only */
-    }
-    setDismissedKey(banner.key);
-  };
+  const dismiss = () => applyDismissal(banner.key);
 
   const tone =
     banner.severity === "error"

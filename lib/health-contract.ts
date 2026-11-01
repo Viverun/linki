@@ -162,3 +162,45 @@ export function bannerFromHealth(input: { ok: boolean; body: unknown } | null): 
 
   return NONE;
 }
+
+// ─── dismissal lifecycle ─────────────────────────────────────────────────────
+// PR-18. A dismissal is stored against `BannerState.key`, which identifies the
+// CLASS of problem ("dead", "degraded:TypeError"). That is what makes escalation
+// visible — a degraded banner dismissed at 09:00 does not silence the dead one
+// at 09:30 — but on its own it also means a dismissal outlives the incident it
+// referred to: dismiss "dead", watch it recover, lose the runner again an hour
+// later in the same tab, and the second incident is invisible for the rest of
+// the session.
+//
+// The fix is not a different key. It is that a dismissal describes ONE incident,
+// and the observation that the condition has cleared ends it. The reducer below
+// is the whole rule, kept pure so it can be exercised without a DOM (this
+// project has no component test tooling, and adding some for one boolean is a
+// worse trade than keeping the boolean here).
+
+/**
+ * The dismissal to carry forward after observing `banner`.
+ *
+ * - `severity: "none"` means the condition cleared: whatever was dismissed is
+ *   over, so the key is dropped and the next occurrence of the same class is
+ *   shown again.
+ * - Anything else is the same incident continuing (possibly with a different
+ *   detail string, e.g. the failure counter ticking up), so the dismissal
+ *   stands. A *different* key is not suppressed anyway — `isDismissedBanner`
+ *   compares keys — so an escalation is visible without clearing anything.
+ */
+export function nextDismissedKey(dismissed: string | null, banner: BannerState): string | null {
+  if (banner.severity === "none") return null;
+  return dismissed;
+}
+
+/**
+ * Whether a dismissal should hide `banner` right now.
+ *
+ * Never hides `severity: "none"` (there is nothing to hide), and never hides a
+ * different key, so escalation and a new failure class stay visible even while
+ * something else is dismissed.
+ */
+export function isDismissedBanner(dismissed: string | null, banner: BannerState): boolean {
+  return banner.severity !== "none" && dismissed !== null && dismissed === banner.key;
+}
