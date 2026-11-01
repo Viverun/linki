@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { closeSession } from "@/lib/linkedin/session";
 
 // Excludes cookies_json — the frontend never uses the raw session blob, only
 // is_authenticated, so there's no reason to ship it (even encrypted) to the client.
@@ -8,7 +9,7 @@ const ACCOUNT_COLUMNS = `id, name, email, is_authenticated, daily_connection_lim
   inbox_synced_at, accepted_sync_at, li_connections, li_pending, li_profile_views,
   li_stats_synced_at, connections_synced_through_ms`;
 
-export default function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
   const id = req.query.id as string;
 
@@ -41,6 +42,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     try {
       const { changes } = db.prepare("DELETE FROM accounts WHERE id = ?").run(id);
       if (changes === 0) return res.status(404).json({ error: "Not found" });
+      // Drop the live browser context as well. After the row is gone nothing
+      // can reuse the context, so leaving it open would hold Chromium (and the
+      // account's cookies) until the process restarts. Failure to close must
+      // not turn a completed deletion into an error the UI retries.
+      await closeSession(id).catch((err) => {
+        console.warn(
+          `[accounts] deleted account ${id} but could not close its browser context:`,
+          err instanceof Error ? err.message : err
+        );
+      });
       return res.status(204).end();
     } catch (err) {
       // runs.account_id references accounts(id) with no ON DELETE clause, so

@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { activeRunCountForTargets } from "@/lib/delete-guards";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
@@ -50,6 +51,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === "DELETE") {
     const target = db.prepare("SELECT id FROM targets WHERE id = ?").get(id);
     if (!target) return res.status(404).json({ error: "Not found" });
+    // A live run still owns this contact. Deleting it removes run_profiles and
+    // logs the runner is about to write to, so the external action can land
+    // with no row left to record it. Refuse, same as the workflow/run guards.
+    const active = activeRunCountForTargets(db, [id]);
+    if (active > 0) {
+      return res.status(409).json({
+        error: `This contact is part of ${active} active run${active === 1 ? "" : "s"}. Stop or delete ${active === 1 ? "it" : "them"} first, then delete the contact.`,
+        active_runs: active,
+      });
+    }
     // Some references (run_profiles, logs) have no ON DELETE CASCADE — clear them first so the
     // FK constraint doesn't block the delete. run_profile_tracks cascade off run_profiles.
     db.transaction(() => {

@@ -20,7 +20,14 @@ export async function resolve(specifier, context, nextResolve) {
   try {
     return await nextResolve(spec, context);
   } catch (err) {
-    if (err?.code !== "ERR_MODULE_NOT_FOUND" || /\.[cm]?[jt]sx?$/.test(spec)) throw err;
+    // ERR_UNSUPPORTED_DIR_IMPORT matters here: `pages/api/targets/[id].ts` sits
+    // beside a `pages/api/targets/[id]/` directory, so the natural specifier
+    // resolves to the directory and Node refuses it. Bundlers (and Next) pick
+    // the file first, and candidate list order below reproduces that. A real
+    // directory import (`./support` → `./support/index.ts`) is fixed by the
+    // same retry.
+    const retryable = err?.code === "ERR_MODULE_NOT_FOUND" || err?.code === "ERR_UNSUPPORTED_DIR_IMPORT";
+    if (!retryable || /\.[cm]?[jt]sx?$/.test(spec)) throw err;
     for (const ext of [".ts", ".tsx", "/index.ts"]) {
       try {
         return await nextResolve(spec + ext, context);

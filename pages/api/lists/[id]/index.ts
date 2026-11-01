@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
+import { activeRunCountForList } from "@/lib/delete-guards";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
@@ -34,6 +35,15 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     // list_targets) already cover the children — atomicity was the gap.
     const existing = db.prepare("SELECT id FROM lists WHERE id = ?").get(id);
     if (!existing) return res.status(404).json({ error: "List not found" });
+    // Deleting the list deletes its runs (cascade), which would pull the rug
+    // from under an executing step. Refuse while any run is active.
+    const active = activeRunCountForList(db, id);
+    if (active > 0) {
+      return res.status(409).json({
+        error: `This list has ${active} active run${active === 1 ? "" : "s"}. Stop ${active === 1 ? "it" : "them"} first, then delete the list.`,
+        active_runs: active,
+      });
+    }
     db.transaction(() => {
       db.prepare("DELETE FROM runs WHERE list_id = ?").run(id);
       db.prepare("DELETE FROM lists WHERE id = ?").run(id);

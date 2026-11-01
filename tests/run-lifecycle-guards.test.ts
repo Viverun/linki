@@ -89,17 +89,28 @@ test("enroll refuses completed runs and non-string target_ids", () => {
 
 // ─── remove ─────────────────────────────────────────────────────────────────
 
-test("remove validates strictly, 404s unknown runs, clears logs", () => {
+test("remove validates strictly, 404s unknown runs, refuses live runs, clears logs", () => {
   assert.equal(call(remove, "POST", { id: "r-running" }, { target_ids: "t-guards-1" }).statusCode, 400);
   assert.equal(call(remove, "POST", { id: "missing" }, { target_ids: ["t-guards-1"] }).statusCode, 404);
+  // PR-08 (C3): removal deletes the run_profile the executing step writes to,
+  // so a live run owns its contacts. Same rule as deleting the run itself.
+  const live = call(remove, "POST", { id: "r-running" }, { target_ids: ["t-guards-1"] });
+  assert.equal(live.statusCode, 409);
+  assert.equal((live.body as { status: string }).status, "running");
+
+  // Once the run is terminal the identical request succeeds.
+  db().prepare("INSERT INTO runs (id, workflow_id, list_id, status) VALUES (?, ?, ?, 'failed')")
+    .run("r-stopped", "w-guards", "l-guards");
+  db().prepare("INSERT INTO run_profiles (id, run_id, target_id) VALUES (?, ?, ?)")
+    .run("rp-guards-1", "r-stopped", "t-guards-1");
   db().prepare("INSERT INTO logs (id, run_id, target_id, message) VALUES (?, ?, ?, ?)").run(
-    "log-guards-1", "r-running", "t-guards-1", "hello"
+    "log-guards-1", "r-stopped", "t-guards-1", "hello"
   );
-  const out = call(remove, "POST", { id: "r-running" }, { target_ids: ["t-guards-1"] });
+  const out = call(remove, "POST", { id: "r-stopped" }, { target_ids: ["t-guards-1"] });
   assert.equal(out.statusCode, 200);
   assert.equal((out.body as { removed: number }).removed, 1);
   assert.equal(db().prepare("SELECT 1 FROM logs WHERE id = 'log-guards-1'").get(), undefined);
-  assert.equal(db().prepare("SELECT 1 FROM run_profiles WHERE run_id = 'r-running'").get(), undefined);
+  assert.equal(db().prepare("SELECT 1 FROM run_profiles WHERE run_id = 'r-stopped'").get(), undefined);
 });
 
 // ─── runs DELETE / lists DELETE ─────────────────────────────────────────────

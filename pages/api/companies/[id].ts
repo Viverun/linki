@@ -37,11 +37,15 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "DELETE") {
-    // Unlink contacts first, then delete company
+    // Unlink contacts first, then delete company. One transaction: a failure
+    // between the two would leave contacts unlinked from a company that still
+    // exists — a half-applied delete no retry can distinguish from intent.
     const existing = db.prepare("SELECT id FROM companies WHERE id = ?").get(id);
     if (!existing) return res.status(404).json({ error: "not found" });
-    db.prepare("UPDATE targets SET company_id = NULL WHERE company_id = ?").run(id);
-    db.prepare("DELETE FROM companies WHERE id = ?").run(id);
+    db.transaction(() => {
+      db.prepare("UPDATE targets SET company_id = NULL WHERE company_id = ?").run(id);
+      db.prepare("DELETE FROM companies WHERE id = ?").run(id);
+    })();
     return res.json({ ok: true });
   }
 

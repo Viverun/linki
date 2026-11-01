@@ -41,10 +41,12 @@ function mockRes(): { res: NextApiResponse; captured: Captured } {
   return { res: res as unknown as NextApiResponse, captured };
 }
 
-function del(id: string): Captured {
+// The DELETE branch awaits closeSession() before answering (PR-08), so the
+// capture is only complete after the handler's promise settles.
+async function del(id: string): Promise<Captured> {
   const req = { method: "DELETE", query: { id }, body: {} } as unknown as NextApiRequest;
   const { res, captured } = mockRes();
-  handler(req, res);
+  await handler(req, res);
   return captured;
 }
 
@@ -70,21 +72,21 @@ const accountExists = (id: string) =>
 
 // ─── DELETE ──────────────────────────────────────────────────────────────────
 
-test("DELETE removes an account with no runs and returns 204", () => {
+test("DELETE removes an account with no runs and returns 204", async () => {
   const id = makeAccount();
-  const r = del(id);
+  const r = await del(id);
   assert.equal(r.statusCode, 204);
   assert.equal(r.ended, true);
   assert.equal(accountExists(id), false, "the row should actually be gone");
 });
 
-test("DELETE returns 404 when the account does not exist", () => {
-  const r = del("no-such-account");
+test("DELETE returns 404 when the account does not exist", async () => {
+  const r = await del("no-such-account");
   assert.equal(r.statusCode, 404);
   assert.deepEqual(r.body, { error: "Not found" });
 });
 
-test("DELETE returns 409 instead of throwing when the account still has runs", () => {
+test("DELETE returns 409 instead of throwing when the account still has runs", async () => {
   // runs.account_id references accounts(id) with no ON DELETE clause, so SQLite
   // refuses the delete. The regression this guards: the raw SqliteError escaped
   // the handler as a 500, the UI ignored it and reported success, and the
@@ -92,29 +94,29 @@ test("DELETE returns 409 instead of throwing when the account still has runs", (
   const id = makeAccount();
   attachRun(id);
 
-  const r = del(id);
+  const r = await del(id);
 
   assert.equal(r.statusCode, 409);
   assert.match((r.body as { error: string }).error, /runs/i);
   assert.equal(accountExists(id), true, "the account must survive a refused delete");
 });
 
-test("an account becomes deletable once its runs are gone", () => {
+test("an account becomes deletable once its runs are gone", async () => {
   const id = makeAccount();
   const runId = attachRun(id);
-  assert.equal(del(id).statusCode, 409);
+  assert.equal((await del(id)).statusCode, 409);
 
   getDb().prepare("DELETE FROM runs WHERE id = ?").run(runId);
 
-  assert.equal(del(id).statusCode, 204);
+  assert.equal((await del(id)).statusCode, 204);
   assert.equal(accountExists(id), false);
 });
 
-test("a refused delete leaves other accounts untouched", () => {
+test("a refused delete leaves other accounts untouched", async () => {
   const blocked = makeAccount();
   const bystander = makeAccount();
   attachRun(blocked);
 
-  assert.equal(del(blocked).statusCode, 409);
+  assert.equal((await del(blocked)).statusCode, 409);
   assert.equal(accountExists(bystander), true);
 });

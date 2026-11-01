@@ -124,7 +124,14 @@ export default function ListsPage({ initialLists }: { initialLists: List[] }) {
 
   async function deleteList(id: string) {
     if (!confirm("Delete this list and all its leads?")) return;
-    await fetch(`/api/lists/${id}`, { method: "DELETE" });
+    // A refusal (live run) must not be reported as success or removed locally:
+    // the row still exists and the next refresh would resurrect it.
+    const res = await fetch(`/api/lists/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      toast.error(err?.error ?? "Could not delete this list");
+      return;
+    }
     toast.success("List deleted");
     setLists((prev) => prev.filter((l) => l.id !== id));
   }

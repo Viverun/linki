@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { escapeLike, idListError, pageParams } from "@/lib/api-validate";
+import { activeRunCountForTargets } from "@/lib/delete-guards";
 import { profileVanityOf } from "@/lib/linkedin-url";
 import { randomUUID } from "crypto";
 import type { ActiveFilter, FilterOp } from "@/components/ui/FilterBar";
@@ -158,6 +159,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     const listErr = idListError(target_ids, "target_ids");
     if (listErr) return res.status(400).json({ error: listErr });
     const ids = target_ids ?? []; // validated above; ?? [] is for the type checker
+    // All-or-nothing: if ANY selected contact belongs to a live run, refuse the
+    // whole batch rather than deleting the idle ones and silently skipping the
+    // rest. The UI reports the count and the operator decides.
+    const active = activeRunCountForTargets(db, ids);
+    if (active > 0) {
+      return res.status(409).json({
+        error: `${active} active run${active === 1 ? "" : "s"} still include one or more of these contacts. Stop or delete ${active === 1 ? "it" : "them"} first.`,
+        active_runs: active,
+      });
+    }
     const placeholders = ids.map(() => "?").join(",");
     // run_profiles/logs have no ON DELETE CASCADE — clear them first so the FK
     // constraint doesn't block the delete. run_profile_tracks cascade off run_profiles.

@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { getDb } from "@/lib/db";
 import { encryptSecret } from "@/lib/crypto";
 import { methodNotAllowed } from "@/lib/api-validate";
+import { activeRunCountForEmailAccount } from "@/lib/delete-guards";
 
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
@@ -75,9 +76,28 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === "DELETE") {
-    const { changes } = db.prepare("DELETE FROM email_accounts WHERE id = ?").run(id);
-    if (changes === 0) return res.status(404).json({ error: "not found" });
-    return res.json({ ok: true });
+    const active = activeRunCountForEmailAccount(db, id);
+    if (active > 0) {
+      return res.status(409).json({
+        error: `This email account is used by ${active} active run${active === 1 ? "" : "s"}. Stop ${active === 1 ? "it" : "them"} first.`,
+        active_runs: active,
+      });
+    }
+    try {
+      const { changes } = db.prepare("DELETE FROM email_accounts WHERE id = ?").run(id);
+      if (changes === 0) return res.status(404).json({ error: "not found" });
+      return res.json({ ok: true });
+    } catch (err) {
+      // runs.email_account_id references this table, so history keeps the
+      // account alive. Say that instead of returning a 500 the UI cannot read.
+      if ((err as { code?: string }).code === "SQLITE_CONSTRAINT_FOREIGNKEY") {
+        return res.status(409).json({
+          error:
+            "This email account is referenced by run history. Delete those runs first, then delete the account.",
+        });
+      }
+      throw err;
+    }
   }
 
   methodNotAllowed(res, ["DELETE", "GET", "PUT"]);

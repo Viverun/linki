@@ -14,8 +14,18 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const listErr = idListError(target_ids, "target_ids");
   if (listErr) return res.status(400).json({ error: listErr });
 
-  const run = db.prepare("SELECT id FROM runs WHERE id = ?").get(runId);
+  const run = db.prepare("SELECT id, status FROM runs WHERE id = ?").get(runId) as
+    | { id: string; status: string }
+    | undefined;
   if (!run) return res.status(404).json({ error: "Run not found" });
+  // Removing a contact from a live run deletes the run_profile the executing
+  // step is about to write to. Same rule as deleting the run itself.
+  if (run.status === "running" || run.status === "paused") {
+    return res.status(409).json({
+      error: `Cannot remove contacts from a ${run.status} run — stop it first.`,
+      status: run.status,
+    });
+  }
 
   const placeholders = target_ids.map(() => "?").join(",");
   // Phase 1c: logs reference (run_id, target_id) with no cascade off

@@ -95,7 +95,12 @@ export default function CompaniesPage({ initialCompanies }: { initialCompanies: 
 
   async function deleteCompany(id: string) {
     if (!confirm("Delete this company? Contacts will be unlinked but not deleted.")) return;
-    await fetch(`/api/companies/${id}`, { method: "DELETE" });
+    const res = await fetch(`/api/companies/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      toast.error(err?.error ?? "Could not delete this company");
+      return;
+    }
     toast.success("Deleted");
     setCompanies((prev) => prev.filter((c) => c.id !== id));
   }

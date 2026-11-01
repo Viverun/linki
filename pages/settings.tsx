@@ -875,7 +875,14 @@ function EmailTab({ initialAccounts }: { initialAccounts: EmailAccount[] }) {
 
   async function deleteAccount(id: string) {
     if (!confirm("Delete this email account?")) return;
-    await fetch(`/api/email-accounts/${id}`, { method: "DELETE" });
+    const res = await fetch(`/api/email-accounts/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      // Refused while a run uses it, or while run history references it. Say
+      // which instead of claiming success and leaving the row in place.
+      const err = await res.json().catch(() => null);
+      toast.error(err?.error ?? "Could not delete this email account");
+      return;
+    }
     toast.success("Deleted");
     setAccounts((prev) => {
       const next = prev.filter((a) => a.id !== id);
