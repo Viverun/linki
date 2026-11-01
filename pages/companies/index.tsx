@@ -7,6 +7,8 @@ import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import { RiAddLine, RiDeleteBinLine, RiBuildingLine, RiGlobalLine } from "react-icons/ri";
 
+import { mutateFetch, readError } from "@/lib/ui-mutation";
+
 interface Company {
   id: string;
   name: string;
@@ -84,10 +86,10 @@ export default function CompaniesPage({ initialCompanies }: { initialCompanies: 
       notes: form.notes || null,
     };
     const res = editId
-      ? await fetch(`/api/companies/${editId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-      : await fetch("/api/companies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      ? await mutateFetch(`/api/companies/${editId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      : await mutateFetch("/api/companies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     setLoading(false);
-    if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
+    if (!res.ok) { toast.error((await readError(res)) ?? "Failed"); return; }
     toast.success(editId ? "Company updated" : "Company created");
     setShowModal(false);
     refresh();
@@ -95,7 +97,7 @@ export default function CompaniesPage({ initialCompanies }: { initialCompanies: 
 
   async function deleteCompany(id: string) {
     if (!confirm("Delete this company? Contacts will be unlinked but not deleted.")) return;
-    const res = await fetch(`/api/companies/${id}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/companies/${id}`, { method: "DELETE" });
     if (!res.ok) {
       const err = await res.json().catch(() => null);
       toast.error(err?.error ?? "Could not delete this company");

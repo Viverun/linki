@@ -31,6 +31,8 @@ import {
   RiArrowDownSLine,
 } from "react-icons/ri";
 
+import { mutateFetch, readError } from "@/lib/ui-mutation";
+
 interface WorkflowCard {
   id: string;
   name: string;
@@ -161,7 +163,7 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   async function createWorkflow(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    const res = await fetch("/api/workflows", {
+    const res = await mutateFetch("/api/workflows", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
@@ -176,7 +178,7 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
     // Deletion can now be refused while a run is live. Showing "Campaign
     // deleted" and removing the row on a 409 would be the same class of bug
     // already fixed once for account deletion in pages/settings.tsx.
-    const res = await fetch(`/api/workflows/${id}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/workflows/${id}`, { method: "DELETE" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       toast.error(err.error ?? "Could not delete this campaign");
@@ -189,7 +191,7 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   }
 
   async function duplicateWorkflow(id: string, name: string) {
-    const res = await fetch(`/api/workflows/${id}/duplicate`, { method: "POST" });
+    const res = await mutateFetch(`/api/workflows/${id}/duplicate`, { method: "POST" });
     if (!res.ok) { toast.error("Failed to duplicate"); return; }
     const { id: newId } = await res.json();
     toast.success(`"${name} (copy)" created`);
@@ -197,11 +199,15 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   }
 
   async function toggleArchive(id: string, archive: boolean) {
-    await fetch(`/api/workflows/${id}`, {
+    const res = await mutateFetch(`/api/workflows/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ is_archived: archive }),
     });
+    if (!res.ok) {
+      toast.error((await readError(res)) ?? (archive ? "Could not archive this campaign" : "Could not restore this campaign"));
+      return;
+    }
     setWorkflows((prev) => prev.map((w) => w.id === id ? { ...w, is_archived: archive ? 1 : 0 } : w));
     toast.success(archive ? "Campaign archived" : "Campaign restored");
   }
@@ -209,7 +215,7 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   async function pauseRun(workflowId: string, runId: string) {
     // The route now refuses illegal transitions, so a 4xx must not be rendered
     // as a successful pause with an optimistic row update.
-    const res = await fetch(`/api/runs/${runId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "paused" }) });
+    const res = await mutateFetch(`/api/runs/${runId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "paused" }) });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       toast.error(err.error ?? "Could not pause this campaign");
@@ -220,7 +226,11 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   }
 
   async function resumeRun(workflowId: string, runId: string) {
-    await fetch(`/api/runs/${runId}/start`, { method: "POST" });
+    const res = await mutateFetch(`/api/runs/${runId}/start`, { method: "POST" });
+    if (!res.ok) {
+      toast.error((await readError(res)) ?? "Could not resume this campaign");
+      return;
+    }
     toast.success("Resumed");
     setWorkflows((prev) => prev.map((w) => w.id === workflowId ? { ...w, active_status: "running" } : w));
   }

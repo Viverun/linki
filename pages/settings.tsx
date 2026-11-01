@@ -15,6 +15,8 @@ import {
 } from "react-icons/ri";
 import { ALL_TOUR_PAGES, TOUR_PAGE_LABELS, replayPageTour, type TourPage } from "@/lib/tour";
 
+import { mutateFetch, readError } from "@/lib/ui-mutation";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Tab = "linkedin" | "email" | "templates" | "integrations" | "general";
@@ -270,7 +272,7 @@ function LinkedInTab({ initialAccounts }: { initialAccounts: LiAccount[] }) {
         : loginStage === "approve"
           ? { step: "await" }
           : { step: "verify", code: loginForm.code };
-    const res = await fetch(`/api/accounts/${authModal}/login`, {
+    const res = await mutateFetch(`/api/accounts/${authModal}/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -329,18 +331,18 @@ function LinkedInTab({ initialAccounts }: { initialAccounts: LiAccount[] }) {
     e.preventDefault();
     setLoading(true);
     const res = editingAccount
-      ? await fetch(`/api/accounts/${editingAccount.id}`, {
+      ? await mutateFetch(`/api/accounts/${editingAccount.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(form),
         })
-      : await fetch("/api/accounts", {
+      : await mutateFetch("/api/accounts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(form),
         });
     setLoading(false);
-    if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
+    if (!res.ok) { toast.error((await readError(res)) ?? "Failed"); return; }
     toast.success(editingAccount ? "Account updated" : "Account created");
     setShowModal(false);
     setEditingAccount(null);
@@ -350,7 +352,7 @@ function LinkedInTab({ initialAccounts }: { initialAccounts: LiAccount[] }) {
 
   async function deleteAccount(id: string) {
     if (!confirm("Delete this LinkedIn account?")) return;
-    const res = await fetch(`/api/accounts/${id}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/accounts/${id}`, { method: "DELETE" });
     if (!res.ok) {
       // A failed DELETE must not be reported as success: the row is still in
       // the DB, so dropping it from local state only hides it until a refresh.
@@ -367,13 +369,13 @@ function LinkedInTab({ initialAccounts }: { initialAccounts: LiAccount[] }) {
     e.preventDefault();
     if (!authModal) return;
     setAuthLoading(true);
-    const res = await fetch(`/api/accounts/${authModal}/authenticate`, {
+    const res = await mutateFetch(`/api/accounts/${authModal}/authenticate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(authForm),
     });
     setAuthLoading(false);
-    if (!res.ok) { toast.error((await res.json()).error ?? "Authentication failed"); return; }
+    if (!res.ok) { toast.error((await readError(res)) ?? "Authentication failed"); return; }
     toast.success("Account authenticated");
     closeAuthModal();
     refresh();
@@ -831,14 +833,14 @@ function EmailTab({ initialAccounts }: { initialAccounts: EmailAccount[] }) {
 
     let res: Response;
     if (editingAccount) {
-      res = await fetch(`/api/email-accounts/${editingAccount.id}`, {
+      res = await mutateFetch(`/api/email-accounts/${editingAccount.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
     } else {
       if (!form.password) { toast.error("SMTP password is required"); setLoading(false); return; }
-      res = await fetch("/api/email-accounts", {
+      res = await mutateFetch("/api/email-accounts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...body, password: form.password }),
@@ -846,7 +848,7 @@ function EmailTab({ initialAccounts }: { initialAccounts: EmailAccount[] }) {
     }
 
     setLoading(false);
-    if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
+    if (!res.ok) { toast.error((await readError(res)) ?? "Failed"); return; }
     toast.success(editingAccount ? "Account updated" : "Account added");
     setShowModal(false);
     setEditingAccount(null);
@@ -855,7 +857,7 @@ function EmailTab({ initialAccounts }: { initialAccounts: EmailAccount[] }) {
 
   async function testConnection(id: string) {
     setTestingId(id);
-    const res = await fetch(`/api/email-accounts/${id}/test`, { method: "POST" });
+    const res = await mutateFetch(`/api/email-accounts/${id}/test`, { method: "POST" });
     setTestingId(null);
     const data = await res.json();
     if (data.smtp?.ok === false) {
@@ -875,7 +877,7 @@ function EmailTab({ initialAccounts }: { initialAccounts: EmailAccount[] }) {
 
   async function deleteAccount(id: string) {
     if (!confirm("Delete this email account?")) return;
-    const res = await fetch(`/api/email-accounts/${id}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/email-accounts/${id}`, { method: "DELETE" });
     if (!res.ok) {
       // Refused while a run uses it, or while run history references it. Say
       // which instead of claiming success and leaving the row in place.
@@ -1328,7 +1330,11 @@ function TemplatesTab({ initialTemplates }: { initialTemplates: Template[] }) {
 
   async function del(id: number) {
     if (!confirm("Delete this template?")) return;
-    await fetch(`/api/templates/${id}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/templates/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      toast.error((await readError(res)) ?? "Could not delete this template");
+      return;
+    }
     toast.success("Deleted");
     setTemplates((prev) => prev.filter((t) => t.id !== id));
   }
@@ -1486,7 +1492,7 @@ function IntegrationsTab({ hasPremium }: { hasPremium: boolean }) {
     e.preventDefault();
     if (!apiKeyInput.trim()) return;
     setSaving(true);
-    const res = await fetch("/api/integrations", {
+    const res = await mutateFetch("/api/integrations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, api_key: apiKeyInput.trim() }),
@@ -1501,7 +1507,13 @@ function IntegrationsTab({ hasPremium }: { hasPremium: boolean }) {
   }
 
   async function remove(key: string) {
-    await fetch(`/api/integrations?key=${key}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/integrations?key=${key}`, { method: "DELETE" });
+    if (!res.ok) {
+      // Clearing the local entry on a refusal would hide a key that is still
+      // configured server-side.
+      toast.error((await readError(res)) ?? "Could not remove this integration");
+      return;
+    }
     setConfiguredMap((m) => ({ ...m, [key]: { masked: null, configured: false } }));
     toast.success("Integration removed");
   }
@@ -1701,26 +1713,26 @@ function GeneralTab({ hasPremium }: { hasPremium: boolean }) {
   async function saveImportCap(e: React.FormEvent) {
     e.preventDefault();
     setCapSaving(true);
-    const res = await fetch("/api/settings/import-cap", {
+    const res = await mutateFetch("/api/settings/import-cap", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cap: Number(importCap) }),
     });
     setCapSaving(false);
-    if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
+    if (!res.ok) { toast.error((await readError(res)) ?? "Failed"); return; }
     toast.success("Daily import limit saved");
   }
 
   async function saveOooThreshold(e: React.FormEvent) {
     e.preventDefault();
     setThrSaving(true);
-    const res = await fetch("/api/settings/reply-policy", {
+    const res = await mutateFetch("/api/settings/reply-policy", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ooo_threshold: Number(oooThreshold) }),
     });
     setThrSaving(false);
-    if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
+    if (!res.ok) { toast.error((await readError(res)) ?? "Failed"); return; }
     toast.success("Reply policy saved");
   }
 
@@ -1728,13 +1740,13 @@ function GeneralTab({ hasPremium }: { hasPremium: boolean }) {
     e.preventDefault();
     if (form.newPassword !== form.confirmPassword) { toast.error("Passwords don't match"); return; }
     setLoading(true);
-    const res = await fetch("/api/auth/change-password", {
+    const res = await mutateFetch("/api/auth/change-password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ currentPassword: form.currentPassword, newPassword: form.newPassword }),
     });
     setLoading(false);
-    if (!res.ok) { toast.error((await res.json()).error ?? "Failed"); return; }
+    if (!res.ok) { toast.error((await readError(res)) ?? "Failed"); return; }
     toast.success("Password changed. All sessions revoked; sign in again.");
     setForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
     await signOut({ callbackUrl: "/login" });

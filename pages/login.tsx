@@ -5,6 +5,8 @@ import { useRouter } from "next/router";
 import { useState } from "react";
 import { RiLockPasswordLine, RiMailLine, RiKeyLine } from "react-icons/ri";
 
+import { mutateFetch } from "@/lib/ui-mutation";
+
 type Mode = "signin" | "signup";
 
 export default function LoginPage() {
@@ -42,7 +44,7 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
 
-    const res = await fetch("/api/auth/signup", {
+    const res = await mutateFetch("/api/auth/signup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password, inviteCode }),

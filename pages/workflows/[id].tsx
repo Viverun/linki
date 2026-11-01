@@ -35,6 +35,8 @@ import {
   RiErrorWarningLine,
 } from "react-icons/ri";
 
+import { mutateFetch, readError } from "@/lib/ui-mutation";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type StepType = "visit" | "connect" | "message" | "sales_inmail" | "delay" | "email";
@@ -675,7 +677,7 @@ function Wizard({
     setPreviewLoading(true);
     setPreviewResult(null);
     try {
-      const r = await fetch("/api/agent/preview", {
+      const r = await mutateFetch("/api/agent/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -722,7 +724,7 @@ function Wizard({
     const trimmed = nameValue.trim();
     if (!trimmed || trimmed === workflowName) { setEditingName(false); return; }
     setNameSaving(true);
-    const res = await fetch(`/api/workflows/${workflowId}`, {
+    const res = await mutateFetch(`/api/workflows/${workflowId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: trimmed }),
@@ -788,7 +790,7 @@ function Wizard({
   async function saveStepsToDB() {
     setSaving(true);
     // Save campaign prompt alongside steps
-    await fetch(`/api/workflows/${workflowId}`, {
+    await mutateFetch(`/api/workflows/${workflowId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: campaignPrompt }),
@@ -840,7 +842,7 @@ function Wizard({
       if (isMessage) messagePosition++;
     }
 
-    const stepsRes = await fetch(`/api/workflows/${workflowId}/steps`, {
+    const stepsRes = await mutateFetch(`/api/workflows/${workflowId}/steps`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -861,7 +863,7 @@ function Wizard({
     if (!activeRunId) { toast.error("No active run"); return; }
     if (selectedTargetIds.size === 0) { toast.error("Select at least one prospect"); return; }
     setLaunching(true);
-    const res = await fetch(`/api/runs/${activeRunId}/enroll`, {
+    const res = await mutateFetch(`/api/runs/${activeRunId}/enroll`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_ids: Array.from(selectedTargetIds) }),
@@ -900,19 +902,28 @@ function Wizard({
       email_account_ids: Array.from(emailAccountIds),
     };
     if (prospectMode === "manual") body.target_ids = Array.from(selectedTargetIds);
-    const runRes = await fetch("/api/runs", {
+    const runRes = await mutateFetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     if (!runRes.ok) {
       setLaunching(false);
-      const err = await runRes.json();
-      toast.error(err.message ?? "Failed to start");
+      // A 5xx here is an HTML page, so parsing is guarded: the branch must
+      // report *something* rather than throwing before the toast.
+      toast.error((await readError(runRes)) ?? "Failed to start");
       return;
     }
     const { id: runId } = await runRes.json();
-    await fetch(`/api/runs/${runId}/start`, { method: "POST" });
+    // The run exists but starting it can still be refused (an active run on the
+    // same campaign, a dead session). "Campaign launched!" on that refusal is
+    // the same false success, one step later.
+    const started = await mutateFetch(`/api/runs/${runId}/start`, { method: "POST" });
+    if (!started.ok) {
+      setLaunching(false);
+      toast.error((await readError(started)) ?? "The campaign was created but could not start");
+      return;
+    }
     setLaunching(false);
     toast.success("Campaign launched!");
     onLaunched();
@@ -928,7 +939,7 @@ function Wizard({
     const ws = testEmailIdx !== null ? wizardSteps[testEmailIdx] : null;
     if (!ws || !testEmailAccountId || !testEmailTo) return;
     setTestEmailSending(true);
-    const res = await fetch(`/api/email-accounts/${testEmailAccountId}/send-test`, {
+    const res = await mutateFetch(`/api/email-accounts/${testEmailAccountId}/send-test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -947,8 +958,7 @@ function Wizard({
     });
     setTestEmailSending(false);
     if (!res.ok) {
-      const err = await res.json();
-      toast.error(`Failed to send: ${err.error}`);
+      toast.error(`Failed to send: ${(await readError(res)) ?? "the server refused the request"}`);
     } else {
       toast.success(`Test email sent to ${testEmailTo}`);
       setTestEmailIdx(null);
@@ -2773,7 +2783,7 @@ export default function WorkflowDetailPage({
 
   async function pauseRun() {
     if (!activeRun) return;
-    const res = await fetch(`/api/runs/${activeRun.id}`, {
+    const res = await mutateFetch(`/api/runs/${activeRun.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "paused" }),
@@ -2789,14 +2799,18 @@ export default function WorkflowDetailPage({
 
   async function resumeRun() {
     if (!activeRun) return;
-    await fetch(`/api/runs/${activeRun.id}/start`, { method: "POST" });
+    const res = await mutateFetch(`/api/runs/${activeRun.id}/start`, { method: "POST" });
+    if (!res.ok) {
+      toast.error((await readError(res)) ?? "Could not resume this campaign");
+      return;
+    }
     toast.success("Resumed");
     refreshStats();
   }
 
   async function stopRun() {
     if (!activeRun) return;
-    const res = await fetch(`/api/runs/${activeRun.id}`, {
+    const res = await mutateFetch(`/api/runs/${activeRun.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "completed" }),
@@ -2813,7 +2827,7 @@ export default function WorkflowDetailPage({
   }
 
   async function unenrollProspect(runId: string, targetId: string) {
-    const res = await fetch(`/api/runs/${runId}/unenroll`, {
+    const res = await mutateFetch(`/api/runs/${runId}/unenroll`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_id: targetId }),
@@ -2829,7 +2843,7 @@ export default function WorkflowDetailPage({
   }
 
   async function retryProspect(runId: string, targetId: string, resolve?: "resend" | "mark_delivered") {
-    const res = await fetch(`/api/runs/${runId}/retry`, {
+    const res = await mutateFetch(`/api/runs/${runId}/retry`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(resolve ? { target_ids: [targetId], resolve } : { target_ids: [targetId] }),
@@ -2863,7 +2877,7 @@ export default function WorkflowDetailPage({
   }
 
   async function removeProspect(runId: string, targetId: string) {
-    const res = await fetch(`/api/runs/${runId}/remove`, {
+    const res = await mutateFetch(`/api/runs/${runId}/remove`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_ids: [targetId] }),
@@ -2893,7 +2907,7 @@ export default function WorkflowDetailPage({
       results = await Promise.all(
         Object.entries(grouped).flatMap(([runId, ids]) =>
           ids.map((tid) =>
-            fetch(`/api/runs/${runId}/unenroll`, {
+            mutateFetch(`/api/runs/${runId}/unenroll`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ target_id: tid }),
@@ -2904,7 +2918,7 @@ export default function WorkflowDetailPage({
     } else {
       results = await Promise.all(
         Object.entries(grouped).map(([runId, ids]) =>
-          fetch(`/api/runs/${runId}/${action}`, {
+          mutateFetch(`/api/runs/${runId}/${action}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ target_ids: ids }),

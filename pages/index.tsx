@@ -3,6 +3,8 @@ import { useEffect, useState, useRef } from "react";
 import { FiUserPlus, FiMessageSquare, FiEye, FiRepeat, FiUsers, FiRefreshCw } from "react-icons/fi";
 import { RiMailSendLine, RiReplyLine, RiRobot2Line, RiLinkedinBoxLine, RiFilterLine } from "react-icons/ri";
 
+import { mutateFetch } from "@/lib/ui-mutation";
+
 interface DashboardStats {
   totals: {
     total_targets: number;
@@ -303,7 +305,7 @@ function LinkedInCard({
     if (!accountId) return;
     setSyncing(true); setSyncError(null);
     try {
-      const res = await fetch(`/api/accounts/${accountId}/li-stats`, { method: "POST" });
+      const res = await mutateFetch(`/api/accounts/${accountId}/li-stats`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Sync failed");
       setLiStats(data);

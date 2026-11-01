@@ -7,6 +7,8 @@ import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import { RiAddLine, RiDeleteBinLine, RiCloseLine, RiCalendarLine } from "react-icons/ri";
 
+import { mutateFetch, readError } from "@/lib/ui-mutation";
+
 interface List {
   id: string;
   name: string;
@@ -93,7 +95,14 @@ export default function ListsPage({ initialLists }: { initialLists: List[] }) {
 
   async function cancelImport(id: string) {
     if (!confirm("Cancel this import? A running batch stops at its next page.")) return;
-    await fetch(`/api/imports/${id}/cancel`, { method: "POST" });
+    // A cancel can be refused (already finished, already cancelled). Reporting
+    // success on a refusal would tell the operator an import stopped when it is
+    // still writing rows.
+    const res = await mutateFetch(`/api/imports/${id}/cancel`, { method: "POST" });
+    if (!res.ok) {
+      toast.error((await readError(res)) ?? "Could not cancel this import");
+      return;
+    }
     toast.success("Import canceled");
   }
 
@@ -109,7 +118,7 @@ export default function ListsPage({ initialLists }: { initialLists: List[] }) {
   async function createList(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    const res = await fetch("/api/lists", {
+    const res = await mutateFetch("/api/lists", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
@@ -126,7 +135,7 @@ export default function ListsPage({ initialLists }: { initialLists: List[] }) {
     if (!confirm("Delete this list and all its leads?")) return;
     // A refusal (live run) must not be reported as success or removed locally:
     // the row still exists and the next refresh would resurrect it.
-    const res = await fetch(`/api/lists/${id}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/lists/${id}`, { method: "DELETE" });
     if (!res.ok) {
       const err = await res.json().catch(() => null);
       toast.error(err?.error ?? "Could not delete this list");

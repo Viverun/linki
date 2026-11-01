@@ -14,6 +14,8 @@ import {
   RiAddLine, RiCloseCircleLine, RiPhoneLine,
 } from "react-icons/ri";
 
+import { mutateFetch } from "@/lib/ui-mutation";
+
 interface Company {
   id: string;
   name: string;
@@ -193,7 +195,7 @@ function TodoDetailModal({ todo, onClose, onSave }: {
   async function save() {
     if (!title.trim()) return;
     setSaving(true);
-    const res = await fetch(`/api/todos/${todo.id}`, {
+    const res = await mutateFetch(`/api/todos/${todo.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: title.trim(), description: description.trim() || null, due_date: dueDate || null }),
@@ -280,7 +282,7 @@ function LogDetailModal({ log, onClose, onSave }: {
   async function save() {
     if (!body.trim()) return;
     setSaving(true);
-    const res = await fetch(`/api/activity-logs?id=${log.id}`, {
+    const res = await mutateFetch(`/api/activity-logs?id=${log.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type, body: body.trim() }),
@@ -372,7 +374,7 @@ function TodoModal({ targetId, onClose, onSave }: {
   async function save() {
     if (!title.trim()) return;
     setSaving(true);
-    const res = await fetch("/api/todos", {
+    const res = await mutateFetch("/api/todos", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_id: targetId, title: title.trim(), description: description.trim() || undefined, due_date: dueDate || undefined }),
@@ -459,7 +461,7 @@ function LogModal({ targetId, onClose, onSave }: {
   async function save() {
     if (!body.trim()) return;
     setSaving(true);
-    const res = await fetch("/api/activity-logs", {
+    const res = await mutateFetch("/api/activity-logs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_id: targetId, type, body: body.trim() }),
@@ -592,7 +594,7 @@ export default function ContactDetailPage({
   async function addToList() {
     if (!addListId) return;
     setAddListLoading(true);
-    const res = await fetch(`/api/lists/${addListId}/add-members`, {
+    const res = await mutateFetch(`/api/lists/${addListId}/add-members`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contact_ids: [target.id] }),
@@ -609,7 +611,7 @@ export default function ContactDetailPage({
 
   async function removeFromList(listId: string) {
     setRemovingListId(listId);
-    const res = await fetch(`/api/lists/${listId}/remove-members`, {
+    const res = await mutateFetch(`/api/lists/${listId}/remove-members`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contact_ids: [target.id], dry_run: false }),
@@ -639,7 +641,7 @@ export default function ContactDetailPage({
 
   async function toggleTodo(todo: Todo) {
     const next = todo.status === "open" ? "done" : "open";
-    const res = await fetch(`/api/todos/${todo.id}`, {
+    const res = await mutateFetch(`/api/todos/${todo.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: next }),
@@ -649,20 +651,20 @@ export default function ContactDetailPage({
   }
 
   async function deleteTodo(id: string) {
-    const res = await fetch(`/api/todos/${id}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/todos/${id}`, { method: "DELETE" });
     if (!res.ok) { toast.error("Failed to delete"); return; }
     setTodos((prev) => prev.filter((t) => t.id !== id));
   }
 
   async function deleteLog(id: string) {
-    const res = await fetch(`/api/activity-logs?id=${id}`, { method: "DELETE" });
+    const res = await mutateFetch(`/api/activity-logs?id=${id}`, { method: "DELETE" });
     if (!res.ok) { toast.error("Failed to delete"); return; }
     setActivityLogs((prev) => prev.filter((l) => l.id !== id));
   }
 
   async function saveEmail() {
     const trimmed = emailDraft.trim();
-    const res = await fetch(`/api/targets/${target.id}`, {
+    const res = await mutateFetch(`/api/targets/${target.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: trimmed }),
@@ -675,7 +677,7 @@ export default function ContactDetailPage({
 
   async function savePhone() {
     const trimmed = phoneDraft.trim();
-    const res = await fetch(`/api/targets/${target.id}`, {
+    const res = await mutateFetch(`/api/targets/${target.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone: trimmed }),
@@ -687,7 +689,7 @@ export default function ContactDetailPage({
   }
 
   async function saveNotes() {
-    const res = await fetch(`/api/targets/${target.id}`, {
+    const res = await mutateFetch(`/api/targets/${target.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ notes: notesDraft }),

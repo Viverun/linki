@@ -15,6 +15,8 @@ import {
 import type { InboxReply } from "./api/inbox/index";
 import type { EmailMessage } from "./api/inbox/thread";
 
+import { mutateFetch } from "@/lib/ui-mutation";
+
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diff / 60000);
@@ -121,7 +123,7 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
     if (!reply.reply_id) return;
     setActing("reclassify");
     try {
-      const r = await fetch(`/api/inbox/${reply.reply_id}/reclassify`, { method: "POST" });
+      const r = await mutateFetch(`/api/inbox/${reply.reply_id}/reclassify`, { method: "POST" });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error ?? "Reclassify failed");
       toast.success("Reclassified");
@@ -138,7 +140,7 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
     if (!reply.reply_id) return;
     setActing("cancel");
     try {
-      const r = await fetch(`/api/inbox/${reply.reply_id}/cancel-followup`, { method: "POST" });
+      const r = await mutateFetch(`/api/inbox/${reply.reply_id}/cancel-followup`, { method: "POST" });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error ?? "Cancel failed");
       toast.success("Follow-up cancelled");
@@ -155,7 +157,7 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
     if (!reply.reply_id) return;
     setActing("resume");
     try {
-      const r = await fetch(`/api/inbox/${reply.reply_id}/resume-followup`, { method: "POST" });
+      const r = await mutateFetch(`/api/inbox/${reply.reply_id}/resume-followup`, { method: "POST" });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error ?? "Resume failed");
       toast.success(`Follow-ups resumed (${d.rearmed} track${d.rearmed === 1 ? "" : "s"})`);
@@ -196,7 +198,7 @@ function ReplyModal({ reply, onClose, onActionDone, hasPremium }: ReplyModalProp
     if (!replyText.trim() || !reply.email || !reply.email_account_id) return;
     setSending(true);
     try {
-      const r = await fetch("/api/inbox/reply", {
+      const r = await mutateFetch("/api/inbox/reply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -412,7 +414,7 @@ export default function InboxPage() {
   async function handleBackfill() {
     setBackfilling(true);
     try {
-      const r = await fetch("/api/inbox/backfill", { method: "POST" });
+      const r = await mutateFetch("/api/inbox/backfill", { method: "POST" });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error ?? "Backfill failed");
       toast.success(
@@ -431,7 +433,7 @@ export default function InboxPage() {
   async function handleReclassifyAll() {
     setReclassifyingAll(true);
     try {
-      const r = await fetch("/api/inbox/reclassify-all", { method: "POST" });
+      const r = await mutateFetch("/api/inbox/reclassify-all", { method: "POST" });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error ?? "Reclassify failed");
       toast.success(

@@ -13,6 +13,8 @@ import {
 } from "react-icons/ri";
 import FilterBar, { ActiveFilter, filtersToParams } from "@/components/ui/FilterBar";
 
+import { mutateFetch, readError } from "@/lib/ui-mutation";
+
 const PAGE_SIZE = 50;
 
 interface Contact {
@@ -173,7 +175,7 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
   async function addSelectedToList() {
     if (!addToListId || selected.size === 0) return;
     setAddToListLoading(true);
-    const res = await fetch(`/api/lists/${addToListId}/add-members`, {
+    const res = await mutateFetch(`/api/lists/${addToListId}/add-members`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contact_ids: [...selected] }),
@@ -195,7 +197,7 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
   async function deleteSelected() {
     if (selected.size === 0) return;
     setDeleteLoading(true);
-    const res = await fetch("/api/targets", {
+    const res = await mutateFetch("/api/targets", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_ids: [...selected] }),
@@ -212,15 +214,14 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
   async function createContact(e: React.FormEvent) {
     e.preventDefault();
     setNewContactLoading(true);
-    const res = await fetch("/api/targets", {
+    const res = await mutateFetch("/api/targets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(newContactForm),
     });
     setNewContactLoading(false);
     if (!res.ok) {
-      const data = await res.json();
-      toast.error(data.error ?? "Failed to create contact");
+      toast.error((await readError(res)) ?? "Failed to create contact");
       return;
     }
     toast.success("Contact created");

@@ -15,6 +15,8 @@ import {
 } from "react-icons/ri";
 import FilterBar, { ActiveFilter, applyFiltersClient } from "@/components/ui/FilterBar";
 
+import { mutateFetch } from "@/lib/ui-mutation";
+
 const PAGE_SIZE = 25;
 
 interface Target {
@@ -246,7 +248,7 @@ export default function ListDetailPage({
 
   async function removeFromList() {
     if (effectiveSelectedCount === 0) return;
-    const res = await fetch(`/api/lists/${initialList.id}/targets`, {
+    const res = await mutateFetch(`/api/lists/${initialList.id}/targets`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_ids: effectiveSelectedIds }),
@@ -263,7 +265,7 @@ export default function ListDetailPage({
 
   async function moveToList() {
     if (!destListId || effectiveSelectedCount === 0) return;
-    const res = await fetch(`/api/lists/${initialList.id}/move-targets`, {
+    const res = await mutateFetch(`/api/lists/${initialList.id}/move-targets`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_ids: effectiveSelectedIds, destination_list_id: destListId }),
@@ -325,7 +327,7 @@ export default function ListDetailPage({
     if (!importForm.account_id) { toast.error("Select an account"); return; }
     setImporting(true);
     setImportJob(null);
-    const res = await fetch(`/api/lists/${initialList.id}/import`, {
+    const res = await mutateFetch(`/api/lists/${initialList.id}/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -360,7 +362,7 @@ export default function ListDetailPage({
     setCsvResult(null);
     try {
       const csv = await csvFile.text();
-      const res = await fetch(`/api/lists/${initialList.id}/import-csv`, {
+      const res = await mutateFetch(`/api/lists/${initialList.id}/import-csv`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ csv }),
@@ -386,7 +388,7 @@ export default function ListDetailPage({
     e.preventDefault();
     if (!syncAccountId) { toast.error("Select an account"); return; }
     setSyncing(true);
-    const res = await fetch(`/api/lists/${initialList.id}/sync-status`, {
+    const res = await mutateFetch(`/api/lists/${initialList.id}/sync-status`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account_id: syncAccountId }),
@@ -405,7 +407,7 @@ export default function ListDetailPage({
     setShowApolloConfirm(false);
     setEnriching(true);
     const body = effectiveSelectedCount > 0 ? { target_ids: effectiveSelectedIds } : {};
-    const res = await fetch(`/api/lists/${initialList.id}/apollo-enrich`, {
+    const res = await mutateFetch(`/api/lists/${initialList.id}/apollo-enrich`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
