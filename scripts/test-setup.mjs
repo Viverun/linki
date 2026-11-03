@@ -8,6 +8,7 @@ import { register } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testRunScope } from "./test-env-scope.mjs";
 
 register("./test-resolve-hooks.mjs", import.meta.url);
 
@@ -47,15 +48,11 @@ register("./test-resolve-hooks.mjs", import.meta.url);
  * a live retest at a temp database would be worse than the leak being fixed.
  * The three signals are the runner's own child marker, `--test` in execArgv
  * (covers `--test-isolation=none`, where no child marker exists), and an
- * explicit marker for harnesses that invoke files directly.
+ * explicit marker for harnesses that invoke files directly. The decision itself
+ * lives in `test-env-scope.mjs` so it can be tested on Node 22, which has no
+ * `--test-isolation=none` flag to spawn.
  */
-const scope = process.env.NODE_TEST_CONTEXT !== undefined
-  ? "runner-child"
-  : process.execArgv.some((arg) => arg === "--test" || arg.startsWith("--test="))
-    ? "execargv"
-    : process.env.LINKI_HERMETIC_TEST_ENV === "1"
-      ? "marker"
-      : null;
+const scope = testRunScope(process.env, process.execArgv);
 
 if (scope !== null) {
   // Which signal matched, recorded so a failure says "the harness stopped

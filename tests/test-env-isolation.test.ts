@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { testRunScope } from "../scripts/test-env-scope.mjs";
 
 /**
  * PR-16 (C0 / C4) — the suite must be indifferent to the environment it inherits.
@@ -86,7 +87,7 @@ interface Run {
  */
 function probe(
   mode: "env" | "backup",
-  opts: { sentinels: Sentinels; signal: "runner-child" | "execargv" | "marker" | null }
+  opts: { sentinels: Sentinels; signal: "runner-child" | "marker" | null }
 ): Run {
   const env: NodeJS.ProcessEnv = { ...process.env };
 
@@ -108,8 +109,7 @@ function probe(
   const args: string[] = ["--import", SETUP];
   if (opts.signal === "runner-child") env.NODE_TEST_CONTEXT = "child-v8";
   if (opts.signal === "marker") env.LINKI_HERMETIC_TEST_ENV = "1";
-  if (opts.signal === "execargv") args.push("--test", "--test-isolation=none", PROBE);
-  else args.push(PROBE);
+  args.push(PROBE);
   args.push(mode);
 
   const r = spawnSync(process.execPath, args, { cwd: REPO, env, encoding: "utf8" });
@@ -207,16 +207,29 @@ test("the explicit marker sanitises when no runner signal is present", () => {
   assert.equal(r.report.env.ALERT_WEBHOOK_URL, null);
 });
 
-test("--test with isolation disabled still sanitises", () => {
-  // `--test-isolation=none` runs files in the runner's own process, where the
-  // child marker does not exist. Without this branch the suite would silently
-  // become non-hermetic for anyone using it.
-  const s = sentinels();
+// ─── the decision itself ─────────────────────────────────────────────────────
+//
+// Unit-tested rather than spawned: the gate runs Node 22.23, which has no
+// `--test-isolation=none`, so an end-to-end assertion of that branch fails there
+// with "bad option" while passing on Node 24 — a test that measures the Node
+// version instead of the decision. The decision is a pure function so both
+// branches can be checked wherever the suite runs; the three spawn tests above
+// cover the branches Node 22 can actually reach.
 
-  const r = probe("env", { sentinels: s, signal: "execargv" });
+test("every signal a test run can arrive with is recognised", () => {
+  assert.equal(testRunScope({ NODE_TEST_CONTEXT: "child-v8" }, []), "runner-child");
+  assert.equal(
+    testRunScope({}, ["--test", "--test-isolation=none"]),
+    "execargv",
+    "isolation disabled runs tests in the runner's own process, with no child marker"
+  );
+  assert.equal(testRunScope({ LINKI_HERMETIC_TEST_ENV: "1" }, []), "marker");
+});
 
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.report.scope, "execargv");
-  assert.equal(r.report.env.BACKUP_OFFSITE_DIR, null);
-  assert.equal(r.report.env.ALERT_WEBHOOK_URL, null);
+test("an ordinary process is not mistaken for a test run", () => {
+  // The live retest and restore-drill tools import the same bootstrap and must
+  // keep the operator's real database and backup paths.
+  assert.equal(testRunScope({}, []), null);
+  assert.equal(testRunScope({ LINKI_HERMETIC_TEST_ENV: "0" }, []), null, "only an explicit 1 opts in");
+  assert.equal(testRunScope({}, ["--test-reporter=tap"]), null, "a similarly-named flag is not a signal");
 });
