@@ -1474,13 +1474,20 @@ fixture just seeded, and four failures read like migration bugs. `childEnv()` in
 `tests/support/` drops the markers, which is an accurate description of such a
 child (`node scripts/foo.ts`-shaped) rather than an escape hatch.
 
-**Evidence:** `tests/test-env-isolation.test.ts` (5), driving the real
+**Evidence:** `tests/test-env-isolation.test.ts` (6), driving the real
 `createBackup` from a child process and asserting by listing the sentinel
 directories — empty means nothing escaped, which is a statement about the shipping
 code, not a stub. Mutation-checked three ways (pre-fix bootstrap; `BACKUP_OFFSITE_DIR`
 left in place; sanitise unconditionally), each caught by its intended test, each
 restore verified byte-identical. End to end: 744/744 with the sentinels exported,
 sentinel directories empty, zero webhook requests.
+
+**First gate run failed, in the test.** `41673776406` returned 717 pass / 1 fail:
+the isolation suite spawned `node --test --test-isolation=none`, a flag Node 22
+does not have, so the assertion passed on the host and said `bad option` in the
+gate. That is a test measuring the Node version instead of the decision, so the
+decision was extracted to `scripts/test-env-scope.mjs` and is unit-tested now;
+`7803c03` gates 719/719 with the sentinels still empty.
 
 **Not claimed:** containment is proved for the backup paths and the alert webhook
 — the two surfaces the finding names — not for every conceivable outbound. The
