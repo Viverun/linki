@@ -1421,3 +1421,67 @@ fails the session-lifetime guard.
 **Not claimed:** nothing exercises the banner in a real browser, so behaviour
 under React re-render and StrictMode double-invocation rests on the structural
 assertion that the component delegates both decisions, not on observing it.
+
+## C4/PR-16 — the suite inherited whatever the shell exported (2026-11-03)
+
+PR-16 was recorded as Observed because the isolated gate runs with `env -i`. That
+is a true statement about the gate and not the property its acceptance text
+describes: "with harmless sentinel inherited configuration, tests write only
+temporary fixture files and contact only mocked/loopback receivers." An empty
+environment cannot demonstrate indifference to a full one — it demonstrates that
+nothing was there to inherit.
+
+So the experiment: run the whole suite with harmless sentinels exported —
+`BACKUP_DIR`, `BACKUP_OFFSITE_DIR`, `BACKUP_RETAIN`, `LINKI_DB_PATH` pointing at
+throwaway paths, `ALERT_WEBHOOK_URL` at a loopback recorder that logs every hit.
+
+**7 of 739 tests changed behaviour.** The serious one was not a failure: a test
+that calls `createBackup` with no `offsiteDir` promoted a real snapshot into the
+*inherited* offsite directory. Nothing looked wrong — the run was green apart
+from the seven, the file had a correct name and passed no verification because it
+was never meant to exist. On a CI runner or a developer's machine where those
+variables are set for real, that is test snapshots written beside production
+backups, and retention is designed to prune what it finds there.
+
+**Cause:** `scripts/test-setup.mjs` installed resolver hooks and nothing else.
+`backup.mjs` resolves `destDir`/`offsiteDir` from the environment when the caller
+passes nothing, and `lib/db.ts` reads `LINKI_DB_PATH` at module scope. The
+bootstrap is the only code that runs before those imports, so it is the only
+place the isolation can be installed:
+
+- `LINKI_DB_PATH` and `BACKUP_DIR` → a per-process temp root, deleted on exit.
+- `BACKUP_OFFSITE_DIR`, `BACKUP_RETAIN`, `ALERT_WEBHOOK_URL` → removed. These
+  cannot be redirected usefully: any inherited offsite path is somewhere a test
+  must not write, and any inherited webhook is a real external receiver.
+- The notice prints **names**, never values — an `ALERT_WEBHOOK_URL` can carry a
+  token in its path, and a diagnostic line is not a reason to leak it into logs.
+
+**Scope, because the same bootstrap serves live tools.** `npm run retest:connect`
+and `scripts/restore-drill.ts` import it too, and they need the operator's real
+environment; a live retest pointed at a temp database is a worse failure than the
+leak being fixed. Sanitisation therefore applies only to test runs, recognised by
+the runner's child marker, `--test` in `execArgv` (which covers
+`--test-isolation=none`, where no child marker exists), or an explicit marker for
+harnesses that invoke files directly. `tests/test-env-isolation.test.ts` pins both
+sides, so a future "simplification" to always-on fails a test rather than a live
+tool failing in the field.
+
+**One interaction worth keeping.** Two migration suites spawn fixture children
+with `{ ...process.env }`. That carries the runner's marker into a process that is
+not a test run, so the bootstrap treated the caller's deliberate `LINKI_DB_PATH`
+as inherited and redirected it: the child opened a different database from the
+fixture just seeded, and four failures read like migration bugs. `childEnv()` in
+`tests/support/` drops the markers, which is an accurate description of such a
+child (`node scripts/foo.ts`-shaped) rather than an escape hatch.
+
+**Evidence:** `tests/test-env-isolation.test.ts` (5), driving the real
+`createBackup` from a child process and asserting by listing the sentinel
+directories — empty means nothing escaped, which is a statement about the shipping
+code, not a stub. Mutation-checked three ways (pre-fix bootstrap; `BACKUP_OFFSITE_DIR`
+left in place; sanitise unconditionally), each caught by its intended test, each
+restore verified byte-identical. End to end: 744/744 with the sentinels exported,
+sentinel directories empty, zero webhook requests.
+
+**Not claimed:** containment is proved for the backup paths and the alert webhook
+— the two surfaces the finding names — not for every conceivable outbound. The
+gate's `--network=none` remains the backstop for anything else.
