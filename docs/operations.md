@@ -93,6 +93,30 @@ acting. A supervisor without a cap turns one bad deploy into an endless restart
 loop, and every restart kills in-flight work — the autoheal image has no backoff,
 which is part of why it was not used.
 
+## Restore rehearsal (run this on the deployment host, not here)
+
+A backup that has never been restored is a hypothesis. The rehearsal builds a
+synthetic installation, backs it up through the shipping code paths — including
+the secondary copy — puts the synthetic `NEXTAUTH_SECRET` in a separate 0400 file
+outside both backup directories, deletes the primary to simulate losing it, and
+restores from the secondary in a clean process whose only secret source is that
+file:
+
+```
+node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON \
+     --import ./scripts/test-setup.mjs scripts/restore-rehearsal.mjs
+```
+
+`--tamper` replaces the escrowed key, and the rehearsal must then fail on
+`account session decrypts (correct secret)`. Run both: a rehearsal that cannot
+fail is not evidence.
+
+What a pass proves: the database and the key can be recombined from two separate
+locations. What it does **not** prove: an independent failure domain (both
+directories are wherever you ran it), or your RPO/RTO — the timing is for the
+synthetic database size, so record the real numbers from a run against a real
+snapshot on the deployment host.
+
 ## SINGLE-PROCESS PRECONDITION (load-bearing)
 
 **This design assumes exactly one Node process, and one container per `/data`

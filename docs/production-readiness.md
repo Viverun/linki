@@ -798,7 +798,7 @@ via `.git/info/exclude` (identity-checked by preflight, not counted).
 | `3e6d30a` (PR-16 docs) | 744 | `41673776406` | 717 / **1 fail** | **`false`** |
 | `7803c03` (PR-16 code + scope fix) | 745 | `41675018769` | 719 | `true` |
 | `c6563db` (docs only) | 745 | `41675937388` | 719 | `true` |
-| `54f449c` (PR-17 rehearsal) + this docs head | 748 | **Pending** — appended when the run on this head completes. Expected **748 − 26 = 722**. | — | — |
+| `54f449c` (PR-17 rehearsal) + docs `29b19e3` | 748 | `41679760058` | 722 | `true` |
 
 Every isolated run is Node **v22.23.0** x64 with all eight checks at exit 0:
 npm-version, native-sqlite, typegen, typecheck, tests, lint, prebuild, build.
