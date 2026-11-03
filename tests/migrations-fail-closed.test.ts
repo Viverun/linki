@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 // One temp DB per PROCESS: lib/db.ts caches the connection on first getDb().
 // Each scenario that needs a different starting schema runs in a child process.
 import { execFileSync } from "node:child_process";
+import { childEnv } from "./support/child-env";
 
 const dir = mkdtempSync(join(tmpdir(), "linki-migrations-test-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -32,7 +33,7 @@ function child(dbPath: string, script: string): string {
   return execFileSync(process.execPath, [
     "--experimental-strip-types", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "--disable-warning=ExperimentalWarning",
     "--import", "./scripts/test-setup.mjs", "--input-type=module", "-e", script,
-  ], { env: { ...process.env, LINKI_DB_PATH: dbPath, NEXTAUTH_SECRET: "x" }, encoding: "utf8", stdio: "pipe", timeout: 30_000 });
+  ], { env: childEnv({ LINKI_DB_PATH: dbPath, NEXTAUTH_SECRET: "x" }), encoding: "utf8", stdio: "pipe", timeout: 30_000 });
 }
 
 const OPEN_AND_REPORT = `

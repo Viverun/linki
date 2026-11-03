@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { execFileSync } from "node:child_process";
+import { childEnv } from "./support/child-env";
 
 // One temp DB per PROCESS: lib/db.ts caches the connection on first getDb().
 // Each boot that needs to observe a fresh migration pass runs in a child process
@@ -19,7 +20,7 @@ function child(dbPath: string, script: string): string {
   return execFileSync(process.execPath, [
     "--experimental-strip-types", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "--disable-warning=ExperimentalWarning",
     "--import", "./scripts/test-setup.mjs", "--input-type=module", "-e", script,
-  ], { env: { ...process.env, LINKI_DB_PATH: dbPath, NEXTAUTH_SECRET: "x" }, encoding: "utf8", stdio: "pipe", timeout: 30_000 });
+  ], { env: childEnv({ LINKI_DB_PATH: dbPath, NEXTAUTH_SECRET: "x" }), encoding: "utf8", stdio: "pipe", timeout: 30_000 });
 }
 
 const OPEN_ONLY = `
