@@ -36,11 +36,20 @@ An unanswerable server exits 1 — a restart does fix that.
 Cron, every minute:
 
 ```cron
-* * * * * /usr/bin/flock -n /tmp/linki-watchdog.lock /path/to/linki/scripts/watchdog.sh >> /var/log/linki-watchdog.log 2>&1
+* * * * * /path/to/linki/scripts/watchdog.sh >> /var/log/linki-watchdog.log 2>&1
 ```
 
-`flock -n` prevents overlapping runs. Or as a systemd timer if you prefer
-journald.
+Do **not** wrap this in an outer `flock -n`. The script serialises itself on
+`${STATE_FILE}.lock` and exits 0 when another tick already holds it (logging
+`another invocation holds the lock — skipping this tick`), because the other
+invocation is already deciding. An outer `flock -n` would fail instead, giving
+cron a non-zero status and a failure mail for a tick that was correctly skipped —
+and the script's own skip line would never be reached.
+
+Exit codes, so the log is readable: `0` means healthy, skipped, below threshold,
+or budget-exhausted (all decisions, not errors); `1` means the restart command
+itself failed; `2` means `flock` is missing and the script refuses to run
+unserialised.
 
 **Tunables** (environment, with defaults):
 
@@ -70,11 +79,12 @@ journald.
    supervisor looks installed and protects nothing. This was the live condition
    immediately after P2-1 landed, before the image was rebuilt.
 
-**Disable it during an incident:** comment out the cron line, or
-`touch /tmp/linki-watchdog.lock && exec 9>/tmp/linki-watchdog.lock && flock -n 9`
-to hold the lock. Disabling the supervisor is the right first move when
-diagnosing anything restart-sensitive — a restart destroys the evidence and can
-strand a message step mid-flight.
+**Disable it during an incident:** comment out the cron line, or hold the
+script's own lock so ticks become skips:
+`exec 9>>data/.watchdog-state.lock && flock -n 9` (adjust for `STATE_FILE`). A
+skipped tick exits 0 and changes nothing. Disabling the supervisor is the right
+first move when diagnosing anything restart-sensitive — a restart destroys the
+evidence and can strand a message step mid-flight.
 
 ## Restart budget
 
