@@ -819,7 +819,12 @@ via `.git/info/exclude` (identity-checked by preflight, not counted).
 | `c6563db` (docs only) | 745 | `41675937388` | 719 | `true` |
 | `54f449c` (PR-17 rehearsal) + docs `29b19e3` | 748 | `41679760058` | 722 | `true` |
 | `b79a998` (PR-17 docs head) | 748 | `41680733523` | 722 | `true` |
-| `7114276` (browser drill) + this docs head | 748 | **Pending** — appended when the run on this head completes. Expected **748 − 26 = 722**. The drill is host-only and adds no tests. | — | — |
+| `7114276` (browser drill) + docs `78cfd72` | 748 | `41845614814` | 722 | `true` |
+
+The ledger stops at the head above. Later commits touch this document only; a
+docs-only head is not separately ledgered unless it changes behaviour or the test
+count, because each push triggers a gate run and a rule that required a row for
+every documentation edit would never terminate.
 
 Every isolated run is Node **v22.23.0** x64 with all eight checks at exit 0:
 npm-version, native-sqlite, typegen, typecheck, tests, lint, prebuild, build.
