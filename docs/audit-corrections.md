@@ -1550,3 +1550,59 @@ behaviour (12); PR-15's control plus HTML-500 and aborted-POST cases (20).
 runner outage; PR-15's evidence is one page's create flow, not every mutation
 surface, and non-JSON *success* bodies remain unverified. The drill is host-only
 and deliberately absent from `npm test` — the verification image has no browser.
+
+## C3/PR-15 — "failed" was a guess about a request nobody observed (2026-11-04)
+
+The last clause of PR-15 is "retry/reconciliation handles ambiguous outcomes",
+and it stayed open through the whole false-success pass because the honest answer
+to "what should the UI do when it does not know?" is not obvious. The row's own
+note said the decision needed product input, and named the trap: auto-retrying a
+non-idempotent POST is itself a duplicate-action risk.
+
+That framing was half right, and the missing half is the point.
+
+**What `!res.ok` actually conflates.** Three outcomes, not one:
+
+- **4xx** — the server read the request and declined it. The client knows. This
+  is the only non-success about which "it did not happen" is a fact.
+- **Transport failure** (`status: 0`) — no response at all. The request may have
+  been applied and the response lost, or never arrived.
+- **5xx** — a proxy that never reached the app, or a handler that committed its
+  write and then threw. Either is possible; the body says nothing useful.
+
+Reporting the second and third as "failed" is a **false negative**, and the
+operator's response to "failed" is to try again — so a feature built to prevent
+false success was manufacturing false failure that invited a duplicate.
+
+**The decision that needed no product input.** Retrying is unsafe; *looking* is
+not. `reconcileMutation` re-reads the affected collection — read-only in every
+path — and reports `applied`, `not-applied`, or `unknown`. Keeping `not-applied`
+(distinguishable, safe to retry) apart from `unknown` (we could not look) is what
+stops the verification from becoming a guess in its own right: a failed read must
+never be rendered as "it is not there".
+
+Two details that are easy to get wrong and are tested:
+
+- A lost response does not mean the request has finished. The first read can
+  legitimately miss a write that commits milliseconds later, so confirmation
+  retries the *read*, bounded, and succeeds on a later attempt.
+- The read can itself fail. If the last attempt could not reach the server, the
+  result is `unknown` even if an earlier read showed absence — the last
+  observation is the one being reported.
+
+**Scope, deliberately counted.** Fifty-eight mutating handlers still treat an
+ambiguous outcome as failure. Each needs to know which resource to re-read and
+what confirms it, which is per-flow design, not a mechanical edit. The inventory
+test caps that number rather than listing it, so it can only fall and a new
+handler cannot quietly rejoin the class; the two wired flows (`/lists` create and
+delete) are exercised in the browser, including a request the server applied
+whose response was dropped.
+
+**Evidence.** `tests/ui-reconciliation.test.ts` (7) and the drill's lost-response
+case (36/36 checks overall). Mutations: collapsing `unknown` into `refused` fails
+5 browser checks; replaying the POST on a lost response fails 2 and the drill
+reports two lists where there must be one; reporting a failed read as
+`not-applied` fails 2 unit tests.
+
+**Not claimed:** the clause is met at the boundary and for two flows, not
+tree-wide, and non-JSON *success* bodies remain unverified. The row stays open.
