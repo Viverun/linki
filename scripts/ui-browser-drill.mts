@@ -335,6 +335,11 @@ try {
     // What is asserted is the operator-visible outcome, not an internal: the row
     // count does not grow, the dialog stays open, the URL does not move, no
     // success toast appears, and the error toast does.
+    //
+    // The third case is the one that needed code: a request the SERVER APPLIED
+    // whose response never arrives. The client cannot know the list exists, so it
+    // must not claim failure — it reads the collection back and reports what it
+    // finds, which is also why nothing here re-sends the POST.
     {
       const page = await newPage();
       await login(page);
@@ -415,15 +420,21 @@ try {
           continue;
         }
 
+        const listName = `drill-${failure}`;
         const before = await rows.count();
         check(`PR-15 ${failure}: the comparison starts from a real row`, before >= 1, `${before} rows`);
         await createButton.click();
         // daisyUI renders the dialog as `.modal-box`, not `[role=dialog]`.
         const modal = page.locator(".modal-box");
-        await modal.locator("input").first().fill("drill-list");
+        await modal.locator("input").first().fill(listName);
         await modal.locator('button[type="submit"]').click();
 
-        const errorToast = page.getByText("Failed to create list", { exact: true });
+        // The message is the reconciled one: "could not reach the server" would be
+        // an unverified claim about a request whose response was lost, and this
+        // case is a 5xx or a dropped connection, so the client looks first.
+        const errorToast = page.getByText("List not created — the server has no list with that name", {
+          exact: true,
+        });
         const toldTheTruth = await errorToast
           .waitFor({ timeout: 15_000 })
           .then(() => true)
@@ -433,7 +444,7 @@ try {
         check(`PR-15 ${failure}: the failure is reported to the operator`, toldTheTruth, JSON.stringify(log));
         check(
           `PR-15 ${failure}: no success toast for a failed mutation`,
-          !log.some((t) => /created|saved|success/i.test(t)),
+          !log.some((t) => /^list created/i.test(t)),
           JSON.stringify(log)
         );
         check(`PR-15 ${failure}: the dialog stays open (nothing was created)`, await modal.isVisible());
@@ -452,7 +463,63 @@ try {
         await page.reload({ waitUntil: "domcontentloaded" });
         check(
           `PR-15 ${failure}: the database has no such list after a reload`,
-          (await page.getByText("drill-list", { exact: true }).count()) === 0
+          (await page.getByText(listName, { exact: true }).count()) === 0
+        );
+      }
+
+      // ── PR-15: the server applied it, the response never arrived ───────────
+      //
+      // `route.fetch()` performs the real POST — the list IS created — and then
+      // drops the response, which is what a proxy timeout or a dying connection
+      // looks like to the browser. The client must not report failure (the list
+      // exists) and must not retry (a second list would be created): it reads the
+      // collection back and says what it found.
+      {
+        const name = "drill-lost-response";
+        await page.unroute(LISTS_API).catch(() => {});
+        await page.route(LISTS_API, async (route) => {
+          if (route.request().method() !== "POST") return route.continue();
+          await route.fetch();
+          await route.abort("failed");
+        });
+
+        await page.goto(`${base}/lists`, { waitUntil: "domcontentloaded" });
+        const rows = page.locator("table tbody tr");
+        const createButton = page.getByRole("button", { name: /new list/i });
+        await createButton.first().waitFor({ state: "visible", timeout: 20_000 });
+        const before = await rows.count();
+
+        await createButton.click();
+        const modal = page.locator(".modal-box");
+        await modal.locator("input").first().fill(name);
+        await modal.locator('button[type="submit"]').click();
+
+        const confirmed = page.getByText(/List created \(confirmed after a lost response\)/);
+        check(
+          "PR-15 lost response: the client verifies instead of claiming failure",
+          await confirmed.waitFor({ timeout: 20_000 }).then(() => true).catch(() => false),
+          JSON.stringify(await toasts(page))
+        );
+        check("PR-15 lost response: the dialog closes only once the server confirms", !(await modal.isVisible()));
+        await page.waitForTimeout(500);
+        check(
+          "PR-15 lost response: exactly one row was added (nothing re-sent the POST)",
+          (await rows.count()) === before + 1,
+          `${before} before, ${await rows.count()} after`
+        );
+
+        await page.unroute(LISTS_API).catch(() => {});
+        await page.reload({ waitUntil: "domcontentloaded" });
+        // Same trap as the "found a mutation control" check, in a new place: a
+        // count() straight after a navigation on a streamed page can be 0 because
+        // the row has not rendered yet. Wait for it, then count.
+        const row = page.getByText(name, { exact: true });
+        await row.first().waitFor({ timeout: 15_000 }).catch(() => {});
+        const persisted = await row.count();
+        check(
+          "PR-15 lost response: the server holds exactly one such list",
+          persisted === 1,
+          `${persisted} matching row(s)`
         );
       }
 

@@ -155,3 +155,69 @@ test("every handler that mutates checks .ok before reporting success", () => {
   }
   assert.deepEqual(offenders, [], "a refused mutation must not be rendered as success");
 });
+
+/**
+ * PR-15's ambiguous-outcome clause, measured rather than assumed.
+ *
+ * `!res.ok` reports a lost response and a refused request identically, and the
+ * first may mean the mutation landed. `mutationOutcome` makes the distinction
+ * and `reconcileMutation` resolves it by reading — never by re-sending.
+ *
+ * Wiring that through all ~70 call sites is a per-flow job (each needs to know
+ * which resource to re-read), so it is deliberately partial and the debt is made
+ * visible here: a handler either reconciles, or it is counted. The ceiling can
+ * only go down, which stops the gap from growing while the rest is worked
+ * through, and stops this test from passing vacuously.
+ */
+const RECONCILED_MINIMUM = 2;
+// Measured 2026-11-04 with two handlers wired (lists create and delete). It may
+// only go DOWN: a new handler that ignores ambiguity fails here rather than
+// adding to the count, which is the point of a ceiling rather than a list.
+const UNRECONCILED_CEILING = 58;
+
+/** Every function that issues a mutating request, with its body. */
+function mutatingHandlers(): Array<{ id: string; body: string }> {
+  const out: Array<{ id: string; body: string }> = [];
+  const seen = new Set<string>();
+  for (const file of FILES) {
+    const src = source(file);
+    for (const m of src.matchAll(MUTATION)) {
+      const handler = enclosingHandler(src, m.index);
+      const id = `${file} :: ${handler}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const decl = [...src.slice(0, m.index).matchAll(/(?:async\s+)?function\s+\w+\s*\(/g)].at(-1);
+      const rest = decl?.index ? src.slice(decl.index) : src;
+      const next = rest.slice(1).search(/\n {2}(?:async\s+)?function\s/);
+      out.push({ id, body: next === -1 ? rest : rest.slice(0, next + 1) });
+    }
+  }
+  return out;
+}
+
+test("an ambiguous outcome is either reconciled or counted as debt, never reported as failure", () => {
+  const handlers = mutatingHandlers();
+  const reconciled = handlers.filter((h) => /mutationOutcome\(/.test(h.body));
+  const pending = handlers.filter((h) => !/mutationOutcome\(/.test(h.body));
+
+  for (const h of reconciled) {
+    // Classifying without reconciling would be worse than not classifying: it
+    // would relabel the ambiguity and still report it as failure.
+    assert.match(
+      h.body,
+      /reconcileMutation\(/,
+      `${h.id} classifies the outcome but never verifies it`
+    );
+  }
+
+  assert.ok(
+    reconciled.length >= RECONCILED_MINIMUM,
+    `expected at least ${RECONCILED_MINIMUM} reconciled handlers, found ${reconciled.length}`
+  );
+  assert.ok(
+    pending.length <= UNRECONCILED_CEILING,
+    `unreconciled mutating handlers grew past ${UNRECONCILED_CEILING} (now ${pending.length}); ` +
+      `wire the new one through mutationOutcome/reconcileMutation instead of raising the ceiling.\n` +
+      pending.map((p) => `  - ${p.id}`).join("\n")
+  );
+});

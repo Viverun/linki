@@ -7,7 +7,7 @@ import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import { RiAddLine, RiDeleteBinLine, RiCloseLine, RiCalendarLine } from "react-icons/ri";
 
-import { mutateFetch, readError } from "@/lib/ui-mutation";
+import { mutateFetch, mutationOutcome, readError, reconcileMutation } from "@/lib/ui-mutation";
 
 interface List {
   id: string;
@@ -118,13 +118,40 @@ export default function ListsPage({ initialLists }: { initialLists: List[] }) {
   async function createList(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
+    const name = form.name.trim();
     const res = await mutateFetch("/api/lists", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
     });
     setLoading(false);
-    if (!res.ok) { toast.error("Failed to create list"); return; }
+
+    if (!res.ok) {
+      // A refusal is the only non-success whose outcome the client actually
+      // knows. Anything else may have been applied, and telling the operator it
+      // failed would be a guess — so look, and never POST again (a replayed
+      // create is a second list).
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? "Failed to create list");
+        return;
+      }
+      const check = await reconcileMutation({
+        read: async () => (await fetch("/api/lists")).json() as Promise<List[]>,
+        confirm: (rows) => rows.some((l) => l.name === name),
+      });
+      if (check.snapshot) setLists(check.snapshot);
+      if (check.state === "applied") {
+        toast.success("List created (confirmed after a lost response)");
+        setShowModal(false);
+        setForm({ name: "", description: "" });
+      } else if (check.state === "not-applied") {
+        toast.error("List not created — the server has no list with that name");
+      } else {
+        toast.error("Could not confirm whether the list was created. Reload before trying again.");
+      }
+      return;
+    }
+
     toast.success("List created");
     setShowModal(false);
     setForm({ name: "", description: "" });
@@ -137,8 +164,24 @@ export default function ListsPage({ initialLists }: { initialLists: List[] }) {
     // the row still exists and the next refresh would resurrect it.
     const res = await mutateFetch(`/api/lists/${id}`, { method: "DELETE" });
     if (!res.ok) {
-      const err = await res.json().catch(() => null);
-      toast.error(err?.error ?? "Could not delete this list");
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? "Could not delete this list");
+        return;
+      }
+      // The delete may have landed. Removing the row locally on a guess and
+      // keeping it on a guess are both wrong; ask the server.
+      const check = await reconcileMutation({
+        read: async () => (await fetch("/api/lists")).json() as Promise<List[]>,
+        confirm: (rows) => !rows.some((l) => l.id === id),
+      });
+      if (check.snapshot) setLists(check.snapshot);
+      if (check.state === "applied") {
+        toast.success("List deleted (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("List not deleted — it is still on the server");
+      } else {
+        toast.error("Could not confirm whether the list was deleted. Reload before trying again.");
+      }
       return;
     }
     toast.success("List deleted");
