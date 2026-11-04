@@ -93,6 +93,31 @@ acting. A supervisor without a cap turns one bad deploy into an endless restart
 loop, and every restart kills in-flight work — the autoheal image has no backoff,
 which is part of why it was not used.
 
+## Browser UI drill (run on a workstation, not in the gate)
+
+Two acceptance clauses describe what an operator *sees*: the health banner's
+dismissal lifecycle (PR-18) and a failed mutation never claiming success (PR-15).
+Both are covered by fast tests against pure functions and mocked handlers; this
+drill is the slower check that the wiring agrees with them.
+
+```
+npm run build   # required: the drill serves the built app
+node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON \
+     --import ./scripts/test-setup.mjs scripts/ui-browser-drill.mts
+```
+
+It starts `next start` on a free port against a temporary database, seeds a user,
+logs in through the real credentials provider, and drives the UI. It prefers the
+installed Chrome and falls back to Playwright's bundled browser.
+
+**It is not part of `npm test`, and must not be added to it:** the isolated
+verification image ships no browser. A pass is evidence for one engine and one
+build, not a cross-browser guarantee.
+
+The drill refuses to run against a stale build — `next start` serves whatever
+`.next` contains, and that is not necessarily the source tree you are looking at.
+If it fails that check, run `npm run build`.
+
 ## Restore rehearsal (run this on the deployment host, not here)
 
 A backup that has never been restored is a hypothesis. The rehearsal builds a

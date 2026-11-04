@@ -1492,3 +1492,61 @@ decision was extracted to `scripts/test-env-scope.mjs` and is unit-tested now;
 **Not claimed:** containment is proved for the backup paths and the alert webhook
 — the two surfaces the finding names — not for every conceivable outbound. The
 gate's `--network=none` remains the backstop for anything else.
+
+## C4/PR-18 + C3/PR-15 — the browser disagreed with the tests, twice (2026-11-04)
+
+Both rows carried the same residual in different words: the behaviour is proved as
+pure functions and mocked handlers, but nobody had watched it happen. PR-18's
+acceptance text is literally a sequence of user actions ("dismiss an outage,
+observe recovery, then trigger a new outage of the same class in the same tab"),
+and PR-15's is a statement about what an operator sees. `scripts/ui-browser-drill.mts`
+(the drill itself, `7114276`) closes both, and the interesting part is not the
+32 passing checks — it is that the first two versions of the drill passed while
+testing nothing.
+
+**Trap 1 — a `count()` on a page that is still streaming.** The `/lists` page is
+server-rendered, so the "New List" button is in the HTML, and the drill checked
+`count() === 0` immediately after `domcontentloaded` to decide whether the
+selector still matched. It reported zero, then — inside the failure branch, a
+moment later — the same locator resolved to one element. The check was racing the
+page and failing open: had the branch not printed diagnostics, "no mutation
+control found" would have looked like a selector problem rather than a timing bug.
+It waits for the control now, and only then compares.
+
+**Trap 2 — sampling a transient toast.** "No success toast for a failed mutation"
+was asserted with a `count()` after the failure was handled. Sonner toasts expire
+after a few seconds, and the assertion ran after a 15s timeout, so on a build that
+*did* claim success (`toast.success("List created")` after a 500) the toast had
+already gone and the check passed. This is the exact false-success class PR-15
+exists to catch, reproduced inside its own evidence. A `MutationObserver`
+installed at page load now records every toast, and the positive control asserts
+the recorder saw one — an assertion that cannot be satisfied by absence is not
+evidence.
+
+**A positive control, because "nothing happened" is easy to satisfy.** Every
+PR-15 assertion is of the form "no row, no toast, no navigation". A page whose
+create flow is broken satisfies all of them. So the drill first performs the same
+flow against the real server and requires success, a rendered row, and the row
+still present after a reload; the failure cases then start from a non-empty table.
+
+**Stale builds.** `next start` serves whatever `.next` holds. During the mutation
+checks the drill was run against a build of a mutated source tree while the source
+on disk was already restored — a green result that described a different program.
+The drill now compares `.next/BUILD_ID` against the newest source file and fails
+if the build is older. That guard caught the drill itself on the next run.
+
+**Evidence.** 32 checks, host, system Chrome 156.0.8078.79: PR-18's dismiss →
+reload → recovery → new-incident sequence, escalation, and storage-disabled
+behaviour (12); PR-15's control plus HTML-500 and aborted-POST cases (20).
+
+**Mutations, each rebuilt, run, and restored byte-identically:**
+
+- `createList` ignoring `res.ok` (the original defect) → 6 failures, including
+  both "no success toast" checks.
+- `nextDismissedKey` never clearing on recovery → "recovery clears the stored key"
+  fails, and the following phase times out and is reported as a failed check.
+
+**Not claimed:** one engine, one build, routed health payloads rather than a real
+runner outage; PR-15's evidence is one page's create flow, not every mutation
+surface, and non-JSON *success* bodies remain unverified. The drill is host-only
+and deliberately absent from `npm test` — the verification image has no browser.
