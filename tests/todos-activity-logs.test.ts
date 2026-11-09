@@ -55,7 +55,9 @@ test("POST /api/todos creates and returns the row", () => {
 test("POST /api/todos rejects missing title and unknown target", () => {
   assert.equal(call(todosPost, "POST", {}, { target_id: targetId }).statusCode, 400);
   assert.equal(call(todosPost, "POST", {}, { target_id: "nope", title: "x" }).statusCode, 404);
-  assert.equal(call(todosPost, "GET", {}, {}).statusCode, 405);
+  // GET is allowed since 2026-11-09 (it reads a contact's todos back so a lost
+  // save can be verified); without target_id it is a 400, not a 405.
+  assert.equal(call(todosPost, "GET", {}, {}).statusCode, 400);
 });
 
 test("PATCH /api/todos/[id] partial-updates and validates status", () => {
@@ -98,5 +100,6 @@ test("PATCH/DELETE /api/activity-logs?id= edits and removes", () => {
   assert.equal(call(activityLogs, "PATCH", {}, { body: "x" }).statusCode, 400);
   assert.equal(call(activityLogs, "DELETE", { id }, {}).statusCode, 200);
   assert.equal(call(activityLogs, "DELETE", { id }, {}).statusCode, 404);
-  assert.equal(call(activityLogs, "GET", {}, {}).statusCode, 405);
+  // Same as todos: GET exists for verification and requires target_id.
+  assert.equal(call(activityLogs, "GET", {}, {}).statusCode, 400);
 });

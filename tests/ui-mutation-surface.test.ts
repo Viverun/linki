@@ -142,9 +142,13 @@ test("every handler that mutates checks .ok before reporting success", () => {
     const seen = new Set<string>();
     for (const m of src.matchAll(MUTATION)) {
       const handler = enclosingHandler(src, m.index);
-      if (seen.has(handler)) continue;
-      seen.add(handler);
       const decl = [...src.slice(0, m.index).matchAll(/(?:async\s+)?function\s+\w+\s*\(/g)].at(-1);
+      // Identify the handler by its declaration position, not its name: a file
+      // can hold several handlers called `save`, and collapsing them would
+      // silently skip the ones it did not check.
+      const key = `${src.slice(0, decl?.index ?? 0).split("\n").length}:${handler}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       const rest = decl?.index ? src.slice(decl.index) : src;
       const next = rest.slice(1).search(/\n {2}(?:async\s+)?function\s/);
       const body = next === -1 ? rest : rest.slice(0, next + 1);
@@ -170,12 +174,18 @@ test("every handler that mutates checks .ok before reporting success", () => {
  * through, and stops this test from passing vacuously.
  */
 const RECONCILED_MINIMUM = 2;
-// Measured 2026-11-09 with twenty-two handlers wired (lists create/delete/import-cancel,
-// companies create-update/delete, all six on the campaigns page, and eleven on the
-// campaign detail page). It may only go DOWN: a new handler that ignores ambiguity
-// fails here rather than adding to the count, which is the point of a ceiling rather
-// than a list.
-const UNRECONCILED_CEILING = 38;
+// Measured 2026-11-09 with thirty-seven handlers wired (lists, companies, both
+// campaign pages, and the contacts list and detail pages). It may only go DOWN: a
+// new handler that ignores ambiguity fails here rather than adding to the count,
+// which is the point of a ceiling rather than a list.
+//
+// Superseded note: the count was 38 before the inventory was keyed by handler
+// *declaration* rather than handler *name*. Four functions in pages/settings.tsx
+// are called `save` (and three other files have name collisions), so a name-keyed
+// inventory counted each cluster as one and understated the debt. 38 was a floor
+// of the same measure, not a different one; the drop to 29 is wiring 12 handlers
+// net of that correction.
+const UNRECONCILED_CEILING = 29;
 
 /** Every function that issues a mutating request, with its body. */
 function mutatingHandlers(): Array<{ id: string; body: string }> {
@@ -185,10 +195,13 @@ function mutatingHandlers(): Array<{ id: string; body: string }> {
     const src = source(file);
     for (const m of src.matchAll(MUTATION)) {
       const handler = enclosingHandler(src, m.index);
-      const id = `${file} :: ${handler}`;
+      const decl = [...src.slice(0, m.index).matchAll(/(?:async\s+)?function\s+\w+\s*\(/g)].at(-1);
+      const line = src.slice(0, decl?.index ?? m.index).split("\n").length;
+      // Declaration position, not name: four handlers in contacts/[id].tsx are
+      // called `save`, and a name-keyed inventory counted them as one.
+      const id = `${file}:${line} :: ${handler}`;
       if (seen.has(id)) continue;
       seen.add(id);
-      const decl = [...src.slice(0, m.index).matchAll(/(?:async\s+)?function\s+\w+\s*\(/g)].at(-1);
       const rest = decl?.index ? src.slice(decl.index) : src;
       const next = rest.slice(1).search(/\n {2}(?:async\s+)?function\s/);
       out.push({ id, body: next === -1 ? rest : rest.slice(0, next + 1) });

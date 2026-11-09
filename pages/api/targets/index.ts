@@ -200,6 +200,26 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     extraParams.push(like, like, like);
   }
 
+  // Exact filters added for reconciliation reads: a mutation's outcome is
+  // judged against the rows it touched, not against a search page that may not
+  // contain them. `id` is comma-separated because batch operations touch many.
+  const idFilter = String(req.query.id ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+  if (idFilter.length > 0) {
+    extraClauses.push(`t.id IN (${idFilter.map(() => "?").join(",")})`);
+    extraParams.push(...idFilter);
+  }
+  // linkedin_url is UNIQUE in the schema, which makes it the right key for "did
+  // this contact get created?" — a name is not unique.
+  const linkedinUrlFilter =
+    typeof req.query.linkedin_url === "string" ? req.query.linkedin_url.trim() : "";
+  if (linkedinUrlFilter) {
+    extraClauses.push("t.linkedin_url = ?");
+    extraParams.push(linkedinUrlFilter);
+  }
+
   const filters = parseFilters(req.query);
   const { sql: filterSql, params: filterParams } = buildFilterClause(filters);
 

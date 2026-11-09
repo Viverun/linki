@@ -13,7 +13,7 @@ import {
 } from "react-icons/ri";
 import FilterBar, { ActiveFilter, filtersToParams } from "@/components/ui/FilterBar";
 
-import { mutateFetch, readError } from "@/lib/ui-mutation";
+import { mutateFetch, mutationOutcome, readError, reconcileMutation } from "@/lib/ui-mutation";
 
 const PAGE_SIZE = 50;
 
@@ -172,6 +172,32 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
     });
   }
 
+  /** The contact rows with the given ids — the read that judges a batch write. */
+  async function readTargetsByIds(ids: string[]): Promise<Array<{ id: string }>> {
+    const res = await fetch(
+      `/api/targets?id=${encodeURIComponent(ids.join(","))}&limit=${Math.min(500, Math.max(50, ids.length))}`
+    );
+    if (!res.ok) throw new Error(`targets read failed: ${res.status}`);
+    const body = (await res.json()) as { contacts?: Array<{ id: string }> };
+    return body.contacts ?? [];
+  }
+
+  /** The members of one list — the state add-members produces. */
+  async function readListMemberIds(listId: string): Promise<string[]> {
+    const res = await fetch(`/api/lists/${listId}`);
+    if (!res.ok) throw new Error(`list read failed: ${res.status}`);
+    const body = (await res.json()) as { targets?: Array<{ id: string }> };
+    return (body.targets ?? []).map((t) => t.id);
+  }
+
+  /** Look a contact up by its unique LinkedIn URL. */
+  async function readTargetByLinkedIn(url: string): Promise<Array<{ id: string; linkedin_url: string }>> {
+    const res = await fetch(`/api/targets?linkedin_url=${encodeURIComponent(url)}&limit=5`);
+    if (!res.ok) throw new Error(`target read failed: ${res.status}`);
+    const body = (await res.json()) as { contacts?: Array<{ id: string; linkedin_url: string }> };
+    return body.contacts ?? [];
+  }
+
   async function addSelectedToList() {
     if (!addToListId || selected.size === 0) return;
     setAddToListLoading(true);
@@ -181,8 +207,33 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
       body: JSON.stringify({ contact_ids: [...selected] }),
     });
     setAddToListLoading(false);
-    const data = await res.json();
-    if (!res.ok) { toast.error(data.error ?? "Failed to add to list"); return; }
+    const data = await res.json().catch(() => ({} as { error?: string }));
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") {
+        toast.error(data.error ?? "Failed to add to list");
+        return;
+      }
+      // Adding a member is idempotent on the server, so the honest question is
+      // not "did the request run?" but "are they in the list now?".
+      const ids = [...selected];
+      const listId = addToListId;
+      const check = await reconcileMutation({
+        read: () => readListMemberIds(listId),
+        confirm: (members) => ids.every((id) => members.includes(id)),
+      });
+      if (check.state === "applied") {
+        const listName = lists.find((l) => l.id === listId)?.name ?? "list";
+        toast.success(`Added ${ids.length} to ${listName} (confirmed after a lost response)`);
+        setShowAddToList(false);
+        setAddToListId("");
+        setSelected(new Set());
+      } else if (check.state === "not-applied") {
+        toast.error("Not added — the contacts are not in that list on the server");
+      } else {
+        toast.error("Could not confirm whether the contacts were added. Reload before trying again.");
+      }
+      return;
+    }
     const listName = lists.find((l) => l.id === addToListId)?.name ?? "list";
     toast.success(
       data.already_members > 0
@@ -203,9 +254,32 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
       body: JSON.stringify({ target_ids: [...selected] }),
     });
     setDeleteLoading(false);
-    const data = await res.json();
-    if (!res.ok) { toast.error(data.error ?? "Failed to delete contacts"); return; }
-    toast.success(`Deleted ${data.deleted} contact${data.deleted !== 1 ? "s" : ""}`);
+    const data = await res.json().catch(() => ({} as { error?: string; deleted?: number }));
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") {
+        toast.error(data.error ?? "Failed to delete contacts");
+        return;
+      }
+      // Deleting a contact is irreversible, so "failed" on a lost response
+      // invites a second delete of rows that may already be gone. Read them.
+      const ids = [...selected];
+      const check = await reconcileMutation({
+        read: () => readTargetsByIds(ids),
+        confirm: (rows) => !rows.some((row) => ids.includes(row.id)),
+      });
+      if (check.state === "applied") {
+        toast.success(`Deleted ${ids.length} contact${ids.length !== 1 ? "s" : ""} (confirmed after a lost response)`);
+        setShowDeleteConfirm(false);
+        setSelected(new Set());
+        setRevision((value) => value + 1);
+      } else if (check.state === "not-applied") {
+        toast.error("Not deleted — the contacts are still on the server");
+      } else {
+        toast.error("Could not confirm whether the contacts were deleted. Reload before trying again.");
+      }
+      return;
+    }
+    toast.success(`Deleted ${data.deleted ?? 0} contact${data.deleted !== 1 ? "s" : ""}`);
     setShowDeleteConfirm(false);
     setSelected(new Set());
     setRevision((value) => value + 1);
@@ -221,7 +295,29 @@ export default function ContactsPage({ lists, total: initialTotal }: { lists: Li
     });
     setNewContactLoading(false);
     if (!res.ok) {
-      toast.error((await readError(res)) ?? "Failed to create contact");
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? "Failed to create contact");
+        return;
+      }
+      // linkedin_url is UNIQUE, which makes it the one field that can say "this
+      // create landed" without a name collision saying it twice. A second POST
+      // would either duplicate a contact or hit the unique constraint.
+      const url = newContactForm.linkedin_url.trim();
+      const check = await reconcileMutation({
+        read: () => readTargetByLinkedIn(url),
+        confirm: (rows) => rows.some((row) => row.linkedin_url === url),
+      });
+      if (check.state === "applied") {
+        toast.success("Contact created (confirmed after a lost response)");
+        setShowNewContact(false);
+        setNewContactForm({ full_name: "", linkedin_url: "", title: "", company: "", location: "", email: "", phone: "", list_id: "" });
+        setRevision((value) => value + 1);
+        setPage(0);
+      } else if (check.state === "not-applied") {
+        toast.error("Contact not created — the server has no contact with that LinkedIn URL");
+      } else {
+        toast.error("Could not confirm whether the contact was created. Reload before trying again.");
+      }
       return;
     }
     toast.success("Contact created");

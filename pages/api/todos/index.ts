@@ -8,8 +8,19 @@ import { randomUUID } from "crypto";
  * the CRM migration; only the HTTP surface was missing.
  */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
+  // GET exists so a save whose response was lost can be verified by reading the
+  // contact's todos back, rather than by re-sending a non-idempotent POST.
+  if (req.method === "GET") {
+    const targetId = typeof req.query.target_id === "string" ? req.query.target_id.trim() : "";
+    if (!targetId) return res.status(400).json({ error: "target_id required" });
+    const todos = getDb()
+      .prepare("SELECT * FROM todos WHERE target_id = ? ORDER BY status ASC, due_date ASC, created_at DESC")
+      .all(targetId);
+    return res.json(todos);
+  }
+
   if (req.method !== "POST") {
-    res.setHeader("Allow", ["POST"]);
+    res.setHeader("Allow", ["GET", "POST"]);
     return res.status(405).end();
   }
 

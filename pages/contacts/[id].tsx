@@ -14,7 +14,7 @@ import {
   RiAddLine, RiCloseCircleLine, RiPhoneLine,
 } from "react-icons/ri";
 
-import { mutateFetch } from "@/lib/ui-mutation";
+import { mutateFetch, mutationOutcome, reconcileMutation } from "@/lib/ui-mutation";
 
 interface Company {
   id: string;
@@ -97,6 +97,34 @@ interface Target {
   company_id: string | null;
   companyObj: Company | null;
   lists: ListRef[];
+}
+
+// ── reads used to judge an ambiguous mutation ────────────────────────────────
+// Each throws when the read itself fails: reconcileMutation treats a throw as
+// "could not look", which must not be reported as "it is not there".
+async function readTodos(targetId: string): Promise<Todo[]> {
+  const res = await fetch(`/api/todos?target_id=${encodeURIComponent(targetId)}`);
+  if (!res.ok) throw new Error(`todos read failed: ${res.status}`);
+  return (await res.json()) as Todo[];
+}
+
+async function readLogs(targetId: string): Promise<ActivityLog[]> {
+  const res = await fetch(`/api/activity-logs?target_id=${encodeURIComponent(targetId)}`);
+  if (!res.ok) throw new Error(`logs read failed: ${res.status}`);
+  return (await res.json()) as ActivityLog[];
+}
+
+async function readTargetRow(id: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`/api/targets/${id}`);
+  if (!res.ok) throw new Error(`target read failed: ${res.status}`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+async function readListMemberIds(listId: string): Promise<string[]> {
+  const res = await fetch(`/api/lists/${listId}`);
+  if (!res.ok) throw new Error(`list read failed: ${res.status}`);
+  const body = (await res.json()) as { targets?: Array<{ id: string }> };
+  return (body.targets ?? []).map((t) => t.id);
 }
 
 export const getServerSideProps: GetServerSideProps = async (ctx) => {
@@ -201,7 +229,31 @@ function TodoDetailModal({ todo, onClose, onSave }: {
       body: JSON.stringify({ title: title.trim(), description: description.trim() || null, due_date: dueDate || null }),
     });
     setSaving(false);
-    if (!res.ok) { toast.error("Failed to save"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to save"); return; }
+      // The row is the output of the write. Compare the fields that were sent,
+      // because a title-only match would accept a pre-existing identical todo.
+      const check = await reconcileMutation({
+        read: () => readTodos(todo.target_id),
+        confirm: (rows) =>
+          rows.some(
+            (t) =>
+              t.id === todo.id &&
+              t.title === title.trim() &&
+              (t.description ?? null) === (description.trim() || null) &&
+              (t.due_date ?? null) === (dueDate || null)
+          ),
+      });
+      if (check.state === "applied") {
+        onSave({ ...todo, title: title.trim(), description: description.trim() || null, due_date: dueDate || null });
+        toast.success("Todo saved (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Todo not saved — the server still has the old values");
+      } else {
+        toast.error("Could not confirm whether the todo was saved. Reload before trying again.");
+      }
+      return;
+    }
     onSave({ ...todo, title: title.trim(), description: description.trim() || null, due_date: dueDate || null });
   }
 
@@ -288,7 +340,22 @@ function LogDetailModal({ log, onClose, onSave }: {
       body: JSON.stringify({ type, body: body.trim() }),
     });
     setSaving(false);
-    if (!res.ok) { toast.error("Failed to save"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to save"); return; }
+      const check = await reconcileMutation({
+        read: () => readLogs(log.target_id),
+        confirm: (rows) => rows.some((l) => l.id === log.id && l.type === type && l.body === body.trim()),
+      });
+      if (check.state === "applied") {
+        onSave({ ...log, type, body: body.trim() });
+        toast.success("Entry saved (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Entry not saved — the server still has the old values");
+      } else {
+        toast.error("Could not confirm whether the entry was saved. Reload before trying again.");
+      }
+      return;
+    }
     onSave({ ...log, type, body: body.trim() });
   }
 
@@ -374,13 +441,45 @@ function TodoModal({ targetId, onClose, onSave }: {
   async function save() {
     if (!title.trim()) return;
     setSaving(true);
+    // What already exists, captured before the POST: without it, a pre-existing
+    // todo with the same title would pass the confirmation and "create" would
+    // report success for a row it never made.
+    const before = await readTodos(targetId)
+      .then((rows) => new Set(rows.map((r) => r.id)))
+      .catch(() => null);
     const res = await mutateFetch("/api/todos", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_id: targetId, title: title.trim(), description: description.trim() || undefined, due_date: dueDate || undefined }),
     });
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { setSaving(false); toast.error("Failed to create"); return; }
+      if (before === null) {
+        setSaving(false);
+        toast.error("Could not confirm whether the todo was created. Reload before trying again.");
+        return;
+      }
+      const knownBefore = before;
+      const check = await reconcileMutation({
+        read: () => readTodos(targetId),
+        confirm: (rows) =>
+          rows.some(
+            (t) => !knownBefore.has(t.id) && t.title === title.trim() && (t.due_date ?? null) === (dueDate || null)
+          ),
+      });
+      setSaving(false);
+      const created = check.state === "applied" ? check.snapshot?.find((t) => !knownBefore.has(t.id)) : undefined;
+      if (created) {
+        onSave(created);
+        toast.success("Todo created (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Todo not created — the server has no new todo for this contact");
+      } else {
+        toast.error("Could not confirm whether the todo was created. Reload before trying again.");
+      }
+      return;
+    }
     setSaving(false);
-    if (!res.ok) { toast.error("Failed to create"); return; }
     onSave(await res.json() as Todo);
   }
 
@@ -461,13 +560,39 @@ function LogModal({ targetId, onClose, onSave }: {
   async function save() {
     if (!body.trim()) return;
     setSaving(true);
+    const before = await readLogs(targetId)
+      .then((rows) => new Set(rows.map((r) => r.id)))
+      .catch(() => null);
     const res = await mutateFetch("/api/activity-logs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_id: targetId, type, body: body.trim() }),
     });
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { setSaving(false); toast.error("Failed to log"); return; }
+      if (before === null) {
+        setSaving(false);
+        toast.error("Could not confirm whether the entry was logged. Reload before trying again.");
+        return;
+      }
+      const knownBefore = before;
+      const check = await reconcileMutation({
+        read: () => readLogs(targetId),
+        confirm: (rows) => rows.some((l) => !knownBefore.has(l.id) && l.type === type && l.body === body.trim()),
+      });
+      setSaving(false);
+      const created = check.state === "applied" ? check.snapshot?.find((l) => !knownBefore.has(l.id)) : undefined;
+      if (created) {
+        onSave(created);
+        toast.success("Activity logged (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Entry not logged — the server has no new entry for this contact");
+      } else {
+        toast.error("Could not confirm whether the entry was logged. Reload before trying again.");
+      }
+      return;
+    }
     setSaving(false);
-    if (!res.ok) { toast.error("Failed to log"); return; }
     onSave(await res.json() as ActivityLog);
     toast.success("Activity logged");
   }
@@ -600,8 +725,27 @@ export default function ContactDetailPage({
       body: JSON.stringify({ contact_ids: [target.id] }),
     });
     setAddListLoading(false);
-    const data = await res.json();
-    if (!res.ok) { toast.error(data.error ?? "Failed to add to list"); return; }
+    const data = await res.json().catch(() => ({} as { error?: string; added?: number }));
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error(data.error ?? "Failed to add to list"); return; }
+      const listId = addListId;
+      const check = await reconcileMutation({
+        read: () => readListMemberIds(listId),
+        confirm: (members) => members.includes(target.id),
+      });
+      if (check.state === "applied") {
+        const addedList = allLists.find((l) => l.id === listId);
+        if (addedList) setMemberLists((prev) => [...prev, addedList].sort((a, b) => a.name.localeCompare(b.name)));
+        toast.success("Added to list (confirmed after a lost response)");
+        setShowAddList(false);
+        setAddListId("");
+      } else if (check.state === "not-applied") {
+        toast.error("Not added — the contact is not in that list on the server");
+      } else {
+        toast.error("Could not confirm whether the contact was added. Reload before trying again.");
+      }
+      return;
+    }
     const added = allLists.find((l) => l.id === addListId);
     if (added) setMemberLists((prev) => [...prev, added].sort((a, b) => a.name.localeCompare(b.name)));
     toast.success(data.added > 0 ? "Added to list" : "Already in this list");
@@ -617,7 +761,22 @@ export default function ContactDetailPage({
       body: JSON.stringify({ contact_ids: [target.id], dry_run: false }),
     });
     setRemovingListId(null);
-    if (!res.ok) { toast.error("Failed to remove from list"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to remove from list"); return; }
+      const check = await reconcileMutation({
+        read: () => readListMemberIds(listId),
+        confirm: (members) => !members.includes(target.id),
+      });
+      if (check.state === "applied") {
+        setMemberLists((prev) => prev.filter((l) => l.id !== listId));
+        toast.success("Removed from list (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Not removed — the contact is still in that list on the server");
+      } else {
+        toast.error("Could not confirm whether the contact was removed. Reload before trying again.");
+      }
+      return;
+    }
     setMemberLists((prev) => prev.filter((l) => l.id !== listId));
     toast.success("Removed from list");
   }
@@ -646,19 +805,64 @@ export default function ContactDetailPage({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: next }),
     });
-    if (!res.ok) { toast.error("Failed to update"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to update"); return; }
+      const check = await reconcileMutation({
+        read: () => readTodos(todo.target_id),
+        confirm: (rows) => rows.some((t) => t.id === todo.id && t.status === next),
+      });
+      if (check.state === "applied") {
+        setTodos((prev) => prev.map((t) => t.id === todo.id ? { ...t, status: next } : t));
+        toast.success("Todo updated (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Todo not updated — it is still in its previous state on the server");
+      } else {
+        toast.error("Could not confirm whether the todo was updated. Reload before trying again.");
+      }
+      return;
+    }
     setTodos((prev) => prev.map((t) => t.id === todo.id ? { ...t, status: next } : t));
   }
 
   async function deleteTodo(id: string) {
     const res = await mutateFetch(`/api/todos/${id}`, { method: "DELETE" });
-    if (!res.ok) { toast.error("Failed to delete"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to delete"); return; }
+      const check = await reconcileMutation({
+        read: () => readTodos(target.id),
+        confirm: (rows) => !rows.some((t) => t.id === id),
+      });
+      if (check.state === "applied") {
+        setTodos((prev) => prev.filter((t) => t.id !== id));
+        toast.success("Todo deleted (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Todo not deleted — it is still on the server");
+      } else {
+        toast.error("Could not confirm whether the todo was deleted. Reload before trying again.");
+      }
+      return;
+    }
     setTodos((prev) => prev.filter((t) => t.id !== id));
   }
 
   async function deleteLog(id: string) {
     const res = await mutateFetch(`/api/activity-logs?id=${id}`, { method: "DELETE" });
-    if (!res.ok) { toast.error("Failed to delete"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to delete"); return; }
+      const check = await reconcileMutation({
+        read: () => readLogs(target.id),
+        confirm: (rows) => !rows.some((l) => l.id === id),
+      });
+      if (check.state === "applied") {
+        setActivityLogs((prev) => prev.filter((l) => l.id !== id));
+        toast.success("Entry deleted (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Entry not deleted — it is still on the server");
+      } else {
+        toast.error("Could not confirm whether the entry was deleted. Reload before trying again.");
+      }
+      return;
+    }
     setActivityLogs((prev) => prev.filter((l) => l.id !== id));
   }
 
@@ -669,7 +873,25 @@ export default function ContactDetailPage({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: trimmed }),
     });
-    if (!res.ok) { toast.error("Failed to save email"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to save email"); return; }
+      // The server trims and stores empty as NULL, so compare against the
+      // normalised value rather than the raw draft.
+      const check = await reconcileMutation({
+        read: () => readTargetRow(target.id),
+        confirm: (row) => ((row.email as string | null) ?? "") === trimmed,
+      });
+      if (check.state === "applied") {
+        setEmail(trimmed);
+        setEditingEmail(false);
+        toast.success("Email saved (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Email not saved — the server still has the old value");
+      } else {
+        toast.error("Could not confirm whether the email was saved. Reload before trying again.");
+      }
+      return;
+    }
     setEmail(trimmed);
     setEditingEmail(false);
     toast.success("Email saved");
@@ -682,7 +904,23 @@ export default function ContactDetailPage({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone: trimmed }),
     });
-    if (!res.ok) { toast.error("Failed to save phone"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to save phone"); return; }
+      const check = await reconcileMutation({
+        read: () => readTargetRow(target.id),
+        confirm: (row) => ((row.phone as string | null) ?? "") === trimmed,
+      });
+      if (check.state === "applied") {
+        setPhone(trimmed);
+        setEditingPhone(false);
+        toast.success("Phone saved (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Phone not saved — the server still has the old value");
+      } else {
+        toast.error("Could not confirm whether the phone was saved. Reload before trying again.");
+      }
+      return;
+    }
     setPhone(trimmed);
     setEditingPhone(false);
     toast.success("Phone saved");
@@ -694,7 +932,23 @@ export default function ContactDetailPage({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ notes: notesDraft }),
     });
-    if (!res.ok) { toast.error("Failed to save notes"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to save notes"); return; }
+      const check = await reconcileMutation({
+        read: () => readTargetRow(target.id),
+        confirm: (row) => ((row.notes as string | null) ?? "") === notesDraft.trim(),
+      });
+      if (check.state === "applied") {
+        setNotes(notesDraft);
+        setEditingNotes(false);
+        toast.success("Notes saved (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Notes not saved — the server still has the old value");
+      } else {
+        toast.error("Could not confirm whether the notes were saved. Reload before trying again.");
+      }
+      return;
+    }
     setNotes(notesDraft);
     setEditingNotes(false);
     toast.success("Notes saved");

@@ -10,12 +10,24 @@ const TYPES = ["call", "email", "meeting", "note", "other"] as const;
  * PATCH|DELETE /api/activity-logs?id=..., but no route existed.
  */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST" && req.method !== "PATCH" && req.method !== "DELETE") {
-    res.setHeader("Allow", ["POST", "PATCH", "DELETE"]);
+  if (req.method !== "POST" && req.method !== "PATCH" && req.method !== "DELETE" && req.method !== "GET") {
+    res.setHeader("Allow", ["GET", "POST", "PATCH", "DELETE"]);
     return res.status(405).end();
   }
 
   const db = getDb();
+
+  // GET exists so a log write whose response was lost can be verified by
+  // reading the contact's entries back, not by repeating the write.
+  if (req.method === "GET") {
+    const targetId = typeof req.query.target_id === "string" ? req.query.target_id.trim() : "";
+    if (!targetId) return res.status(400).json({ error: "target_id required" });
+    return res.json(
+      db
+        .prepare("SELECT * FROM activity_logs WHERE target_id = ? ORDER BY logged_at DESC")
+        .all(targetId)
+    );
+  }
 
   if (req.method === "POST") {
     const { target_id, type, body } = req.body as {

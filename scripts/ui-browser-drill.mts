@@ -678,6 +678,61 @@ try {
         }
       }
 
+      // ── PR-15: contacts, where the read had to be added ────────────────────
+      //
+      // /api/targets had no exact filter and /api/todos and /api/activity-logs
+      // were write-only, so "did this contact get created?" could not be asked.
+      // The confirmation here is a lookup by LinkedIn URL — unique in the schema,
+      // which is what makes it a fact rather than a name match.
+      {
+        const name = "drill-lost-contact";
+        const url = "https://www.linkedin.com/in/drill-lost-contact";
+        const targetsApi = "**/api/targets**";
+        await page.route(targetsApi, async (route) => {
+          if (route.request().method() !== "POST") return route.continue();
+          await route.fetch();
+          await route.abort("failed");
+        });
+
+        await page.goto(`${base}/contacts`, { waitUntil: "domcontentloaded" });
+        const addButton = page.getByRole("button", { name: /new contact/i });
+        const found = await addButton
+          .first()
+          .waitFor({ state: "visible", timeout: 20_000 })
+          .then(() => true)
+          .catch(() => false);
+        check("PR-15 contacts: the create control is present", found);
+
+        if (found) {
+          await addButton.first().click();
+          const modal = page.locator(".modal-box");
+          await modal.getByPlaceholder("Jane Smith").fill(name);
+          await modal.getByPlaceholder("https://linkedin.com/in/...").fill(url);
+          await modal.locator('button[type="submit"]').click();
+
+          check(
+            "PR-15 contacts: a lost response is confirmed, not reported as failure",
+            await page
+              .getByText(/Contact created \(confirmed after a lost response\)/)
+              .first()
+              .waitFor({ timeout: 20_000 })
+              .then(() => true)
+              .catch(() => false),
+            JSON.stringify(await toasts(page))
+          );
+
+          await page.unroute(targetsApi).catch(() => {});
+          await page.reload({ waitUntil: "domcontentloaded" });
+          const row = page.getByText(name, { exact: true });
+          await row.first().waitFor({ timeout: 15_000 }).catch(() => {});
+          check(
+            "PR-15 contacts: exactly one contact was created",
+            (await row.count()) === 1,
+            `${await row.count()} matching row(s)`
+          );
+        }
+      }
+
       await page.close();
     }
   } catch (err) {
