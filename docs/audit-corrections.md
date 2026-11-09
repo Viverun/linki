@@ -1606,3 +1606,38 @@ reports two lists where there must be one; reporting a failed read as
 
 **Not claimed:** the clause is met at the boundary and for two flows, not
 tree-wide, and non-JSON *success* bodies remain unverified. The row stays open.
+
+## C3/PR-15 — reconciliation, second slice: a cancel that is a flag, not a status (2026-11-09)
+
+`9d8751f` put the boundary in place and wired two handlers. A ceiling of 58 is a
+number, not a plan, so this slice takes the next contiguous piece: the rest of
+`/lists` and all of `/companies`. Two things came out of it that the first slice
+did not.
+
+**A cancel is not a status change.** `cancelImport` sets `cancel_requested = 1`
+and leaves a *running* batch's status at `running`, because the batch stops at its
+next page boundary — the earlier code was right about that and the register said
+so. But the reconciliation probe is only as good as the state it reads, and the
+imports endpoint did not expose that flag. Confirming "no longer running" would
+have been wrong in both directions: a cancel accepted by the server would read as
+"did not take effect", and a batch that finished on its own would read as
+"canceled". The endpoint now returns `cancel_requested`, which is the state the
+cancel actually changes. The button also uses it — "Canceling…" and disabled —
+because an operator who can see the flag pending will not press it twice.
+
+**One page is not a pattern.** Repeating the lost-response case on `/companies`
+is the difference between "the lists page was patched" and "the boundary
+generalises": the two pages share no code except `lib/ui-mutation.ts`. The drill
+now performs a real POST on `/api/companies`, drops the response, and requires
+the client to confirm the company rather than claim failure.
+
+**Mutations.** Reverting `submit` on the companies page to the old
+`if (!res.ok) { toast.error(...) }` fails "a lost response is confirmed, not
+reported as failure" and "the dialog closes only once the server confirms" —
+while the company is created exactly once either way. That is the point worth
+recording: the wrong behaviour here is not a lost write, it is a **false report**
+about a write that happened, which is what makes an operator retry and create a
+duplicate.
+
+**State.** Five handlers wired (lists create, delete, import-cancel; companies
+create/update, delete), ceiling 58 → 55, drill 40/40.
