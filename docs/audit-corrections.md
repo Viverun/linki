@@ -1707,3 +1707,28 @@ boundary refuses to perform — so a ref guard makes the duplicate call a no-op.
 
 State: twenty-two handlers across four surfaces, ceiling 49 → 38, four new
 endpoint tests, drill 46/46.
+
+## C3/PR-15 — reconciliation, fifth slice: reads that did not exist (2026-11-09)
+
+The contacts pages write through three endpoints that could not be read back:
+`/api/targets` had no exact filter, and `/api/todos` and `/api/activity-logs` were
+write-only. Reconciliation cannot honestly report `not-applied` without a read of
+the fact that changed, so the reads were added rather than the clause being
+declared unreachable.
+
+The contact create confirms by LinkedIn URL because the schema makes it unique; a
+name is not a key, and the tests seed two rows with the same name to keep that
+from being assumed. The todo and activity-log creates capture the ids that existed
+before the POST — otherwise a pre-existing row with the same title would satisfy
+"created", which is a false positive rather than a false negative and still wrong.
+
+**An inventory that undercounted its own debt.** `tests/ui-mutation-surface.test.ts`
+keyed handlers by name, and several files hold multiple functions called `save`.
+Each cluster counted once, so the ceiling was measuring fewer handlers than
+existed. Handlers are now keyed by declaration position. The number moved
+38 → 29 with this slice, but 38 was a floor of the stricter measure, and the
+comment in the test says so; the drop is twelve wired handlers net of the
+correction, not a smaller surface.
+
+State: thirty-seven handlers across six surfaces, ceiling 29, seven new read
+tests, drill 49/49.
