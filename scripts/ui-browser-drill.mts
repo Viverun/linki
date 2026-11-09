@@ -576,6 +576,59 @@ try {
         }
       }
 
+      // ── PR-15: a create that navigates, with the response lost ─────────────
+      //
+      // The campaigns page is the third surface and the hardest of the three:
+      // its success path NAVIGATES to the new campaign, so an ambiguous outcome
+      // that is merely reported as failure leaves the operator on a list that
+      // says the campaign does not exist — while it does. The reconciliation has
+      // to find the campaign and continue, not stop.
+      {
+        const name = "drill-lost-campaign";
+        const workflowsApi = "**/api/workflows**";
+        await page.route(workflowsApi, async (route) => {
+          if (route.request().method() !== "POST") return route.continue();
+          await route.fetch();
+          await route.abort("failed");
+        });
+
+        await page.goto(`${base}/workflows`, { waitUntil: "domcontentloaded" });
+        const newButton = page.getByRole("button", { name: /new campaign/i });
+        const found = await newButton
+          .first()
+          .waitFor({ state: "visible", timeout: 20_000 })
+          .then(() => true)
+          .catch(() => false);
+        check("PR-15 campaigns: the create control is present", found);
+
+        if (found) {
+          await newButton.click();
+          const modal = page.locator(".modal-box");
+          await modal.locator("input").first().fill(name);
+          await modal.locator('button[type="submit"]').click();
+
+          const navigated = await page
+            .waitForURL((u) => /^\/workflows\/[^/]+$/.test(u.pathname), { timeout: 20_000 })
+            .then(() => true)
+            .catch(() => false);
+          check(
+            "PR-15 campaigns: a lost response still lands on the campaign that exists",
+            navigated,
+            `${page.url()} ${JSON.stringify(await toasts(page))}`
+          );
+
+          await page.unroute(workflowsApi).catch(() => {});
+          await page.goto(`${base}/workflows`, { waitUntil: "domcontentloaded" });
+          const row = page.getByText(name, { exact: true });
+          await row.first().waitFor({ timeout: 15_000 }).catch(() => {});
+          check(
+            "PR-15 campaigns: exactly one campaign was created",
+            (await row.count()) === 1,
+            `${await row.count()} matching row(s)`
+          );
+        }
+      }
+
       await page.close();
     }
   } catch (err) {

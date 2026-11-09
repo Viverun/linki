@@ -31,7 +31,7 @@ import {
   RiArrowDownSLine,
 } from "react-icons/ri";
 
-import { mutateFetch, readError } from "@/lib/ui-mutation";
+import { mutateFetch, mutationOutcome, readError, reconcileMutation } from "@/lib/ui-mutation";
 
 interface WorkflowCard {
   id: string;
@@ -160,16 +160,42 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   const activeWorkflows = workflows.filter((w) => !w.is_archived);
   const archivedWorkflows = workflows.filter((w) => w.is_archived);
 
+  /** The campaign collection, used to judge an ambiguous mutation. */
+  async function readWorkflows(): Promise<WorkflowCard[]> {
+    const res = await fetch("/api/workflows");
+    return (await res.json()) as WorkflowCard[];
+  }
+
   async function createWorkflow(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
+    const name = form.name.trim();
     const res = await mutateFetch("/api/workflows", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
     });
     setLoading(false);
-    if (!res.ok) { toast.error("Failed to create campaign"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to create campaign"); return; }
+      // The campaign may exist. Re-sending would create a second one, so find it
+      // and continue to the editor rather than claiming failure.
+      const check = await reconcileMutation({
+        read: readWorkflows,
+        confirm: (rows) => rows.some((w) => w.name === name),
+      });
+      const created = check.snapshot?.find((w) => w.name === name);
+      if (check.state === "applied" && created) {
+        toast.success("Campaign created (confirmed after a lost response)");
+        setShowModal(false);
+        router.push(`/workflows/${created.id}?setup=1`);
+      } else if (check.state === "not-applied") {
+        toast.error("Campaign not created — the server has no campaign with that name");
+      } else {
+        toast.error("Could not confirm whether the campaign was created. Reload before trying again.");
+      }
+      return;
+    }
     const { id } = await res.json();
     router.push(`/workflows/${id}?setup=1`);
   }
@@ -180,9 +206,25 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
     // already fixed once for account deletion in pages/settings.tsx.
     const res = await mutateFetch(`/api/workflows/${id}`, { method: "DELETE" });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      toast.error(err.error ?? "Could not delete this campaign");
+      if (mutationOutcome(res) === "refused") {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error ?? "Could not delete this campaign");
+        setDeleteId(null);
+        return;
+      }
+      const check = await reconcileMutation({
+        read: readWorkflows,
+        confirm: (rows) => !rows.some((w) => w.id === id),
+      });
       setDeleteId(null);
+      if (check.state === "applied") {
+        setWorkflows((prev) => prev.filter((w) => w.id !== id));
+        toast.success("Campaign deleted (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Campaign not deleted — it is still on the server");
+      } else {
+        toast.error("Could not confirm whether the campaign was deleted. Reload before trying again.");
+      }
       return;
     }
     toast.success("Campaign deleted");
@@ -192,7 +234,26 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
 
   async function duplicateWorkflow(id: string, name: string) {
     const res = await mutateFetch(`/api/workflows/${id}/duplicate`, { method: "POST" });
-    if (!res.ok) { toast.error("Failed to duplicate"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") { toast.error("Failed to duplicate"); return; }
+      // A duplicate is the most obviously non-idempotent mutation here: resending
+      // makes a second copy of a copy. Read the collection instead.
+      const copyName = `${name} (copy)`;
+      const check = await reconcileMutation({
+        read: readWorkflows,
+        confirm: (rows) => rows.some((w) => w.name === copyName),
+      });
+      const copy = check.snapshot?.find((w) => w.name === copyName);
+      if (check.state === "applied" && copy) {
+        toast.success(`"${copyName}" created (confirmed after a lost response)`);
+        router.push(`/workflows/${copy.id}`);
+      } else if (check.state === "not-applied") {
+        toast.error("Campaign not duplicated — the server has no copy");
+      } else {
+        toast.error("Could not confirm whether the campaign was duplicated. Reload before trying again.");
+      }
+      return;
+    }
     const { id: newId } = await res.json();
     toast.success(`"${name} (copy)" created`);
     router.push(`/workflows/${newId}`);
@@ -205,11 +266,32 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
       body: JSON.stringify({ is_archived: archive }),
     });
     if (!res.ok) {
-      toast.error((await readError(res)) ?? (archive ? "Could not archive this campaign" : "Could not restore this campaign"));
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? (archive ? "Could not archive this campaign" : "Could not restore this campaign"));
+        return;
+      }
+      const check = await reconcileMutation({
+        read: readWorkflows,
+        confirm: (rows) => rows.some((w) => w.id === id && Number(w.is_archived) === (archive ? 1 : 0)),
+      });
+      if (check.state === "applied") {
+        setWorkflows((prev) => prev.map((w) => w.id === id ? { ...w, is_archived: archive ? 1 : 0 } : w));
+        toast.success(archive ? "Campaign archived (confirmed after a lost response)" : "Campaign restored (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error(archive ? "Campaign not archived — it is still active" : "Campaign not restored — it is still archived");
+      } else {
+        toast.error("Could not confirm whether the campaign was changed. Reload before trying again.");
+      }
       return;
     }
     setWorkflows((prev) => prev.map((w) => w.id === id ? { ...w, is_archived: archive ? 1 : 0 } : w));
     toast.success(archive ? "Campaign archived" : "Campaign restored");
+  }
+
+  /** The run's status, used to judge an ambiguous transition. */
+  async function readRunStatus(runId: string): Promise<{ status?: string }> {
+    const res = await fetch(`/api/runs/${runId}`);
+    return (await res.json()) as { status?: string };
   }
 
   async function pauseRun(workflowId: string, runId: string) {
@@ -217,8 +299,26 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
     // as a successful pause with an optimistic row update.
     const res = await mutateFetch(`/api/runs/${runId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "paused" }) });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      toast.error(err.error ?? "Could not pause this campaign");
+      if (mutationOutcome(res) === "refused") {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error ?? "Could not pause this campaign");
+        return;
+      }
+      // The pause may have landed. Asking again would be harmless here (PATCH to
+      // the same status is an idempotent no-op) but the run row is the truth, so
+      // read it rather than assume.
+      const check = await reconcileMutation({
+        read: () => readRunStatus(runId),
+        confirm: (run) => run.status === "paused",
+      });
+      if (check.state === "applied") {
+        setWorkflows((prev) => prev.map((w) => w.id === workflowId ? { ...w, active_status: "paused" } : w));
+        toast.success("Paused (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Campaign not paused — the run is not paused");
+      } else {
+        toast.error("Could not confirm whether the campaign was paused. Reload before trying again.");
+      }
       return;
     }
     toast.success("Paused");
@@ -228,7 +328,24 @@ export default function WorkflowsPage({ initialWorkflows }: { initialWorkflows: 
   async function resumeRun(workflowId: string, runId: string) {
     const res = await mutateFetch(`/api/runs/${runId}/start`, { method: "POST" });
     if (!res.ok) {
-      toast.error((await readError(res)) ?? "Could not resume this campaign");
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? "Could not resume this campaign");
+        return;
+      }
+      // Starting a run twice could double-schedule work, so this one is read
+      // back and never re-sent.
+      const check = await reconcileMutation({
+        read: () => readRunStatus(runId),
+        confirm: (run) => run.status === "running",
+      });
+      if (check.state === "applied") {
+        setWorkflows((prev) => prev.map((w) => w.id === workflowId ? { ...w, active_status: "running" } : w));
+        toast.success("Resumed (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Campaign not resumed — the run is not running");
+      } else {
+        toast.error("Could not confirm whether the campaign was resumed. Reload before trying again.");
+      }
       return;
     }
     toast.success("Resumed");

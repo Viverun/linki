@@ -170,11 +170,11 @@ test("every handler that mutates checks .ok before reporting success", () => {
  * through, and stops this test from passing vacuously.
  */
 const RECONCILED_MINIMUM = 2;
-// Measured 2026-11-04 with five handlers wired (lists create, delete and cancel;
-// companies submit and delete). It may only go DOWN: a new handler that ignores
-// ambiguity fails here rather than adding to the count, which is the point of a
-// ceiling rather than a list.
-const UNRECONCILED_CEILING = 55;
+// Measured 2026-11-09 with eleven handlers wired (lists create/delete/import-cancel,
+// companies create-update/delete, and all six on the campaigns page). It may only
+// go DOWN: a new handler that ignores ambiguity fails here rather than adding to
+// the count, which is the point of a ceiling rather than a list.
+const UNRECONCILED_CEILING = 49;
 
 /** Every function that issues a mutating request, with its body. */
 function mutatingHandlers(): Array<{ id: string; body: string }> {
