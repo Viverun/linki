@@ -83,7 +83,15 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     const stateFilter = req.query.state as string | undefined;
     const search = req.query.search as string | undefined;
     const page = req.query.page ? Number(req.query.page) : 0;
-    const limit = 25;
+    // Reconciliation reads one mutation's targets back by id. Without this the
+    // only way to judge "did the enrol land?" would be to page the whole table
+    // and hope the row sorts inside the first 25 — which is not a read of the
+    // fact, it is a read that happens to include it.
+    const targetIds = String(req.query.target_id ?? "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+    const limit = targetIds.length > 0 ? Math.min(500, Math.max(25, targetIds.length)) : 25;
     const offset = page * limit;
 
     const conditions: string[] = ["r.workflow_id = ?", "r.status IN ('running', 'paused', 'completed')"];
@@ -128,6 +136,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
     if (search) {
       conditions.push("(t.full_name LIKE ? OR t.company LIKE ?)");
       params.push(`%${search}%`, `%${search}%`);
+    }
+    if (targetIds.length > 0) {
+      conditions.push(`rp.target_id IN (${targetIds.map(() => "?").join(",")})`);
+      params.push(...targetIds);
     }
 
     // Extra filters from FilterBar

@@ -35,7 +35,7 @@ import {
   RiErrorWarningLine,
 } from "react-icons/ri";
 
-import { mutateFetch, readError } from "@/lib/ui-mutation";
+import { mutateFetch, mutationOutcome, readError, reconcileMutation } from "@/lib/ui-mutation";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -600,6 +600,11 @@ function Wizard({
   // Workflow name editing
   const [workflowName, setWorkflowName] = useState(initialWorkflowName);
   const [editingName, setEditingName] = useState(false);
+  // Enter and blur both call saveWorkflowName, and on an ambiguous outcome the
+  // local name is only updated once reconciliation finishes — so the blur that
+  // follows the Enter would fire a *second* PUT while the first is unresolved,
+  // which is the re-send the boundary exists to avoid.
+  const nameSaveInFlight = useRef(false);
   const [nameValue, setNameValue] = useState(initialWorkflowName);
   const [nameSaving, setNameSaving] = useState(false);
 
@@ -720,22 +725,100 @@ function Wizard({
     setProspectMode("all");
   }
 
+  /**
+   * Authoritative reads used to judge an ambiguous mutation.
+   *
+   * Each throws when the read itself fails, because `reconcileMutation` treats a
+   * throw as "could not look" — which is a different answer from "it is not
+   * there", and the second is the one that tells an operator to retry.
+   */
+  async function readWorkflowRecord(): Promise<{ name?: string; prompt?: string | null }> {
+    const res = await fetch(`/api/workflows/${workflowId}`);
+    if (!res.ok) throw new Error(`workflow read failed: ${res.status}`);
+    return (await res.json()) as { name?: string; prompt?: string | null };
+  }
+
+  async function readStepRows(): Promise<Step[]> {
+    const res = await fetch(`/api/workflows/${workflowId}/steps`);
+    if (!res.ok) throw new Error(`steps read failed: ${res.status}`);
+    return (await res.json()) as Step[];
+  }
+
+  /** One run's row — for a status transition, this is the state that changed. */
+  async function readRunRow(runId: string): Promise<{ status?: string }> {
+    const res = await fetch(`/api/runs/${runId}`);
+    if (!res.ok) throw new Error(`run read failed: ${res.status}`);
+    return (await res.json()) as { status?: string };
+  }
+
+  /** This campaign's runs — for a create whose response was lost. */
+  async function readCampaignRuns(): Promise<Array<{ id: string; workflow_id: string; status: string }>> {
+    const res = await fetch("/api/runs");
+    if (!res.ok) throw new Error(`runs read failed: ${res.status}`);
+    return (await res.json()) as Array<{ id: string; workflow_id: string; status: string }>;
+  }
+
+  /**
+   * The prospect rows for specific targets, read unfiltered by the table's own
+   * view. The table's URL carries step/search/pagination, and a row outside the
+   * current page is not evidence of absence.
+   */
+  async function readProspectRows(targetIds: string[]): Promise<Prospect[]> {
+    const res = await fetch(
+      `/api/workflows/${workflowId}/prospects?target_id=${encodeURIComponent(targetIds.join(","))}&page=0`
+    );
+    if (!res.ok) throw new Error(`prospects read failed: ${res.status}`);
+    return ((await res.json()) as { prospects?: Prospect[] }).prospects ?? [];
+  }
+
   async function saveWorkflowName() {
     const trimmed = nameValue.trim();
     if (!trimmed || trimmed === workflowName) { setEditingName(false); return; }
-    setNameSaving(true);
-    const res = await mutateFetch(`/api/workflows/${workflowId}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: trimmed }),
-    });
-    if (res.ok) {
+    if (nameSaveInFlight.current) return;
+    nameSaveInFlight.current = true;
+    try {
+      setNameSaving(true);
+      const res = await mutateFetch(`/api/workflows/${workflowId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) {
+        // Before this, a refused rename was completely silent: no toast, the
+        // editor closed, and the old name came back on the next render.
+        if (mutationOutcome(res) === "refused") {
+          setNameSaving(false);
+          setEditingName(false);
+          toast.error((await readError(res)) ?? "Could not rename this campaign");
+          return;
+        }
+        // Renaming is idempotent, but the response is the only thing that says
+        // whether it landed — so read the row, do not repeat the PUT.
+        const check = await reconcileMutation({
+          read: readWorkflowRecord,
+          confirm: (w) => w.name === trimmed,
+        });
+        setNameSaving(false);
+        setEditingName(false);
+        if (check.state === "applied") {
+          setWorkflowName(trimmed);
+          onRenamed(trimmed);
+          toast.success("Renamed (confirmed after a lost response)");
+        } else if (check.state === "not-applied") {
+          toast.error("Campaign not renamed — the server still has the old name");
+        } else {
+          toast.error("Could not confirm whether the campaign was renamed. Reload before trying again.");
+        }
+        return;
+      }
       setWorkflowName(trimmed);
       onRenamed(trimmed);
+      setNameSaving(false);
+      setEditingName(false);
       toast.success("Renamed");
+    } finally {
+      nameSaveInFlight.current = false;
     }
-    setNameSaving(false);
-    setEditingName(false);
   }
 
   function toggleTarget(id: string) {
@@ -786,15 +869,40 @@ function Wizard({
     setWizardSteps((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
   }
 
-  // Save steps to DB (replaces all existing steps for this workflow)
-  async function saveStepsToDB() {
+  // Save steps to DB (replaces all existing steps for this workflow).
+  // Returns whether the save is known to have landed: the callers that report
+  // "Steps saved" and the launcher that proceeds to create a run both have to
+  // stop when it did not, and they cannot tell from a void return.
+  async function saveStepsToDB(): Promise<boolean> {
     setSaving(true);
-    // Save campaign prompt alongside steps
-    await mutateFetch(`/api/workflows/${workflowId}`, {
+    // Save campaign prompt alongside steps. Its response used to be discarded
+    // outright — a refused prompt save was invisible and the steps save below
+    // carried on as though the campaign had been fully written.
+    const promptRes = await mutateFetch(`/api/workflows/${workflowId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: campaignPrompt }),
     });
+    if (!promptRes.ok) {
+      if (mutationOutcome(promptRes) === "refused") {
+        toast.error((await readError(promptRes)) ?? "Failed to save the campaign prompt");
+        setSaving(false);
+        return false;
+      }
+      const check = await reconcileMutation({
+        read: readWorkflowRecord,
+        confirm: (w) => (w.prompt ?? "") === (campaignPrompt ?? ""),
+      });
+      if (check.state !== "applied") {
+        toast.error(
+          check.state === "not-applied"
+            ? "The campaign prompt was not saved — the server still has the old one"
+            : "Could not confirm whether the campaign prompt was saved. Reload before trying again."
+        );
+        setSaving(false);
+        return false;
+      }
+    }
     // P2-3 / NF-1. ONE non-destructive save. This used to DELETE every step and
     // re-POST it, which minted a fresh uuid per step on every save and destroyed
     // step identity — the reason everything downstream had to refer to steps by
@@ -850,13 +958,33 @@ function Wizard({
     if (!stepsRes.ok) {
       // Surface the server's own message — 409 while a run is live is the one a
       // person needs to act on, and "Failed to save" would hide it.
-      const err = await stepsRes.json().catch(() => ({} as { error?: string }));
-      toast.error(err.error ?? "Failed to save steps");
+      if (mutationOutcome(stepsRes) === "refused") {
+        toast.error((await readError(stepsRes)) ?? "Failed to save steps");
+        setSaving(false);
+        return false;
+      }
+      // The step rows are the write's own output, so compare against what was
+      // just sent rather than guessing: same step types, in the same order.
+      const expected = payload.map((row) => String(row.step_type));
+      const check = await reconcileMutation({
+        read: readStepRows,
+        confirm: (rows) => rows.length === expected.length && rows.every((row, i) => row.step_type === expected[i]),
+      });
       setSaving(false);
-      return;
+      if (check.state === "applied") {
+        toast.success("Steps saved (confirmed after a lost response)");
+        return true;
+      }
+      toast.error(
+        check.state === "not-applied"
+          ? "Steps not saved — the server still has the previous steps"
+          : "Could not confirm whether the steps were saved. Reload before trying again."
+      );
+      return false;
     }
 
     setSaving(false);
+    return true;
   }
 
   async function enrollContacts() {
@@ -870,8 +998,31 @@ function Wizard({
     });
     setLaunching(false);
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      toast.error(err.message ?? err.error ?? "Failed to enroll");
+      if (mutationOutcome(res) === "refused") {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.message ?? err.error ?? "Failed to enroll");
+        return;
+      }
+      // Enrolment is idempotent on the server (already-enrolled contacts are
+      // skipped), but the response carries the counts that say what happened,
+      // and re-sending would lie about them. Read the enrolment instead: every
+      // selected target must now be attached to this run.
+      const ids = Array.from(selectedTargetIds);
+      const check = await reconcileMutation({
+        read: () => readProspectRows(ids),
+        confirm: (rows) =>
+          ids.every((id) => rows.some((p) => p.target_id === id && p.run_id === activeRunId)),
+      });
+      if (check.state === "applied") {
+        toast.success("Enrolment confirmed after a lost response", {
+          description: "The response was lost, so the exact enrolled/skipped counts are unknown.",
+        });
+        onLaunched();
+      } else if (check.state === "not-applied") {
+        toast.error("Not enrolled — the server has no enrolment for these prospects");
+      } else {
+        toast.error("Could not confirm whether the prospects were enrolled. Reload before trying again.");
+      }
       return;
     }
     const data = await res.json();
@@ -893,7 +1044,7 @@ function Wizard({
   async function launch() {
     if (wizardSteps.length === 0) { toast.error("Add at least one step"); return; }
     if (selectedTargetIds.size === 0) { toast.error("Select at least one prospect"); return; }
-    await saveStepsToDB();
+    if (!(await saveStepsToDB())) return;
     setLaunching(true);
     const body: Record<string, unknown> = {
       workflow_id: workflowId,
@@ -902,26 +1053,84 @@ function Wizard({
       email_account_ids: Array.from(emailAccountIds),
     };
     if (prospectMode === "manual") body.target_ids = Array.from(selectedTargetIds);
+
+    // A launch creates a run, and a run is the one thing a retry must never
+    // duplicate. Recording which runs existed *before* the POST is what makes
+    // "a new run for this campaign" a fact rather than a guess: without it, an
+    // already-active run would look like the one we just created. If even that
+    // read fails, the ambiguity cannot be resolved and must be said out loud.
+    const runsBefore = await readCampaignRuns()
+      .then((rows) => new Set(rows.map((r) => r.id)))
+      .catch(() => null);
+
     const runRes = await mutateFetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    let runId: string;
     if (!runRes.ok) {
-      setLaunching(false);
-      // A 5xx here is an HTML page, so parsing is guarded: the branch must
-      // report *something* rather than throwing before the toast.
-      toast.error((await readError(runRes)) ?? "Failed to start");
-      return;
+      if (mutationOutcome(runRes) === "refused") {
+        setLaunching(false);
+        // A 5xx here is an HTML page, so parsing is guarded: the branch must
+        // report *something* rather than throwing before the toast.
+        toast.error((await readError(runRes)) ?? "Failed to start");
+        return;
+      }
+      if (runsBefore === null) {
+        setLaunching(false);
+        toast.error("Could not confirm whether the campaign was created. Check Campaigns before launching again.");
+        return;
+      }
+      const check = await reconcileMutation({
+        read: readCampaignRuns,
+        confirm: (rows) =>
+          rows.some(
+            (r) => r.workflow_id === workflowId && !runsBefore.has(r.id) && (r.status === "running" || r.status === "paused")
+          ),
+      });
+      const created = check.state === "applied" ? check.snapshot?.find((r) => !runsBefore.has(r.id)) : null;
+      if (check.state === "applied" && created) {
+        runId = created.id;
+        toast.success("Campaign created (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        setLaunching(false);
+        toast.error("Campaign not created — the server has no new run for it");
+        return;
+      } else {
+        setLaunching(false);
+        toast.error("Could not confirm whether the campaign was created. Check Campaigns before launching again.");
+        return;
+      }
+    } else {
+      runId = ((await runRes.json()) as { id: string }).id;
     }
-    const { id: runId } = await runRes.json();
+
     // The run exists but starting it can still be refused (an active run on the
     // same campaign, a dead session). "Campaign launched!" on that refusal is
     // the same false success, one step later.
     const started = await mutateFetch(`/api/runs/${runId}/start`, { method: "POST" });
     if (!started.ok) {
+      if (mutationOutcome(started) === "refused") {
+        setLaunching(false);
+        toast.error((await readError(started)) ?? "The campaign was created but could not start");
+        return;
+      }
+      // Starting twice could double-schedule work, so the run row is read to
+      // find out whether the start took, never re-sent.
+      const check = await reconcileMutation({
+        read: () => readRunRow(runId),
+        confirm: (run) => run.status === "running",
+      });
       setLaunching(false);
-      toast.error((await readError(started)) ?? "The campaign was created but could not start");
+      if (check.state === "applied") {
+        toast.success("Campaign launched! (confirmed after a lost response)");
+        onLaunched();
+      } else if (check.state === "not-applied") {
+        toast.error("The campaign was created but is not running — open it and start it again");
+      } else {
+        toast.error("Could not confirm whether the campaign started. Reload before trying again.");
+      }
       return;
     }
     setLaunching(false);
@@ -930,7 +1139,9 @@ function Wizard({
   }
 
   async function saveAndClose() {
-    await saveStepsToDB();
+    // A failed save already reported itself; "Steps saved" on top of it would be
+    // the same false success this clause is about, one layer up.
+    if (!(await saveStepsToDB())) return;
     toast.success("Steps saved");
     onClose();
   }
@@ -2781,6 +2992,22 @@ export default function WorkflowDetailPage({
     return () => clearInterval(interval);
   }, [isActive, refreshStats, refreshProspects]);
 
+  /** One run's row — the state a status transition actually changes. */
+  async function readRunRow(runId: string): Promise<{ status?: string }> {
+    const res = await fetch(`/api/runs/${runId}`);
+    if (!res.ok) throw new Error(`run read failed: ${res.status}`);
+    return (await res.json()) as { status?: string };
+  }
+
+  /** The prospect rows for given targets, independent of the table's view. */
+  async function readProspectRows(targetIds: string[]): Promise<Prospect[]> {
+    const res = await fetch(
+      `/api/workflows/${initial.id}/prospects?target_id=${encodeURIComponent(targetIds.join(","))}&page=0`
+    );
+    if (!res.ok) throw new Error(`prospects read failed: ${res.status}`);
+    return ((await res.json()) as { prospects?: Prospect[] }).prospects ?? [];
+  }
+
   async function pauseRun() {
     if (!activeRun) return;
     const res = await mutateFetch(`/api/runs/${activeRun.id}`, {
@@ -2789,8 +3016,26 @@ export default function WorkflowDetailPage({
       body: JSON.stringify({ status: "paused" }),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      toast.error(err.error ?? "Could not pause this campaign");
+      if (mutationOutcome(res) === "refused") {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error ?? "Could not pause this campaign");
+        return;
+      }
+      // PATCHing the same status is an idempotent no-op, so re-sending would be
+      // harmless — but the run row is the truth and reading it is what tells a
+      // pause that landed from one that never reached the server.
+      const check = await reconcileMutation({
+        read: () => readRunRow(activeRun.id),
+        confirm: (run) => run.status === "paused",
+      });
+      if (check.state === "applied") {
+        toast.success("Paused (confirmed after a lost response)");
+        refreshStats();
+      } else if (check.state === "not-applied") {
+        toast.error("Campaign not paused — the run is not paused");
+      } else {
+        toast.error("Could not confirm whether the campaign was paused. Reload before trying again.");
+      }
       return;
     }
     toast.success("Paused");
@@ -2801,7 +3046,23 @@ export default function WorkflowDetailPage({
     if (!activeRun) return;
     const res = await mutateFetch(`/api/runs/${activeRun.id}/start`, { method: "POST" });
     if (!res.ok) {
-      toast.error((await readError(res)) ?? "Could not resume this campaign");
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? "Could not resume this campaign");
+        return;
+      }
+      // Starting twice could double-schedule work, so this is read back.
+      const check = await reconcileMutation({
+        read: () => readRunRow(activeRun.id),
+        confirm: (run) => run.status === "running",
+      });
+      if (check.state === "applied") {
+        toast.success("Resumed (confirmed after a lost response)");
+        refreshStats();
+      } else if (check.state === "not-applied") {
+        toast.error("Campaign not resumed — the run is not running");
+      } else {
+        toast.error("Could not confirm whether the campaign was resumed. Reload before trying again.");
+      }
       return;
     }
     toast.success("Resumed");
@@ -2816,8 +3077,28 @@ export default function WorkflowDetailPage({
       body: JSON.stringify({ status: "completed" }),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      toast.error(err.error ?? "Could not stop this campaign");
+      if (mutationOutcome(res) === "refused") {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error ?? "Could not stop this campaign");
+        return;
+      }
+      // Stopping is terminal for this run. Reading the row is the only way to
+      // know whether "completed" is the state it reached, and it must never be
+      // re-sent on the strength of a lost response.
+      const check = await reconcileMutation({
+        read: () => readRunRow(activeRun.id),
+        confirm: (run) => run.status === "completed",
+      });
+      setShowStop(false);
+      if (check.state === "applied") {
+        toast.success("Campaign stopped (confirmed after a lost response)");
+        refreshStats();
+        refreshProspects();
+      } else if (check.state === "not-applied") {
+        toast.error("Campaign not stopped — the run is still active");
+      } else {
+        toast.error("Could not confirm whether the campaign was stopped. Reload before trying again.");
+      }
       return;
     }
     toast.success("Campaign stopped");
@@ -2836,9 +3117,28 @@ export default function WorkflowDetailPage({
       toast.success("Unenrolled");
       refreshProspects();
       refreshStats();
+      return;
+    }
+    if (mutationOutcome(res) === "refused") {
+      // Was a bare `await res.json()`, which throws on the HTML body a 5xx
+      // returns — and this API answers a 5xx with HTML, not JSON.
+      toast.error((await readError(res)) ?? "Failed to unenroll");
+      return;
+    }
+    // Unenrolling marks the pending tracks skipped, so the row stays and its
+    // derived state changes. Read that, rather than assume.
+    const check = await reconcileMutation({
+      read: () => readProspectRows([targetId]),
+      confirm: (rows) => rows.some((p) => p.target_id === targetId && p.run_id === runId && p.state === "skipped"),
+    });
+    if (check.state === "applied") {
+      toast.success("Unenrolled (confirmed after a lost response)");
+      refreshProspects();
+      refreshStats();
+    } else if (check.state === "not-applied") {
+      toast.error("Not unenrolled — the prospect is still active on the server");
     } else {
-      const err = await res.json();
-      toast.error(err.error ?? "Failed to unenroll");
+      toast.error("Could not confirm whether the prospect was unenrolled. Reload before trying again.");
     }
   }
 
@@ -2870,9 +3170,30 @@ export default function WorkflowDetailPage({
       toast.success("Retrying");
       refreshProspects();
       refreshStats();
-    } else {
+      return;
+    }
+    if (mutationOutcome(res) === "refused") {
       const err = await res.json().catch(() => ({}));
       toast.error(err.error ?? "Failed to retry");
+      return;
+    }
+    // A retry re-arms failed tracks, so the row stops being 'failed'. Confirming
+    // that is stronger than the 200 alone, which can also mean "blocked".
+    const check = await reconcileMutation({
+      read: () => readProspectRows([targetId]),
+      confirm: (rows) => {
+        const row = rows.find((p) => p.target_id === targetId && p.run_id === runId);
+        return !!row && (row.state === "pending" || row.state === "in_progress");
+      },
+    });
+    if (check.state === "applied") {
+      toast.success("Retrying (confirmed after a lost response)");
+      refreshProspects();
+      refreshStats();
+    } else if (check.state === "not-applied") {
+      toast.error("Not retried — the prospects are still failed on the server (a previous attempt may already have been delivered)");
+    } else {
+      toast.error("Could not confirm whether the prospects were retried. Reload before trying again.");
     }
   }
 
@@ -2886,9 +3207,27 @@ export default function WorkflowDetailPage({
       toast.success("Removed from campaign");
       refreshProspects();
       refreshStats();
+      return;
+    }
+    if (mutationOutcome(res) === "refused") {
+      toast.error((await readError(res)) ?? "Failed to remove");
+      return;
+    }
+    // Removing deletes the run_profiles row, so absence from the read is the
+    // confirmation — and it can only be trusted because the read was filtered
+    // by this target rather than paged.
+    const check = await reconcileMutation({
+      read: () => readProspectRows([targetId]),
+      confirm: (rows) => !rows.some((p) => p.target_id === targetId && p.run_id === runId),
+    });
+    if (check.state === "applied") {
+      toast.success("Removed from campaign (confirmed after a lost response)");
+      refreshProspects();
+      refreshStats();
+    } else if (check.state === "not-applied") {
+      toast.error("Not removed — the prospect is still on the server");
     } else {
-      const err = await res.json();
-      toast.error(err.error ?? "Failed to remove");
+      toast.error("Could not confirm whether the prospect was removed. Reload before trying again.");
     }
   }
 
@@ -2926,7 +3265,42 @@ export default function WorkflowDetailPage({
         )
       );
     }
-    if (!results.every((r) => r.ok)) { toast.error("Some actions failed"); return; }
+    if (!results.every((r) => r.ok)) {
+      if (!results.every((r) => mutationOutcome(r) === "refused")) {
+        // One request in the batch may have landed while another was lost, so
+        // "Some actions failed" is a claim about a set nobody observed. Read
+        // the targets back and report the state they are actually in.
+        const check = await reconcileMutation({
+          read: () => readProspectRows(targetIds),
+          confirm: (rows) =>
+            action === "remove"
+              ? targetIds.every((id) => !rows.some((p) => p.target_id === id))
+              : action === "unenroll"
+              ? targetIds.every((id) => rows.some((p) => p.target_id === id && p.state === "skipped"))
+              : targetIds.every((id) => {
+                  const row = rows.find((p) => p.target_id === id);
+                  return !!row && row.state !== "failed";
+                }),
+        });
+        setSelected(new Set());
+        refreshProspects();
+        refreshStats();
+        if (check.state === "applied") {
+          toast.success(`${action === "remove" ? "Removed" : action === "unenroll" ? "Unenrolled" : "Retried"} ${targetIds.length} prospect${targetIds.length !== 1 ? "s" : ""} (confirmed after a lost response)`);
+        } else if (check.state === "not-applied") {
+          toast.error(
+            action === "retry"
+              ? "The retry did not take — the prospects are still failed (a previous attempt may already have been delivered)"
+              : `Some actions did not take — the prospects are not ${action === "remove" ? "removed" : "unenrolled"} on the server`
+          );
+        } else {
+          toast.error("Could not confirm whether the actions took effect. Reload before trying again.");
+        }
+        return;
+      }
+      toast.error("Some actions failed");
+      return;
+    }
     if (action === "retry") {
       // Same contract change as retryProspect: a 200 can carry blocked tracks.
       const bodies = await Promise.all(results.map((r) => r.json().catch(() => ({}))));

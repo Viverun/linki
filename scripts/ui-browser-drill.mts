@@ -618,13 +618,62 @@ try {
           );
 
           await page.unroute(workflowsApi).catch(() => {});
+
+          // ── PR-15: the same ambiguity on the campaign detail page ────────
+          //
+          // The detail page's writes are a different shape again: a rename
+          // changes a single field on a row the page is already showing, and the
+          // old code discarded the response entirely — a refused rename closed
+          // the editor and said nothing. The lost-response case must end with
+          // the page showing the new name, not with a silent reversion.
+          const renamedName = `${name}-renamed`;
+          const workflowPut = "**/api/workflows/*";
+          await page.route(workflowPut, async (route) => {
+            if (route.request().method() !== "PUT") return route.continue();
+            await route.fetch();
+            await route.abort("failed");
+          });
+
+          const renameButton = page.locator('button[title="Click to rename"]');
+          const canRename = await renameButton
+            .first()
+            .waitFor({ state: "visible", timeout: 20_000 })
+            .then(() => true)
+            .catch(() => false);
+          check("PR-15 detail: the rename control is present", canRename);
+
+          if (canRename) {
+            await renameButton.first().click();
+            const renameInput = page.locator("input.input-xs").first();
+            await renameInput.waitFor({ state: "visible", timeout: 10_000 });
+            await renameInput.fill(renamedName);
+            await renameInput.press("Enter");
+
+            check(
+              "PR-15 detail: a lost rename is confirmed, not reported as failure",
+              await page
+                .getByText(/Renamed \(confirmed after a lost response\)/)
+                .first()
+                .waitFor({ timeout: 20_000 })
+                .then(() => true)
+                .catch(() => false),
+              JSON.stringify(await toasts(page))
+            );
+          }
+
+          await page.unroute(workflowPut).catch(() => {});
           await page.goto(`${base}/workflows`, { waitUntil: "domcontentloaded" });
-          const row = page.getByText(name, { exact: true });
+          const row = page.getByText(canRename ? renamedName : name, { exact: true });
           await row.first().waitFor({ timeout: 15_000 }).catch(() => {});
           check(
             "PR-15 campaigns: exactly one campaign was created",
             (await row.count()) === 1,
             `${await row.count()} matching row(s)`
+          );
+          check(
+            "PR-15 detail: the lost-response rename survived a reload",
+            (await page.getByText(name, { exact: true }).count()) === 0,
+            `old name still present: ${JSON.stringify(await toasts(page))}`
           );
         }
       }
