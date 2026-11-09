@@ -7,7 +7,7 @@ import { requirePageSession } from "@/lib/page-auth";
 import { toast } from "sonner";
 import { RiAddLine, RiDeleteBinLine, RiBuildingLine, RiGlobalLine } from "react-icons/ri";
 
-import { mutateFetch, readError } from "@/lib/ui-mutation";
+import { mutateFetch, mutationOutcome, readError, reconcileMutation } from "@/lib/ui-mutation";
 
 interface Company {
   id: string;
@@ -46,11 +46,17 @@ export default function CompaniesPage({ initialCompanies }: { initialCompanies: 
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
 
-  async function refresh() {
-    // full=1 + no paging → full company rows as a single list (page does its own search/filter)
+  // full=1 + no paging → full company rows as a single list (page does its own
+  // search/filter). Shared with the reconciliation path so "what the page shows"
+  // and "what the reconcile confirms against" cannot drift.
+  async function readCompanies(): Promise<Company[]> {
     const res = await fetch("/api/companies?full=1");
     const data = await res.json();
-    setCompanies(data.companies ?? data);
+    return data.companies ?? data;
+  }
+
+  async function refresh() {
+    setCompanies(await readCompanies());
   }
 
   function openCreate() {
@@ -89,7 +95,33 @@ export default function CompaniesPage({ initialCompanies }: { initialCompanies: 
       ? await mutateFetch(`/api/companies/${editId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       : await mutateFetch("/api/companies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     setLoading(false);
-    if (!res.ok) { toast.error((await readError(res)) ?? "Failed"); return; }
+    if (!res.ok) {
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? "Failed");
+        return;
+      }
+      // The write may have landed. Re-read rather than re-send: a second create
+      // is a duplicate company, and a second update may overwrite a newer edit.
+      const check = await reconcileMutation({
+        read: readCompanies,
+        confirm: (rows) =>
+          editId
+            ? rows.some((c) => c.id === editId && c.name === body.name)
+            : rows.some((c) => c.name === body.name),
+      });
+      if (check.snapshot) setCompanies(check.snapshot);
+      if (check.state === "applied") {
+        toast.success(
+          editId ? "Company updated (confirmed after a lost response)" : "Company created (confirmed after a lost response)"
+        );
+        setShowModal(false);
+      } else if (check.state === "not-applied") {
+        toast.error(editId ? "Company not updated — the server has the old values" : "Company not created — the server has no such company");
+      } else {
+        toast.error("Could not confirm whether the company was saved. Reload before trying again.");
+      }
+      return;
+    }
     toast.success(editId ? "Company updated" : "Company created");
     setShowModal(false);
     refresh();
@@ -99,8 +131,22 @@ export default function CompaniesPage({ initialCompanies }: { initialCompanies: 
     if (!confirm("Delete this company? Contacts will be unlinked but not deleted.")) return;
     const res = await mutateFetch(`/api/companies/${id}`, { method: "DELETE" });
     if (!res.ok) {
-      const err = await res.json().catch(() => null);
-      toast.error(err?.error ?? "Could not delete this company");
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? "Could not delete this company");
+        return;
+      }
+      const check = await reconcileMutation({
+        read: readCompanies,
+        confirm: (rows) => !rows.some((c) => c.id === id),
+      });
+      if (check.snapshot) setCompanies(check.snapshot);
+      if (check.state === "applied") {
+        toast.success("Company deleted (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Company not deleted — it is still on the server");
+      } else {
+        toast.error("Could not confirm whether the company was deleted. Reload before trying again.");
+      }
       return;
     }
     toast.success("Deleted");

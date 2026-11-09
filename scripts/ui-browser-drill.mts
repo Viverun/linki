@@ -523,6 +523,59 @@ try {
         );
       }
 
+      // ── PR-15: the same ambiguity on another page ──────────────────────────
+      //
+      // One page's create flow could be a special case in the page rather than a
+      // property of the boundary. The companies page shares nothing with /lists
+      // but the boundary, so repeating the lost-response case here is what makes
+      // the claim "the pattern generalises" rather than "one page was patched".
+      {
+        const name = "drill-lost-company";
+        const companiesApi = "**/api/companies**";
+        await page.route(companiesApi, async (route) => {
+          if (route.request().method() !== "POST") return route.continue();
+          await route.fetch();
+          await route.abort("failed");
+        });
+
+        await page.goto(`${base}/companies`, { waitUntil: "domcontentloaded" });
+        const addButton = page.getByRole("button", { name: /add company/i });
+        const found = await addButton
+          .first()
+          .waitFor({ state: "visible", timeout: 20_000 })
+          .then(() => true)
+          .catch(() => false);
+        check("PR-15 companies: the create control is present", found);
+
+        if (found) {
+          await addButton.click();
+          const modal = page.locator(".modal-box");
+          await modal.locator("input").first().fill(name);
+          await modal.locator('button[type="submit"]').click();
+
+          check(
+            "PR-15 companies: a lost response is confirmed, not reported as failure",
+            await page
+              .getByText(/Company created \(confirmed after a lost response\)/)
+              .waitFor({ timeout: 20_000 })
+              .then(() => true)
+              .catch(() => false),
+            JSON.stringify(await toasts(page))
+          );
+          check("PR-15 companies: the dialog closes only once the server confirms", !(await modal.isVisible()));
+
+          await page.unroute(companiesApi).catch(() => {});
+          await page.reload({ waitUntil: "domcontentloaded" });
+          const row = page.getByText(name, { exact: true });
+          await row.first().waitFor({ timeout: 15_000 }).catch(() => {});
+          check(
+            "PR-15 companies: exactly one company was created",
+            (await row.count()) === 1,
+            `${await row.count()} matching row(s)`
+          );
+        }
+      }
+
       await page.close();
     }
   } catch (err) {

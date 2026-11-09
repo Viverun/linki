@@ -11,7 +11,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
   const db = getDb();
 
   const jobs = db.prepare(`
-    SELECT li.id, li.list_id, l.name AS list_name, li.status, li.phase,
+    SELECT li.id, li.list_id, l.name AS list_name, li.status, li.cancel_requested, li.phase,
            li.page, li.total_pages, li.count, li.total, li.imported, li.skipped, li.error,
            li.scheduled_for, li.start_page, li.batch_index, li.started_at, li.finished_at
     FROM list_imports li

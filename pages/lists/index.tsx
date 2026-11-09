@@ -36,6 +36,8 @@ interface ImportJob {
   batch_index: number;
   started_at: string;
   finished_at: string | null;
+  /** 1 once a cancel has been accepted; a running batch stops at its next page. */
+  cancel_requested?: number;
 }
 
 export const getServerSideProps: GetServerSideProps = async (ctx) => {
@@ -100,7 +102,25 @@ export default function ListsPage({ initialLists }: { initialLists: List[] }) {
     // still writing rows.
     const res = await mutateFetch(`/api/imports/${id}/cancel`, { method: "POST" });
     if (!res.ok) {
-      toast.error((await readError(res)) ?? "Could not cancel this import");
+      if (mutationOutcome(res) === "refused") {
+        toast.error((await readError(res)) ?? "Could not cancel this import");
+        return;
+      }
+      // A running batch keeps status "running" until it reaches a page boundary,
+      // so the flag the cancel sets is the state to read back — not the status.
+      const check = await reconcileMutation({
+        read: async () => (await fetch("/api/imports")).json() as Promise<{ jobs?: ImportJob[] }>,
+        confirm: (body) =>
+          (body.jobs ?? []).some((j) => j.id === id && (j.cancel_requested === 1 || j.status === "canceled")),
+      });
+      if (check.snapshot?.jobs) setJobs(check.snapshot.jobs);
+      if (check.state === "applied") {
+        toast.success("Import canceling (confirmed after a lost response)");
+      } else if (check.state === "not-applied") {
+        toast.error("Cancel did not take effect — the import is still scheduled or running");
+      } else {
+        toast.error("Could not confirm whether the import was canceled. Reload before trying again.");
+      }
       return;
     }
     toast.success("Import canceled");
@@ -249,10 +269,12 @@ export default function ListsPage({ initialLists }: { initialLists: List[] }) {
                     </span>
                   </div>
                   <button
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-error/10 text-error border border-error/20 hover:bg-error/20 transition-colors shrink-0"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-error/10 text-error border border-error/20 hover:bg-error/20 transition-colors shrink-0 disabled:opacity-50"
                     onClick={() => cancelImport(j.id)}
+                    disabled={j.cancel_requested === 1}
+                    title={j.cancel_requested === 1 ? "Stopping at the next page boundary" : undefined}
                   >
-                    <RiCloseLine size={12} /> Cancel
+                    <RiCloseLine size={12} /> {j.cancel_requested === 1 ? "Canceling…" : "Cancel"}
                   </button>
                 </div>
               );
