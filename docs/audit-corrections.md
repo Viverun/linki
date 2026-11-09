@@ -1641,3 +1641,32 @@ duplicate.
 
 **State.** Five handlers wired (lists create, delete, import-cancel; companies
 create/update, delete), ceiling 58 → 55, drill 40/40.
+
+## C3/PR-15 — reconciliation, third slice: confirming is not finishing (2026-11-09)
+
+The first two slices both ended a successful reconcile by closing a dialog and
+staying on the page. That was true of `/lists` and `/companies` and it was not a
+design decision, so it was not tested. `/workflows` is where it stops being true:
+its create success path navigates to the campaign's editor.
+
+The consequence is specific. Report an unknown outcome as failure there and the
+operator is left on a list that says the campaign does not exist, while it does
+and is already openable. The natural response to "failed" is to try again, and a
+second attempt creates a second campaign. So on this page reconciliation cannot
+stop at confirming the write — it has to find the created row and continue to it,
+which is what `createWorkflow` now does (by name, from the re-read collection).
+
+The drill checks the destination rather than the toast. A toast assertion passes
+for a page that confirmed the write and then went nowhere, which is precisely the
+bug this slice is about; asserting `/workflows/<id>` does not.
+
+Six handlers on the page: create and duplicate (non-idempotent — re-sending is a
+duplicate, and for duplicate a copy of a copy), archive/restore and delete
+(judged against the collection), pause and resume (judged against the run row,
+which is what the transition actually changes).
+
+Mutation: reverting the create branch to the old failure report fails "a lost
+response still lands on the campaign that exists" and nothing else, because the
+campaign is created either way. 42/43.
+
+State: eleven handlers wired across three pages, ceiling 55 → 49, drill 43/43.
