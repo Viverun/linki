@@ -878,7 +878,7 @@ via `.git/info/exclude` (identity-checked by preflight, not counted).
 | `9d8751f` (PR-15 reconciliation) + docs `8c6f87a` | 756 | `41848655888` | 730 | `true` |
 | `cffa852` (reconciliation, second slice) + docs `d6468a6` | 756 | `42598583197` | 730 | `true` |
 | `d95613f` (reconciliation, third slice) + docs `4f34e08` | 756 | `42635852402` | 730 | `true` |
-| `1f5b3fe` (reconciliation, fourth slice) + this docs head | 760 | **Pending** — appended when the run on this head completes. Expected **760 − 26 = 734**. | — | — |
+| `1f5b3fe` (reconciliation, fourth slice) + docs `76af536` | 760 | `42641986215` | 734 | `true` |
 
 The ledger stops at the head above. Later commits touch this document only; a
 docs-only head is not separately ledgered unless it changes behaviour or the test
