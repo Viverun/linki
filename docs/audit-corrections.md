@@ -1670,3 +1670,40 @@ response still lands on the campaign that exists" and nothing else, because the
 campaign is created either way. 42/43.
 
 State: eleven handlers wired across three pages, ceiling 55 → 49, drill 43/43.
+
+## C3/PR-15 — reconciliation, fourth slice: reads that could not answer (2026-11-09)
+
+The campaign detail page holds eleven of the remaining handlers, and two of them
+showed that the boundary's *inputs* were the weak part, not its logic.
+
+**A paged read cannot confirm absence.** The prospects endpoint returns 25 rows
+per page, ordered by state and name, and the page's own view narrows it further by
+step, search and filters. Using it to judge "did this enrolment land?" would make
+`not-applied` mean "not on page 0" — and `not-applied` is the one answer that
+tells an operator it is safe to retry. The endpoint now accepts `target_id`
+(single or comma-separated), so the four prospect handlers are judged against the
+rows they actually touched. The test includes a target that sorts outside page 0
+on purpose; without that control the filter test would pass on an unfiltered
+endpoint.
+
+**A launch is two writes and the first one can duplicate.** `launch()` POSTs a
+run, then starts it. If the POST's response is lost, a retry creates a second
+run. Reconciliation therefore records the run ids that existed before the POST
+and confirms a new run for this campaign — and then *continues to the start step*,
+because a campaign confirmed created but not started is a launch the operator
+believes in and the runner does not. If the pre-read fails, novelty cannot be
+established and the UI says so instead of guessing.
+
+**Two false successes above the handler.** `saveStepsToDB` discarded the prompt
+PUT's response entirely, and `saveAndClose` toasted "Steps saved" whether or not
+the save had landed. The second is the original PR-15 defect one layer up: the
+handler is correct and the caller reports success anyway. The save now returns
+whether it is known to have landed, and both callers respect it.
+
+**An unintended re-send.** Pressing Enter in the rename field calls the save; the
+input then unmounts, and its blur calls the save again while the first is still
+unresolved. On an ambiguous outcome that is a second PUT — the exact re-send the
+boundary refuses to perform — so a ref guard makes the duplicate call a no-op.
+
+State: twenty-two handlers across four surfaces, ceiling 49 → 38, four new
+endpoint tests, drill 46/46.
