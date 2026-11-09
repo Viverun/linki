@@ -860,7 +860,7 @@ via `.git/info/exclude` (identity-checked by preflight, not counted).
 | `7114276` (browser drill) + docs `78cfd72` | 748 | `41845614814` | 722 | `true` |
 | `9d8751f` (PR-15 reconciliation) + docs `8c6f87a` | 756 | `41848655888` | 730 | `true` |
 | `cffa852` (reconciliation, second slice) + docs `d6468a6` | 756 | `42598583197` | 730 | `true` |
-| `d95613f` (reconciliation, third slice) + this docs head | 756 | **Pending** — appended when the run on this head completes. Expected **756 − 26 = 730**; no new tests, so the count is unchanged. | — | — |
+| `d95613f` (reconciliation, third slice) + docs `4f34e08` | 756 | `42635852402` | 730 | `true` |
 
 The ledger stops at the head above. Later commits touch this document only; a
 docs-only head is not separately ledgered unless it changes behaviour or the test
